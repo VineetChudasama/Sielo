@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">Sielo</string>
+    <string name="search_hint">Search songs, artists, albums...</string>
+    <string name="tab_explore">Explore</string>
+    <string name="tab_library">Library</string>
+    <string name="tab_favorites">Favorites</string>
+    <string name="now_playing">Now Playing</string>
+    <string name="lyrics">Lyrics</string>
+    <string name="queue">Queue</string>
+</resources>
