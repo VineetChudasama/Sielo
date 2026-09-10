@@ -21,6 +21,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.activity.compose.BackHandler
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.sielo.music.ui.components.MiniPlayerIsland
 import com.sielo.music.ui.components.SieloBottomBar
@@ -53,13 +55,32 @@ class MainActivity : ComponentActivity() {
         setContent {
             SieloTheme {
                 val navController = rememberNavController()
+                val navBackStackEntry by navController.currentBackStackEntryAsState()
+                val currentRoute = navBackStackEntry?.destination?.route
                 val playbackState by playerViewModel.playbackState.collectAsState()
                 var isPlayerExpanded by remember { mutableStateOf(false) }
+
+                // System back press handles closing full-screen player first
+                BackHandler(enabled = isPlayerExpanded) {
+                    isPlayerExpanded = false
+                }
+
+                // If player is not expanded, back press falls back to previous tab/screen sequentially
+                BackHandler(enabled = !isPlayerExpanded && navController.previousBackStackEntry != null) {
+                    navController.popBackStack()
+                }
 
                 Scaffold(
                     containerColor = ObsidianBlack,
                     bottomBar = {
-                        SieloBottomBar(navController = navController)
+                        SieloBottomBar(
+                            navController = navController,
+                            onTabSelected = {
+                                if (isPlayerExpanded) {
+                                    isPlayerExpanded = false
+                                }
+                            }
+                        )
                     }
                 ) { innerPadding ->
                     Box(
@@ -92,7 +113,10 @@ class MainActivity : ComponentActivity() {
                             MiniPlayerIsland(
                                 playbackState = playbackState,
                                 onTogglePlay = { playerViewModel.togglePlayPause() },
+                                onToggleMute = { playerViewModel.toggleMute() },
+                                onSkipPrevious = { playerViewModel.skipPrevious() },
                                 onSkipNext = { playerViewModel.skipNext() },
+                                onSeek = { playerViewModel.seekTo(it) },
                                 onClick = { isPlayerExpanded = true },
                                 modifier = Modifier
                                     .align(Alignment.BottomCenter)

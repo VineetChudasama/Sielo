@@ -6,6 +6,8 @@ import com.sielo.music.core.audio.PlayerManager
 import com.sielo.music.core.database.dao.FavoriteTrackDao
 import com.sielo.music.core.database.entity.FavoriteTrackEntity
 import com.sielo.music.core.network.innertube.InnerTubeClient
+import com.sielo.music.core.network.models.ArtistDetails
+import com.sielo.music.core.network.models.SieloArtist
 import com.sielo.music.core.network.models.SieloTrack
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
@@ -34,6 +36,15 @@ class SearchViewModel @Inject constructor(
     private val _searchResults = MutableStateFlow<List<SieloTrack>>(emptyList())
     val searchResults: StateFlow<List<SieloTrack>> = _searchResults.asStateFlow()
 
+    private val _artistResults = MutableStateFlow<List<SieloArtist>>(emptyList())
+    val artistResults: StateFlow<List<SieloArtist>> = _artistResults.asStateFlow()
+
+    private val _selectedArtist = MutableStateFlow<ArtistDetails?>(null)
+    val selectedArtist: StateFlow<ArtistDetails?> = _selectedArtist.asStateFlow()
+
+    private val _isArtistLoading = MutableStateFlow(false)
+    val isArtistLoading: StateFlow<Boolean> = _isArtistLoading.asStateFlow()
+
     private val _isSearching = MutableStateFlow(false)
     val isSearching: StateFlow<Boolean> = _isSearching.asStateFlow()
 
@@ -47,6 +58,7 @@ class SearchViewModel @Inject constructor(
         searchJob?.cancel()
         if (query.isBlank()) {
             _searchResults.value = emptyList()
+            _artistResults.value = emptyList()
             _isSearching.value = false
             return
         }
@@ -70,6 +82,7 @@ class SearchViewModel @Inject constructor(
     fun clearSearch() {
         _searchQuery.value = ""
         _searchResults.value = emptyList()
+        _artistResults.value = emptyList()
         _isSearching.value = false
         searchJob?.cancel()
     }
@@ -77,11 +90,46 @@ class SearchViewModel @Inject constructor(
     private fun executeSearch(query: String, category: String) {
         viewModelScope.launch {
             _isSearching.value = true
-            val searchQueryFormatted = if (category == "All") query else "$query $category"
-            val results = innerTubeClient.search(searchQueryFormatted)
-            _searchResults.value = results
+            when (category) {
+                "Artists" -> {
+                    val artists = innerTubeClient.searchArtists(query)
+                    _artistResults.value = artists
+                    _searchResults.value = emptyList()
+                }
+                "Songs" -> {
+                    val tracks = innerTubeClient.search(query)
+                    _searchResults.value = tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+                    _artistResults.value = emptyList()
+                }
+                else -> { // "All" or other
+                    val tracks = innerTubeClient.search(query)
+                    val artists = innerTubeClient.searchArtists(query)
+                    _searchResults.value = tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+                    _artistResults.value = artists
+                }
+            }
             _isSearching.value = false
         }
+    }
+
+    fun openArtist(artist: SieloArtist) {
+        viewModelScope.launch {
+            _isArtistLoading.value = true
+            _selectedArtist.value = ArtistDetails(
+                id = artist.id,
+                name = artist.name,
+                imageUrl = artist.imageUrl
+            )
+            val fullDetails = innerTubeClient.getArtistDetails(artist.id, artist.imageUrl)
+            if (fullDetails != null) {
+                _selectedArtist.value = fullDetails
+            }
+            _isArtistLoading.value = false
+        }
+    }
+
+    fun closeArtist() {
+        _selectedArtist.value = null
     }
 
     fun playTrack(track: SieloTrack, queue: List<SieloTrack>) {

@@ -1,5 +1,6 @@
 package com.sielo.music.ui.components
 
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -27,7 +28,9 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -46,10 +49,13 @@ import coil.compose.AsyncImage
 import com.sielo.music.ui.theme.AccentCoral
 import com.sielo.music.ui.theme.BorderGlass
 import com.sielo.music.ui.theme.ObsidianBlack
+import com.sielo.music.ui.theme.PaletteSlateBlue
 import com.sielo.music.ui.theme.SurfaceDark
 import com.sielo.music.ui.theme.SurfaceElevated
 import com.sielo.music.ui.theme.TextPrimary
 import com.sielo.music.ui.theme.TextSecondary
+import kotlinx.coroutines.isActive
+import kotlin.math.abs
 import kotlin.math.sin
 
 @Composable
@@ -120,15 +126,37 @@ fun TactilePlayButton(
 @Composable
 fun WaveformSeekbar(
     progress: Float,
+    isPlaying: Boolean,
     onSeek: (Float) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val barCount = 45
+    val barCount = 46
+
+    // Using Animatable to preserve phase continuously when paused so waveform freezes in place without jumping or morphing
+    val phaseAnimatable = remember { Animatable(0f) }
+
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) {
+            while (true) {
+                phaseAnimatable.animateTo(
+                    targetValue = phaseAnimatable.value + (2f * Math.PI.toFloat()),
+                    animationSpec = tween(durationMillis = 2800, easing = LinearEasing)
+                )
+            }
+        }
+    }
+
+    val currentPhase = phaseAnimatable.value
+
+    // Uniform rhythmic studio audio bars
+    val rhythmPattern = remember {
+        floatArrayOf(0.42f, 0.68f, 0.92f, 0.60f, 0.85f, 1.0f, 0.72f, 0.52f, 0.88f, 0.65f, 0.78f, 0.48f)
+    }
 
     Canvas(
         modifier = modifier
             .fillMaxWidth()
-            .height(44.dp)
+            .height(48.dp)
             .pointerInput(Unit) {
                 detectTapGestures { offset ->
                     val newProgress = (offset.x / size.width).coerceIn(0f, 1f)
@@ -145,20 +173,35 @@ fun WaveformSeekbar(
         val width = size.width
         val height = size.height
         val barWidth = width / barCount
+        val barDrawWidth = barWidth * 0.58f
 
         for (i in 0 until barCount) {
             val fraction = i.toFloat() / barCount
-            val waveHeight = ((sin(i * 0.45) * 0.35 + 0.65) * height).toFloat()
+
+            // Symmetrical envelope: balanced and uniform across the seeking line
+            val normPos = i.toFloat() / (barCount - 1)
+            val distFromCenter = abs(normPos - 0.5f) * 2f
+            val envelope = (1f - 0.35f * distFromCenter * distFromCenter).coerceIn(0.6f, 1f)
+
+            // Base structured height from studio rhythm pattern
+            val baseRhythm = rhythmPattern[i % rhythmPattern.size]
+            val baseFraction = 0.28f + (0.62f * baseRhythm * envelope)
+
+            // Dynamic wave ripple modulation (freezes seamlessly when paused)
+            val waveMod = sin(i * 0.40f + currentPhase) * 0.16f
+            val totalFraction = (baseFraction + waveMod).coerceIn(0.18f, 1f)
+
+            val waveHeight = (totalFraction * (height - 8.dp.toPx())).coerceAtLeast(6.dp.toPx())
             val isPassed = fraction <= progress
 
-            val x = i * barWidth + (barWidth * 0.2f)
+            val x = i * barWidth + (barWidth - barDrawWidth) / 2
             val y = (height - waveHeight) / 2
 
             drawRoundRect(
-                color = if (isPassed) AccentCoral else Color(0x33FFFFFF),
+                color = if (isPassed) AccentCoral else PaletteSlateBlue.copy(alpha = 0.35f),
                 topLeft = Offset(x, y),
-                size = Size(barWidth * 0.65f, waveHeight),
-                cornerRadius = CornerRadius(4f, 4f)
+                size = Size(barDrawWidth, waveHeight),
+                cornerRadius = CornerRadius(barDrawWidth / 2, barDrawWidth / 2)
             )
         }
     }
@@ -170,16 +213,18 @@ fun RotatingVinylCard(
     isPlaying: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val infiniteTransition = rememberInfiniteTransition(label = "vinyl")
-    val rotation by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 10000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "vinylRotation"
-    )
+    val rotationAngle = remember { Animatable(0f) }
+
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) {
+            while (isActive) {
+                rotationAngle.animateTo(
+                    targetValue = rotationAngle.value + 360f,
+                    animationSpec = tween(durationMillis = 12000, easing = LinearEasing)
+                )
+            }
+        }
+    }
 
     Box(
         modifier = modifier.size(280.dp),
@@ -201,7 +246,7 @@ fun RotatingVinylCard(
             contentScale = ContentScale.Crop,
             modifier = Modifier
                 .size(130.dp)
-                .rotate(if (isPlaying) rotation else 0f)
+                .rotate(rotationAngle.value % 360f)
                 .clip(CircleShape)
                 .border(2.dp, ObsidianBlack, CircleShape)
         )

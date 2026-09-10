@@ -1,11 +1,20 @@
 package com.sielo.music.ui.screens
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -13,11 +22,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.SkipNext
@@ -41,15 +53,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.sielo.music.ui.components.HiFiTimeDisplay
 import com.sielo.music.ui.components.RotatingVinylCard
 import com.sielo.music.ui.components.TactilePlayButton
-import com.sielo.music.ui.components.WaveformSeekbar
+import com.sielo.music.ui.components.WaveformProgressBar
 import com.sielo.music.ui.theme.AccentCoral
 import com.sielo.music.ui.theme.BorderGlass
 import com.sielo.music.ui.theme.ObsidianBlack
+import com.sielo.music.ui.theme.PaletteCream
+import com.sielo.music.ui.theme.PaletteSlateBlue
 import com.sielo.music.ui.theme.SurfaceDark
-import com.sielo.music.ui.theme.TextMuted
 import com.sielo.music.ui.theme.TextPrimary
 import com.sielo.music.ui.theme.TextSecondary
 import com.sielo.music.viewmodel.PlayerViewModel
@@ -66,19 +78,34 @@ fun PlayerScreen(
 
     val track = playbackState.currentTrack ?: return
     var showLyrics by remember { mutableStateOf(false) }
+    var isQueueOpen by remember { mutableStateOf(false) }
 
-    val progress = if (playbackState.durationMs > 0) {
-        (playbackState.currentPositionMs.toFloat() / playbackState.durationMs.toFloat()).coerceIn(0f, 1f)
-    } else 0f
+    // Step-by-step back handling:
+    // 1. If separated Queue screen is open -> close Queue screen and return to Player screen
+    // 2. Else if Lyrics view is active -> dismiss Lyrics view (return to Vinyl)
+    // 3. Else -> collapse the player screen to the persistent mini player
+    BackHandler(enabled = isQueueOpen) {
+        isQueueOpen = false
+    }
+
+    BackHandler(enabled = !isQueueOpen && showLyrics) {
+        showLyrics = false
+    }
+
+    BackHandler(enabled = !isQueueOpen && !showLyrics) {
+        onClose()
+    }
 
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(ObsidianBlack)
-            .padding(horizontal = 24.dp, vertical = 28.dp)
     ) {
+        // Main Music Player Display Screen
         Column(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 24.dp, vertical = 28.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceBetween
         ) {
@@ -97,22 +124,38 @@ fun PlayerScreen(
                 }
 
                 Text(
-                    text = "Now Playing",
+                    text = if (showLyrics) "Synchronized Lyrics" else "Now Playing",
                     color = TextPrimary,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold
                 )
 
-                IconButton(onClick = { showLyrics = !showLyrics }) {
-                    Icon(
-                        imageVector = Icons.Default.GraphicEq,
-                        contentDescription = "Lyrics",
-                        tint = if (showLyrics) AccentCoral else TextSecondary
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Lyrics Toggle Button
+                    IconButton(onClick = {
+                        showLyrics = !showLyrics
+                    }) {
+                        Icon(
+                            imageVector = Icons.Default.GraphicEq,
+                            contentDescription = "Lyrics",
+                            tint = if (showLyrics) AccentCoral else TextSecondary
+                        )
+                    }
+
+                    // Separated Up Next Queue Button
+                    IconButton(onClick = {
+                        isQueueOpen = true
+                    }) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.QueueMusic,
+                            contentDescription = "Queue",
+                            tint = if (isQueueOpen) AccentCoral else TextSecondary
+                        )
+                    }
                 }
             }
 
-            // Center Content: Vinyl or Synced Lyrics
+            // Center Content: Rotating Vinyl Disc or Centered Synced Lyrics
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -125,16 +168,32 @@ fun PlayerScreen(
                         isPlaying = playbackState.isPlaying
                     )
                 } else {
-                    // Synced Lyrics View
+                    // Centered Synced Lyrics View
                     if (isLyricsLoading) {
-                        CircularProgressIndicator(color = AccentCoral)
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            CircularProgressIndicator(
+                                color = AccentCoral,
+                                modifier = Modifier.size(36.dp),
+                                strokeWidth = 3.dp
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = "Finding lyrics...",
+                                color = TextSecondary,
+                                fontSize = 14.sp
+                            )
+                        }
                     } else if (lyrics?.lines.isNullOrEmpty()) {
                         Text(
                             text = lyrics?.plainLyrics ?: "No synchronized lyrics available",
                             color = TextSecondary,
                             textAlign = TextAlign.Center,
                             fontSize = 16.sp,
-                            lineHeight = 24.sp
+                            lineHeight = 24.sp,
+                            modifier = Modifier.padding(horizontal = 20.dp)
                         )
                     } else {
                         val lines = lyrics!!.lines
@@ -143,27 +202,36 @@ fun PlayerScreen(
                         val activeIndex = lines.indexOfLast { it.timestampMs <= playbackState.currentPositionMs }
                             .coerceAtLeast(0)
 
+                        // Automatically keep the playing lyric line centered
                         LaunchedEffect(activeIndex) {
-                            listState.animateScrollToItem((activeIndex - 2).coerceAtLeast(0))
+                            if (lines.isNotEmpty() && activeIndex in lines.indices) {
+                                listState.animateScrollToItem(
+                                    index = activeIndex,
+                                    scrollOffset = -180
+                                )
+                            }
                         }
 
                         LazyColumn(
                             state = listState,
                             modifier = Modifier.fillMaxSize(),
-                            verticalArrangement = Arrangement.spacedBy(16.dp),
+                            contentPadding = PaddingValues(vertical = 120.dp),
+                            verticalArrangement = Arrangement.spacedBy(20.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             itemsIndexed(lines) { index, line ->
                                 val isActive = index == activeIndex
                                 Text(
                                     text = line.text,
-                                    color = if (isActive) AccentCoral else TextMuted,
-                                    fontSize = if (isActive) 20.sp else 15.sp,
-                                    fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (isActive) PaletteCream else PaletteSlateBlue.copy(alpha = 0.5f),
+                                    fontSize = if (isActive) 22.sp else 16.sp,
+                                    fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
                                     textAlign = TextAlign.Center,
                                     modifier = Modifier
                                         .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
                                         .clickable { viewModel.seekTo(line.timestampMs) }
+                                        .padding(horizontal = 16.dp, vertical = 6.dp)
                                 )
                             }
                         }
@@ -198,20 +266,13 @@ fun PlayerScreen(
 
                 Spacer(modifier = Modifier.height(24.dp))
 
-                // Waveform Seekbar & Time
-                WaveformSeekbar(
-                    progress = progress,
-                    onSeek = { newProgress ->
-                        val targetMs = (newProgress * playbackState.durationMs).toLong()
-                        viewModel.seekTo(targetMs)
-                    }
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                HiFiTimeDisplay(
-                    currentMs = playbackState.currentPositionMs,
-                    durationMs = playbackState.durationMs
+                // Premium Animated Waveform Progress Bar & Interactive Seeking
+                WaveformProgressBar(
+                    currentPositionMs = playbackState.currentPositionMs,
+                    durationMs = playbackState.durationMs,
+                    isPlaying = playbackState.isPlaying,
+                    trackId = track.id,
+                    onSeek = { targetMs -> viewModel.seekTo(targetMs) }
                 )
 
                 Spacer(modifier = Modifier.height(20.dp))
@@ -222,18 +283,20 @@ fun PlayerScreen(
                     horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconButton(
-                        onClick = { viewModel.skipPrevious() },
+                    Box(
                         modifier = Modifier
-                            .size(52.dp)
+                            .size(56.dp)
                             .clip(CircleShape)
                             .background(SurfaceDark)
                             .border(1.dp, BorderGlass, CircleShape)
+                            .clickable { viewModel.skipPrevious() },
+                        contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = Icons.Default.SkipPrevious,
                             contentDescription = "Previous",
-                            tint = TextPrimary
+                            tint = TextPrimary,
+                            modifier = Modifier.size(28.dp)
                         )
                     }
 
@@ -243,22 +306,39 @@ fun PlayerScreen(
                         size = 72
                     )
 
-                    IconButton(
-                        onClick = { viewModel.skipNext() },
+                    Box(
                         modifier = Modifier
-                            .size(52.dp)
+                            .size(56.dp)
                             .clip(CircleShape)
                             .background(SurfaceDark)
                             .border(1.dp, BorderGlass, CircleShape)
+                            .clickable { viewModel.skipNext() },
+                        contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = Icons.Default.SkipNext,
                             contentDescription = "Next",
-                            tint = TextPrimary
+                            tint = TextPrimary,
+                            modifier = Modifier.size(28.dp)
                         )
                     }
                 }
             }
         }
+
+        // Clean Separated Queue Screen (Opens as a full dedicated screen)
+        AnimatedVisibility(
+            visible = isQueueOpen,
+            enter = slideInHorizontally(initialOffsetX = { it }) + fadeIn(),
+            exit = slideOutHorizontally(targetOffsetX = { it }) + fadeOut()
+        ) {
+            QueueScreen(
+                viewModel = viewModel,
+                onBack = { isQueueOpen = false },
+                modifier = Modifier.fillMaxSize()
+            )
+        }
     }
 }
+
+

@@ -1,5 +1,8 @@
 package com.sielo.music.core.network.innertube
 
+import com.sielo.music.core.network.models.ArtistDetails
+import com.sielo.music.core.network.models.SieloAlbum
+import com.sielo.music.core.network.models.SieloArtist
 import com.sielo.music.core.network.models.SieloTrack
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -30,10 +33,10 @@ class InnerTubeClient @Inject constructor() {
 
     suspend fun search(query: String): List<SieloTrack> = withContext(Dispatchers.IO) {
         val ytTracks = searchYouTube(query)
-        if (ytTracks.isNotEmpty()) {
-            return@withContext ytTracks
-        }
-        searchJioSaavn(query)
+        val candidateTracks = if (ytTracks.isNotEmpty()) ytTracks else searchJioSaavn(query)
+        candidateTracks
+            .distinctBy { it.id }
+            .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
     }
 
     private fun searchYouTube(query: String): List<SieloTrack> {
@@ -63,6 +66,8 @@ class InnerTubeClient @Inject constructor() {
             val response = client.newCall(request).execute()
             val bodyString = response.body?.string() ?: return emptyList()
             parseMusicSearchResults(bodyString)
+                .distinctBy { it.id }
+                .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
         } catch (e: Exception) {
             e.printStackTrace()
             emptyList()
@@ -75,7 +80,7 @@ class InnerTubeClient @Inject constructor() {
             val url = "https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&cc=in&includeMetaTags=1&p=1&n=20&q=$encodedQuery"
             val request = Request.Builder()
                 .url(url)
-                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
                 .build()
 
             val response = client.newCall(request).execute()
@@ -88,9 +93,13 @@ class InnerTubeClient @Inject constructor() {
                 val id = obj["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
                 val title = unescapeHtml(obj["song"]?.jsonPrimitive?.content ?: obj["title"]?.jsonPrimitive?.content ?: "Unknown")
                 val artist = unescapeHtml(obj["primary_artists"]?.jsonPrimitive?.content ?: obj["singers"]?.jsonPrimitive?.content ?: "Artist")
-                val image = obj["image"]?.jsonPrimitive?.content?.replace("150x150", "500x500")
+                val image = obj["image"]?.jsonPrimitive?.content
+                    ?.replace("50x50", "500x500")
+                    ?.replace("150x150", "500x500")
                 val durStr = obj["duration"]?.jsonPrimitive?.content
                 val durationSec = durStr?.toLongOrNull() ?: 0L
+                val encUrl = obj["encrypted_media_url"]?.jsonPrimitive?.content
+                val streamUrl = if (!encUrl.isNullOrBlank()) decryptDesUrl(encUrl) else null
 
                 SieloTrack(
                     id = id,
@@ -98,55 +107,191 @@ class InnerTubeClient @Inject constructor() {
                     artist = artist,
                     album = obj["album"]?.jsonPrimitive?.content?.let { unescapeHtml(it) },
                     durationSeconds = durationSec,
-                    thumbnailUrl = image
+                    thumbnailUrl = image,
+                    streamUrl = streamUrl
                 )
-            }
+            }.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
         } catch (e: Exception) {
             e.printStackTrace()
             emptyList()
         }
     }
 
+    suspend fun searchArtists(query: String): List<SieloArtist> = withContext(Dispatchers.IO) {
+        try {
+            val encodedQuery = URLEncoder.encode(query, "UTF-8")
+            val url = "https://www.jiosaavn.com/api.php?__call=search.getArtistResults&_format=json&_marker=0&cc=in&includeMetaTags=1&p=1&n=15&q=$encodedQuery"
+            val request = Request.Builder()
+                .url(url)
+                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
+                .build()
+
+            val response = client.newCall(request).execute()
+            val bodyString = response.body?.string() ?: return@withContext emptyList()
+            val root = json.parseToJsonElement(bodyString).jsonObject
+            val results = root["results"]?.jsonArray ?: return@withContext emptyList()
+
+            results.mapNotNull { item ->
+                val obj = item.jsonObject
+                val id = obj["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
+                val name = unescapeHtml(obj["name"]?.jsonPrimitive?.content ?: "Artist")
+                val image = obj["image"]?.jsonPrimitive?.content
+                    ?.replace("50x50", "500x500")
+                    ?.replace("150x150", "500x500")
+                val role = obj["role"]?.jsonPrimitive?.content ?: "Artist"
+
+                SieloArtist(
+                    id = id,
+                    name = name,
+                    imageUrl = image,
+                    role = role
+                )
+            }.distinctBy { it.id }.distinctBy { it.name.trim().lowercase() }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            emptyList()
+        }
+    }
+
+    suspend fun getArtistDetails(artistIdOrName: String, artistImageUrl: String? = null): ArtistDetails? = withContext(Dispatchers.IO) {
+        try {
+            val artistId = if (artistIdOrName.all { it.isDigit() }) {
+                artistIdOrName
+            } else {
+                val artists = searchArtists(artistIdOrName)
+                artists.firstOrNull()?.id ?: return@withContext null
+            }
+
+            val url = "https://www.jiosaavn.com/api.php?__call=artist.getArtistPageDetails&_format=json&_marker=0&artistId=$artistId&n_song=15&n_album=10"
+            val request = Request.Builder()
+                .url(url)
+                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
+                .build()
+
+            val response = client.newCall(request).execute()
+            val bodyString = response.body?.string() ?: return@withContext null
+            val root = json.parseToJsonElement(bodyString).jsonObject
+
+            val name = unescapeHtml(root["name"]?.jsonPrimitive?.content ?: artistIdOrName)
+            val rawImage = root["image"]?.jsonPrimitive?.content
+                ?.replace("50x50", "500x500")
+                ?.replace("150x150", "500x500")
+            val finalImage = if (!artistImageUrl.isNullOrBlank()) artistImageUrl else rawImage
+
+            // Top Songs
+            val topSongsObj = root["topSongs"]?.jsonObject
+            val songArray = topSongsObj?.get("songs")?.jsonArray ?: root["songs"]?.jsonArray ?: kotlinx.serialization.json.JsonArray(emptyList())
+
+            val topSongs = songArray.mapNotNull { item ->
+                val obj = item.jsonObject
+                val id = obj["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
+                val songTitle = unescapeHtml(obj["song"]?.jsonPrimitive?.content ?: obj["title"]?.jsonPrimitive?.content ?: "Unknown")
+                val songArtist = unescapeHtml(obj["primary_artists"]?.jsonPrimitive?.content ?: obj["singers"]?.jsonPrimitive?.content ?: name)
+                val album = obj["album"]?.jsonPrimitive?.content?.let { unescapeHtml(it) }
+                val image = obj["image"]?.jsonPrimitive?.content
+                    ?.replace("50x50", "500x500")
+                    ?.replace("150x150", "500x500")
+                val durSec = obj["duration"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
+                val durationText = if (durSec > 0) "${durSec / 60}:${(durSec % 60).toString().padStart(2, '0')}" else "3:30"
+                val encUrl = obj["encrypted_media_url"]?.jsonPrimitive?.content
+                val streamUrl = if (!encUrl.isNullOrBlank()) decryptDesUrl(encUrl) else null
+
+                SieloTrack(
+                    id = id,
+                    title = songTitle,
+                    artist = songArtist,
+                    album = album,
+                    durationText = durationText,
+                    durationSeconds = durSec,
+                    thumbnailUrl = image,
+                    streamUrl = streamUrl
+                )
+            }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+             .take(5)
+
+            // Top Albums & Latest Album
+            val topAlbumsObj = root["topAlbums"]?.jsonObject
+            val albumArray = topAlbumsObj?.get("albums")?.jsonArray ?: root["albums"]?.jsonArray ?: kotlinx.serialization.json.JsonArray(emptyList())
+
+            val albumList = albumArray.mapNotNull { item ->
+                val obj = item.jsonObject
+                val albumTitle = unescapeHtml(obj["album"]?.jsonPrimitive?.content ?: obj["title"]?.jsonPrimitive?.content ?: return@mapNotNull null)
+                val year = obj["year"]?.jsonPrimitive?.content ?: "2024"
+                val albumId = obj["albumid"]?.jsonPrimitive?.content ?: obj["id"]?.jsonPrimitive?.content ?: albumTitle
+                val cover = (obj["imageUrl"]?.jsonPrimitive?.content ?: obj["image"]?.jsonPrimitive?.content)
+                    ?.replace("50x50", "500x500")
+                    ?.replace("150x150", "500x500")
+
+                SieloAlbum(
+                    id = albumId,
+                    title = albumTitle,
+                    artist = name,
+                    year = year,
+                    thumbnailUrl = cover
+                )
+            }
+
+            val latestAlbum = albumList.maxByOrNull { it.year?.toIntOrNull() ?: 0 } ?: albumList.firstOrNull()
+
+            ArtistDetails(
+                id = artistId,
+                name = name,
+                imageUrl = finalImage,
+                bio = "Official Artist on Sielo",
+                latestAlbum = latestAlbum,
+                topSongs = topSongs
+            )
+        } catch (e: Exception) {
+            android.util.Log.e("InnerTubeClient", "Error fetching artist details: ${e.message}", e)
+            null
+        }
+    }
+
     suspend fun getStreamUrl(videoId: String, title: String? = null, artist: String? = null): String? = withContext(Dispatchers.IO) {
         android.util.Log.d("InnerTubeClient", "getStreamUrl start: videoId=$videoId, title=$title, artist=$artist")
-        // 1. Primary: JioSaavn direct high-bitrate (320kbps / 160kbps AAC in MP4)
+        // 1. Primary: JioSaavn direct studio-quality 320kbps DES decrypted stream
         val saavnStream = resolveJioSaavnStream(title, artist, videoId)
         if (!saavnStream.isNullOrBlank()) {
-            android.util.Log.d("InnerTubeClient", "JioSaavn stream resolved: $saavnStream")
+            android.util.Log.d("InnerTubeClient", "JioSaavn direct stream resolved: $saavnStream")
             return@withContext saavnStream
         }
 
-        // 2. Secondary: iTunes crystal-clear AAC stream fallback
-        val itunesStream = resolveItunesStream(title, artist)
-        if (!itunesStream.isNullOrBlank()) {
-            android.util.Log.d("InnerTubeClient", "iTunes stream resolved: $itunesStream")
-            return@withContext itunesStream
+        // 2. Secondary: YouTube stream fallback
+        val ytStream = resolveYouTubeStream(videoId)
+        if (!ytStream.isNullOrBlank()) {
+            android.util.Log.d("InnerTubeClient", "YouTube stream resolved: $ytStream")
+            return@withContext ytStream
         }
 
-        // 3. Tertiary: YouTube player endpoint
-        val ytStream = resolveYouTubeStream(videoId)
-        android.util.Log.d("InnerTubeClient", "YouTube stream resolved: $ytStream")
-        ytStream
+        null
     }
 
     private fun resolveJioSaavnStream(title: String?, artist: String?, fallbackQuery: String): String? {
         return try {
             val query = if (!title.isNullOrBlank()) {
-                val cleanTitle = title.replace(Regex("\\(.*?\\)|\\[.*?\\]"), "").trim()
-                val cleanArtist = artist?.replace(Regex("(?i)\\b(song|video|official|audio|remix)\\b"), "")
-                    ?.replace(Regex("\\(.*?\\)|\\[.*?\\]"), "")?.trim() ?: ""
+                val cleanTitle = title
+                    .replace(Regex("(?i)\\(official.*?\\)|\\[official.*?\\]|\\(video.*?\\)|\\[video.*?\\]|\\(audio.*?\\)|\\[audio.*?\\]|\\(lyric.*?\\)|\\[lyric.*?\\]|\\(remix.*?\\)|\\[remix.*?\\]"), "")
+                    .replace(Regex("(?i)\\b(official music video|official video|official audio|full video|hd 4k|4k|audio|lyric video|remix)\\b"), "")
+                    .replace(Regex("[|/•~]"), " ")
+                    .trim()
+
+                val cleanArtist = artist
+                    ?.replace(Regex("(?i)\\b(topic|vevo|official|channel|music)\\b"), "")
+                    ?.replace(Regex("\\(.*?\\)|\\[.*?\\]"), "")
+                    ?.trim() ?: ""
+
                 "$cleanTitle $cleanArtist".trim()
             } else {
                 fallbackQuery
             }
 
-            android.util.Log.d("InnerTubeClient", "Querying JioSaavn for: $query")
+            android.util.Log.d("InnerTubeClient", "Querying JioSaavn for stream: '$query'")
             val encoded = URLEncoder.encode(query, "UTF-8")
             val searchUrl = "https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&cc=in&includeMetaTags=1&p=1&n=5&q=$encoded"
-            
+
             val searchReq = Request.Builder()
                 .url(searchUrl)
-                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
                 .build()
 
             val searchResp = client.newCall(searchReq).execute()
@@ -155,109 +300,50 @@ class InnerTubeClient @Inject constructor() {
             val results = root["results"]?.jsonArray ?: return null
 
             if (results.isEmpty()) {
-                android.util.Log.w("InnerTubeClient", "JioSaavn returned 0 results for: $query")
+                android.util.Log.w("InnerTubeClient", "JioSaavn returned 0 results for query: '$query'")
                 return null
             }
 
             val firstSong = results.first().jsonObject
-            val encryptedUrl = firstSong["encrypted_media_url"]?.jsonPrimitive?.content ?: return null
-            
-            // 1. Try DES Decryption for direct high-bitrate stream URL (320kbps -> 160kbps -> 96kbps)
-            val direct320 = decryptSaavnUrl(encryptedUrl, 320)
-            if (!direct320.isNullOrBlank() && isUrlReachable(direct320)) {
-                android.util.Log.d("InnerTubeClient", "JioSaavn direct 320k DES stream resolved: $direct320")
-                return direct320
-            }
-            val direct160 = decryptSaavnUrl(encryptedUrl, 160)
-            if (!direct160.isNullOrBlank() && isUrlReachable(direct160)) {
-                android.util.Log.d("InnerTubeClient", "JioSaavn direct 160k DES stream resolved: $direct160")
-                return direct160
-            }
-            val directDefault = decryptSaavnUrl(encryptedUrl, 96)
-            if (!directDefault.isNullOrBlank()) {
-                android.util.Log.d("InnerTubeClient", "JioSaavn direct stream fallback: $directDefault")
-                return directDefault
+            val encryptedUrl = firstSong["encrypted_media_url"]?.jsonPrimitive?.content
+            if (!encryptedUrl.isNullOrBlank()) {
+                val decryptedUrl = decryptDesUrl(encryptedUrl)
+                if (!decryptedUrl.isNullOrBlank()) {
+                    android.util.Log.d("InnerTubeClient", "Successfully DES-decrypted JioSaavn stream: $decryptedUrl")
+                    return decryptedUrl
+                }
             }
 
-            // 2. Fallback to auth token generation
-            val encodedMediaUrl = URLEncoder.encode(encryptedUrl, "UTF-8")
-            var authUrl = fetchSaavnAuthUrl(encodedMediaUrl, 320)
-            if (authUrl.isNullOrBlank()) {
-                authUrl = fetchSaavnAuthUrl(encodedMediaUrl, 160)
+            // Fallback to preview url if available
+            val previewUrl = firstSong["media_preview_url"]?.jsonPrimitive?.content
+            if (!previewUrl.isNullOrBlank()) {
+                val highResPreview = previewUrl.replace("_96_p.mp4", "_320.mp4")
+                    .replace("preview.saavncdn.com", "aac.saavncdn.com")
+                return highResPreview
             }
-            android.util.Log.d("InnerTubeClient", "JioSaavn auth_url resolved: $authUrl")
-            authUrl
+
+            null
         } catch (e: Exception) {
             android.util.Log.e("InnerTubeClient", "Error resolving JioSaavn stream: ${e.message}", e)
             null
         }
     }
 
-    private fun decryptSaavnUrl(encryptedUrl: String, bitrate: Int = 320): String? {
+    private fun decryptDesUrl(encryptedMediaUrl: String): String? {
         return try {
-            val keySpec = javax.crypto.spec.SecretKeySpec("38346591".toByteArray(Charsets.UTF_8), "DES")
+            val key = "38346591".toByteArray(Charsets.US_ASCII)
+            val keySpec = javax.crypto.spec.SecretKeySpec(key, "DES")
             val cipher = javax.crypto.Cipher.getInstance("DES/ECB/PKCS5Padding")
             cipher.init(javax.crypto.Cipher.DECRYPT_MODE, keySpec)
-            val decoded = android.util.Base64.decode(encryptedUrl, android.util.Base64.DEFAULT)
-            val decrypted = String(cipher.doFinal(decoded), Charsets.UTF_8).trim()
-            val basePath = decrypted.replace(Regex("_(96|160|320)\\.mp4$|\\.mp4$"), "")
-            val targetSuffix = if (bitrate == 320) "_320.mp4" else if (bitrate == 160) "_160.mp4" else "_96.mp4"
-            "$basePath$targetSuffix"
+            val decoded = android.util.Base64.decode(encryptedMediaUrl, android.util.Base64.DEFAULT)
+            val decryptedBytes = cipher.doFinal(decoded)
+            val rawUrl = String(decryptedBytes, Charsets.UTF_8)
+            rawUrl.replace("_96.mp4", "_320.mp4")
+                .replace("_160.mp4", "_320.mp4")
+                .replace("_48.mp4", "_320.mp4")
+                .replace("http://", "https://")
         } catch (e: Exception) {
-            android.util.Log.e("InnerTubeClient", "DES Decryption error: ${e.message}", e)
-            null
-        }
-    }
-
-    private fun isUrlReachable(url: String): Boolean {
-        return try {
-            val req = Request.Builder()
-                .url(url)
-                .head()
-                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                .build()
-            val resp = client.newCall(req).execute()
-            resp.isSuccessful
-        } catch (e: Exception) {
-            false
-        }
-    }
-
-    private fun fetchSaavnAuthUrl(encodedMediaUrl: String, bitrate: Int): String? {
-        return try {
-            val authUrlEndpoint = "https://www.jiosaavn.com/api.php?__call=song.generateAuthToken&url=$encodedMediaUrl&bitrate=$bitrate&api_version=4&_format=json&ctx=web6dot0&_marker=0"
-            val authReq = Request.Builder()
-                .url(authUrlEndpoint)
-                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                .addHeader("Referer", "https://www.jiosaavn.com/")
-                .build()
-
-            val authResp = client.newCall(authReq).execute()
-            val authBody = authResp.body?.string() ?: return null
-            val authObj = json.parseToJsonElement(authBody).jsonObject
-            authObj["auth_url"]?.jsonPrimitive?.content
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    private fun resolveItunesStream(title: String?, artist: String?): String? {
-        if (title.isNullOrBlank()) return null
-        return try {
-            val query = URLEncoder.encode("$title ${artist ?: ""}".trim(), "UTF-8")
-            val url = "https://itunes.apple.com/search?term=$query&media=music&entity=song&limit=1"
-            val req = Request.Builder()
-                .url(url)
-                .addHeader("User-Agent", "Mozilla/5.0")
-                .build()
-            val resp = client.newCall(req).execute()
-            val body = resp.body?.string() ?: return null
-            val root = json.parseToJsonElement(body).jsonObject
-            val results = root["results"]?.jsonArray ?: return null
-            if (results.isEmpty()) return null
-            results.first().jsonObject["previewUrl"]?.jsonPrimitive?.content
-        } catch (e: Exception) {
-            e.printStackTrace()
+            android.util.Log.e("InnerTubeClient", "DES decryption error: ${e.message}", e)
             null
         }
     }
@@ -293,12 +379,11 @@ class InnerTubeClient @Inject constructor() {
             val bodyString = response.body?.string() ?: return null
             val root = json.parseToJsonElement(bodyString).jsonObject
             val streamingData = root["streamingData"]?.jsonObject ?: return null
-            
+
             val adaptiveFormats = streamingData["adaptiveFormats"]?.jsonArray
             val audioFormats = adaptiveFormats?.mapNotNull { it.jsonObject }
                 ?.filter { it["mimeType"]?.jsonPrimitive?.content?.startsWith("audio/") == true }
 
-            // Prefer MP4/M4A (AAC, itag 140) for universal smooth hardware-accelerated playback
             val m4aFormat = audioFormats?.filter { it["mimeType"]?.jsonPrimitive?.content?.contains("audio/mp4") == true }
                 ?.maxByOrNull { it["bitrate"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L }
 

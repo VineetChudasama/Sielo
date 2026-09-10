@@ -41,6 +41,7 @@ import com.sielo.music.ui.theme.TextPrimary
 @Composable
 fun SieloBottomBar(
     navController: NavController,
+    onTabSelected: ((Screen) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val navBackStackEntry by navController.currentBackStackEntryAsState()
@@ -76,11 +77,9 @@ fun SieloBottomBar(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null
                         ) {
+                            onTabSelected?.invoke(screen)
                             if (currentRoute != screen.route) {
                                 navController.navigate(screen.route) {
-                                    popUpTo(navController.graph.findStartDestination().id) {
-                                        saveState = true
-                                    }
                                     launchSingleTop = true
                                     restoreState = true
                                 }

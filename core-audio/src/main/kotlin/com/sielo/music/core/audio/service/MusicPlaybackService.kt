@@ -62,21 +62,21 @@ class MusicPlaybackService : MediaSessionService() {
             .setUsage(C.USAGE_MEDIA)
             .build()
 
-        // 2. High-Performance OkHttpClient with Connection Pooling & Keep-Alive
+        // 2. High-Performance OkHttpClient with Connection Pooling & HTTP 1.1 for uninterrupted streaming
         val okHttpClient = OkHttpClient.Builder()
-            .connectionPool(ConnectionPool(10, 5, TimeUnit.MINUTES))
-            .connectTimeout(20, TimeUnit.SECONDS)
-            .readTimeout(25, TimeUnit.SECONDS)
+            .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .followRedirects(true)
             .followSslRedirects(true)
-            .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
+            .protocols(listOf(Protocol.HTTP_1_1))
             .build()
 
         val httpDataSourceFactory = OkHttpDataSource.Factory(okHttpClient)
             .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
 
-        // 3. CacheDataSourceFactory - ensures buffered chunks are cached to disk and served instantly
+        // 3. CacheDataSourceFactory - ensures buffered chunks are served instantly and smoothly
         val cache = getCache(this)
         val cacheDataSourceFactory = CacheDataSource.Factory()
             .setCache(cache)
@@ -88,24 +88,22 @@ class MusicPlaybackService : MediaSessionService() {
         val mediaSourceFactory = DefaultMediaSourceFactory(this)
             .setDataSourceFactory(defaultDataSourceFactory)
 
-        // 4. Custom LoadControl - High-Fidelity Audio Buffering
-        // Generous initial buffer (2.5s) eliminates crackling/tearing on start.
-        // Large max buffer (90s) prevents network-induced audio stuttering in between.
+        // 4. Custom LoadControl - Smooth High-Fidelity Audio Buffering
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                /* minBufferMs = */ 30_000,
-                /* maxBufferMs = */ 90_000,
-                /* bufferForPlaybackMs = */ 2_500,
-                /* bufferForPlaybackAfterRebufferMs = */ 4_000
+                /* minBufferMs = */ 20_000,
+                /* maxBufferMs = */ 60_000,
+                /* bufferForPlaybackMs = */ 1_500,
+                /* bufferForPlaybackAfterRebufferMs = */ 3_000
             )
             .setBackBuffer(
-                /* backBufferDurationMs = */ 30_000,
+                /* backBufferDurationMs = */ 20_000,
                 /* retainBackBufferFromKeyframe = */ true
             )
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
-        // 5. RenderersFactory with clean AudioSink (no float distortion/resampling glitches)
+        // 5. RenderersFactory with clean AudioSink & Hardware Audio Clock sync (eliminates Sonic time-stretch speed-ups)
         val renderersFactory = object : DefaultRenderersFactory(this) {
             override fun buildAudioSink(
                 context: Context,
@@ -113,22 +111,34 @@ class MusicPlaybackService : MediaSessionService() {
                 enableAudioTrackPlaybackParams: Boolean
             ): AudioSink {
                 return DefaultAudioSink.Builder(context)
-                    .setEnableFloatOutput(false) // Standard 16-bit PCM avoids driver resampling crackle
-                    .setAudioProcessorChain(DefaultAudioSink.DefaultAudioProcessorChain())
+                    .setEnableFloatOutput(false)
+                    .setEnableAudioTrackPlaybackParams(true)
                     .build()
             }
         }.apply {
             setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF)
         }
 
-        // 6. Build ExoPlayer
+        // 6. Build ExoPlayer with locked 1.0x playback rate and exact seek params
         player = ExoPlayer.Builder(this, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .setLoadControl(loadControl)
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
-            .build()
+            .setSeekParameters(androidx.media3.exoplayer.SeekParameters.EXACT)
+            .build().apply {
+                playbackParameters = androidx.media3.common.PlaybackParameters(1.0f)
+                addListener(object : androidx.media3.common.Player.Listener {
+                    override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                        android.util.Log.e("MusicPlaybackService", "ExoPlayer Error in Service: ${error.errorCodeName} - ${error.message}", error)
+                    }
+
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        android.util.Log.d("MusicPlaybackService", "Service Playback State changed: $playbackState (isPlaying=$isPlaying)")
+                    }
+                })
+            }
 
         mediaSession = MediaSession.Builder(this, player)
             .setCallback(MediaSessionCallback())

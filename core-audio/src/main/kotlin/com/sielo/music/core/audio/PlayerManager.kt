@@ -31,6 +31,9 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
 
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.suspendCancellableCoroutine
+
 @OptIn(UnstableApi::class)
 @Singleton
 class PlayerManager @Inject constructor(
@@ -47,26 +50,40 @@ class PlayerManager @Inject constructor(
     private var currentPlayingEventLogged = false
 
     init {
-        initController()
+        scope.launch {
+            getController()
+        }
     }
 
-    private fun initController() {
+    private suspend fun getController(): MediaController? = suspendCancellableCoroutine { cont ->
+        val current = mediaController
+        if (current != null) {
+            cont.resume(current) {}
+            return@suspendCancellableCoroutine
+        }
         val sessionToken = SessionToken(context, ComponentName(context, MusicPlaybackService::class.java))
-        val controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
-        controllerFuture.addListener({
+        val future = MediaController.Builder(context, sessionToken).buildAsync()
+        future.addListener({
             try {
-                mediaController = controllerFuture.get()
+                val ctrl = future.get()
+                mediaController = ctrl
                 setupPlayerListeners()
+                if (cont.isActive) {
+                    cont.resume(ctrl) {}
+                }
             } catch (e: Exception) {
-                e.printStackTrace()
+                android.util.Log.e("SieloAudio", "Failed to connect MediaController: ${e.message}", e)
+                if (cont.isActive) {
+                    cont.resume(null) {}
+                }
             }
-        }, MoreExecutors.directExecutor())
+        }, ContextCompat.getMainExecutor(context))
     }
 
     private fun setupPlayerListeners() {
         mediaController?.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                _playbackState.update { it.copy(isPlaying = isPlaying) }
+                _playbackState.update { it.copy(isPlaying = isPlaying, isBuffering = false) }
                 if (isPlaying) {
                     startProgressTracking()
                     recordHistoryIfEligible()
@@ -87,6 +104,11 @@ class PlayerManager @Inject constructor(
                 if (playbackState == Player.STATE_ENDED) {
                     skipNext()
                 }
+            }
+
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                android.util.Log.e("SieloAudio", "ExoPlayer Error: ${error.errorCodeName} - ${error.message}", error)
+                _playbackState.update { it.copy(isBuffering = false, isPlaying = false) }
             }
         })
     }
@@ -126,21 +148,18 @@ class PlayerManager @Inject constructor(
                     .build()
 
                 try {
-                    val controller = mediaController ?: run {
-                        val sessionToken = SessionToken(context, ComponentName(context, MusicPlaybackService::class.java))
-                        val future = MediaController.Builder(context, sessionToken).buildAsync()
-                        val ctrl = future.get()
-                        mediaController = ctrl
-                        setupPlayerListeners()
-                        ctrl
+                    val controller = mediaController ?: getController()
+                    if (controller != null) {
+                        controller.run {
+                            setMediaItem(mediaItem, true)
+                            prepare()
+                            play()
+                        }
+                        android.util.Log.d("SieloAudio", "MediaItem sent to ExoPlayer, play() invoked.")
+                    } else {
+                        android.util.Log.e("SieloAudio", "Controller is null, could not start playback.")
+                        _playbackState.update { it.copy(isBuffering = false) }
                     }
-
-                    controller.run {
-                        setMediaItem(mediaItem, true)
-                        prepare()
-                        play()
-                    }
-                    android.util.Log.d("SieloAudio", "MediaItem sent to ExoPlayer, play() invoked.")
                 } catch (e: Exception) {
                     android.util.Log.e("SieloAudio", "Error starting playback: ${e.message}", e)
                     _playbackState.update { it.copy(isBuffering = false) }
@@ -186,6 +205,15 @@ class PlayerManager @Inject constructor(
         }
     }
 
+    fun toggleMute() {
+        val currentlyMuted = _playbackState.value.isMuted
+        val newMuted = !currentlyMuted
+        mediaController?.let {
+            it.volume = if (newMuted) 0f else 1f
+        }
+        _playbackState.update { it.copy(isMuted = newMuted) }
+    }
+
     fun seekTo(positionMs: Long) {
         mediaController?.seekTo(positionMs)
         _playbackState.update { it.copy(currentPositionMs = positionMs) }
@@ -214,7 +242,7 @@ class PlayerManager @Inject constructor(
                 val current = mediaController?.currentPosition ?: 0L
                 val dur = mediaController?.duration?.coerceAtLeast(0L) ?: 0L
                 _playbackState.update { it.copy(currentPositionMs = current, durationMs = dur) }
-                delay(500)
+                delay(50)
             }
         }
     }

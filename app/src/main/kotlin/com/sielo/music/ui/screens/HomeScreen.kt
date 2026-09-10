@@ -1,5 +1,7 @@
 package com.sielo.music.ui.screens
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -39,19 +41,26 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.sielo.music.R
 import com.sielo.music.core.network.models.SieloTrack
-import com.sielo.music.ui.theme.AccentCoral
 import com.sielo.music.ui.theme.BorderGlass
 import com.sielo.music.ui.theme.BorderSubtle
 import com.sielo.music.ui.theme.MacondoFontFamily
-import com.sielo.music.ui.theme.ObsidianBlack
+import com.sielo.music.ui.theme.PaletteCream
+import com.sielo.music.ui.theme.PaletteDarkNavy
+import com.sielo.music.ui.theme.PaletteOxfordBlue
+import com.sielo.music.ui.theme.PaletteSageGreen
+import com.sielo.music.ui.theme.PaletteSand
+import com.sielo.music.ui.theme.PaletteSlateBlue
 import com.sielo.music.ui.theme.SurfaceDark
 import com.sielo.music.ui.theme.SurfaceElevated
+import com.sielo.music.ui.theme.TextMuted
 import com.sielo.music.ui.theme.TextPrimary
 import com.sielo.music.ui.theme.TextSecondary
 import com.sielo.music.viewmodel.ArtistProfile
@@ -67,12 +76,17 @@ fun HomeScreen(
     val trendingTracks by viewModel.trendingTracks.collectAsState()
     val recentHistory by viewModel.recentHistory.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
+    val selectedPlaylist by viewModel.selectedPlaylist.collectAsState()
+    val playlistTracks by viewModel.playlistTracks.collectAsState()
+    val isPlaylistLoading by viewModel.isPlaylistLoading.collectAsState()
+    val selectedArtist by viewModel.selectedArtist.collectAsState()
+    val isArtistLoading by viewModel.isArtistLoading.collectAsState()
 
     val similarArtists = viewModel.similarArtists
     val featuredStations = viewModel.featuredStations
     val customPlaylists = viewModel.customPlaylists
 
-    // Fallback tracks pool to ensure all sections always have rich content
+    // Fallback tracks pool with guaranteed distinct high-quality tracks
     val fallbackTracks = listOf(
         SieloTrack("fHI8X4OXluQ", "Blinding Lights", "The Weeknd", durationText = "3:20", thumbnailUrl = "https://i.ytimg.com/vi/fHI8X4OXluQ/hqdefault.jpg"),
         SieloTrack("4NRXx6U8ABQ", "Starboy", "The Weeknd ft. Daft Punk", durationText = "3:50", thumbnailUrl = "https://i.ytimg.com/vi/4NRXx6U8ABQ/hqdefault.jpg"),
@@ -82,29 +96,98 @@ fun HomeScreen(
         SieloTrack("sT98E_u6k8Q", "Levitating", "Dua Lipa", durationText = "3:23", thumbnailUrl = "https://i.ytimg.com/vi/sT98E_u6k8Q/hqdefault.jpg"),
         SieloTrack("JGwWNGJdvx8", "Shape of You", "Ed Sheeran", durationText = "3:53", thumbnailUrl = "https://i.ytimg.com/vi/JGwWNGJdvx8/hqdefault.jpg"),
         SieloTrack("k2qgadSvNyU", "New Rules", "Dua Lipa", durationText = "3:29", thumbnailUrl = "https://i.ytimg.com/vi/k2qgadSvNyU/hqdefault.jpg"),
-        SieloTrack("OPf0YbXqDm0", "Uptown Funk", "Mark Ronson ft. Bruno Mars", durationText = "4:30", thumbnailUrl = "https://i.ytimg.com/vi/OPf0YbXqDm0/hqdefault.jpg")
+        SieloTrack("OPf0YbXqDm0", "Uptown Funk", "Mark Ronson ft. Bruno Mars", durationText = "4:30", thumbnailUrl = "https://i.ytimg.com/vi/OPf0YbXqDm0/hqdefault.jpg"),
+        SieloTrack("0VwhorQBxU4", "Stay", "The Kid LAROI & Justin Bieber", durationText = "2:21", thumbnailUrl = "https://i.ytimg.com/vi/0VwhorQBxU4/hqdefault.jpg"),
+        SieloTrack("hT_nvWreIhg", "Counting Stars", "OneRepublic", durationText = "4:17", thumbnailUrl = "https://i.ytimg.com/vi/hT_nvWreIhg/hqdefault.jpg"),
+        SieloTrack("kJQP7kiw5Fk", "Despacito", "Luis Fonsi ft. Daddy Yankee", durationText = "3:48", thumbnailUrl = "https://i.ytimg.com/vi/kJQP7kiw5Fk/hqdefault.jpg"),
+        SieloTrack("9bZkp7q19f0", "Gangnam Style", "PSY", durationText = "3:39", thumbnailUrl = "https://i.ytimg.com/vi/9bZkp7q19f0/hqdefault.jpg"),
+        SieloTrack("YQHsXMglC9A", "Hello", "Adele", durationText = "4:55", thumbnailUrl = "https://i.ytimg.com/vi/YQHsXMglC9A/hqdefault.jpg")
     )
 
-    val activeTracks = if (trendingTracks.isNotEmpty()) trendingTracks else fallbackTracks
+    val activeTracks = (if (trendingTracks.isNotEmpty()) trendingTracks else fallbackTracks)
+        .distinctBy { it.id }
+        .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+
+    // Handle device system back gesture when artist or playlist is open
+    BackHandler(enabled = selectedArtist != null || selectedPlaylist != null) {
+        if (selectedArtist != null) {
+            viewModel.closeArtist()
+        } else if (selectedPlaylist != null) {
+            viewModel.closePlaylist()
+        }
+    }
+
+    // Display Artist Profile Screen if an artist is selected
+    if (selectedArtist != null) {
+        ArtistProfileScreen(
+            artist = selectedArtist!!,
+            isLoading = isArtistLoading,
+            onBack = { viewModel.closeArtist() },
+            onPlayTrack = { track, q -> viewModel.playTrack(track, q) },
+            onToggleFavorite = { viewModel.toggleFavorite(it) },
+            modifier = modifier
+        )
+        return
+    }
+
+    // Display Playlist Detail Screen if a playlist is selected
+    if (selectedPlaylist != null) {
+        PlaylistDetailScreen(
+            playlist = selectedPlaylist!!,
+            tracks = playlistTracks,
+            isLoading = isPlaylistLoading,
+            onBack = { viewModel.closePlaylist() },
+            onPlayTrack = { track, q -> viewModel.playTrack(track, q) },
+            modifier = modifier
+        )
+        return
+    }
 
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(ObsidianBlack)
+            .background(PaletteDarkNavy)
     ) {
         if (isLoading && activeTracks.isEmpty()) {
             Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
             ) {
-                CircularProgressIndicator(color = AccentCoral)
+                CircularProgressIndicator(color = PaletteSand)
             }
         } else {
+            // Deduplicated slices to guarantee ZERO repeated songs across all sections
+            val keepListeningList = if (recentHistory.isNotEmpty()) {
+                recentHistory
+                    .distinctBy { it.songId }
+                    .map { event ->
+                        SieloTrack(
+                            id = event.songId,
+                            title = event.songTitle,
+                            artist = event.artistName,
+                            album = event.albumName,
+                            durationText = "3:24",
+                            thumbnailUrl = event.thumbnailUrl
+                        )
+                    }
+                    .take(8)
+            } else {
+                activeTracks.take(6)
+            }
+
+            val usedIds = keepListeningList.map { it.id }.toMutableSet()
+            val availableRemaining = activeTracks.filterNot { it.id in usedIds }
+
+            val favoritesList = availableRemaining.take(5).ifEmpty { fallbackTracks.drop(6).take(5) }
+            usedIds.addAll(favoritesList.map { it.id })
+
+            val videoTracks = activeTracks.filterNot { it.id in usedIds }.take(4).ifEmpty { fallbackTracks.drop(10).take(4) }
+
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(top = 16.dp, bottom = 90.dp)
+                contentPadding = PaddingValues(top = 16.dp, bottom = 100.dp)
             ) {
-                // Item 1: Minimal Sleek Top App Bar
+                // Top App Bar with App Logo
                 item {
                     Row(
                         modifier = Modifier
@@ -116,23 +199,22 @@ fun HomeScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box(
                                 modifier = Modifier
-                                    .size(34.dp)
+                                    .size(36.dp)
                                     .clip(RoundedCornerShape(10.dp))
-                                    .background(AccentCoral),
+                                    .background(PaletteOxfordBlue)
+                                    .border(1.dp, BorderGlass, RoundedCornerShape(10.dp)),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Text(
-                                    text = "S",
-                                    color = ObsidianBlack,
-                                    fontSize = 22.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    fontFamily = MacondoFontFamily
+                                Image(
+                                    painter = painterResource(id = R.drawable.app_logo),
+                                    contentDescription = "Sielo Logo",
+                                    modifier = Modifier.size(26.dp)
                                 )
                             }
                             Spacer(modifier = Modifier.width(10.dp))
                             Text(
                                 text = "Sielo",
-                                color = TextPrimary,
+                                color = PaletteCream,
                                 fontSize = 28.sp,
                                 fontWeight = FontWeight.Normal,
                                 fontFamily = MacondoFontFamily,
@@ -145,7 +227,7 @@ fun HomeScreen(
                                 Icon(
                                     imageVector = Icons.Default.Search,
                                     contentDescription = "Search",
-                                    tint = TextPrimary,
+                                    tint = PaletteCream,
                                     modifier = Modifier.size(24.dp)
                                 )
                             }
@@ -153,7 +235,7 @@ fun HomeScreen(
                                 Icon(
                                     imageVector = Icons.Default.Settings,
                                     contentDescription = "Settings",
-                                    tint = TextPrimary,
+                                    tint = PaletteCream,
                                     modifier = Modifier.size(22.dp)
                                 )
                             }
@@ -162,30 +244,15 @@ fun HomeScreen(
                     Spacer(modifier = Modifier.height(10.dp))
                 }
 
-                // Section 1: Keep listening (Large Square Cards Carousel)
+                // Section 1: Keep listening (Square Cards Carousel)
                 item {
                     Text(
                         text = "Keep listening",
-                        color = AccentCoral,
+                        color = PaletteSand,
                         fontSize = 22.sp,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
                     )
-
-                    val keepListeningList = if (recentHistory.isNotEmpty()) {
-                        recentHistory.map { event ->
-                            SieloTrack(
-                                id = event.songId,
-                                title = event.songTitle,
-                                artist = event.artistName,
-                                album = event.albumName,
-                                durationText = "3:24",
-                                thumbnailUrl = event.thumbnailUrl
-                            )
-                        }
-                    } else {
-                        activeTracks.take(8)
-                    }
 
                     LazyRow(
                         contentPadding = PaddingValues(horizontal = 20.dp),
@@ -223,14 +290,14 @@ fun HomeScreen(
                         ) {
                             Text(
                                 text = "SZA",
-                                color = AccentCoral,
+                                color = PaletteSand,
                                 fontSize = 22.sp,
                                 fontWeight = FontWeight.Bold
                             )
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowForward,
                                 contentDescription = "More",
-                                tint = TextSecondary,
+                                tint = PaletteSageGreen,
                                 modifier = Modifier.size(20.dp)
                             )
                         }
@@ -244,7 +311,7 @@ fun HomeScreen(
                         items(similarArtists) { artist ->
                             ArtistCircleCard(
                                 artist = artist,
-                                onClick = { viewModel.playArtistRadio(artist.name) }
+                                onClick = { viewModel.openArtist(artist.name, artist.imageUrl) }
                             )
                         }
                     }
@@ -252,7 +319,7 @@ fun HomeScreen(
                     Spacer(modifier = Modifier.height(28.dp))
                 }
 
-                // Section 3: Your Playlists & Mixes (Bento Cards)
+                // Section 3: Your Playlists & Mixes (Bento Cards with Tap-to-Open)
                 item {
                     Column(
                         modifier = Modifier
@@ -271,15 +338,15 @@ fun HomeScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "Made For You",
-                                color = AccentCoral,
+                                text = "Curated For You",
+                                color = PaletteSand,
                                 fontSize = 22.sp,
                                 fontWeight = FontWeight.Bold
                             )
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowForward,
                                 contentDescription = "More",
-                                tint = TextSecondary,
+                                tint = PaletteSageGreen,
                                 modifier = Modifier.size(20.dp)
                             )
                         }
@@ -293,11 +360,7 @@ fun HomeScreen(
                         items(customPlaylists) { playlist ->
                             PlaylistBentoCard(
                                 playlist = playlist,
-                                onClick = {
-                                    if (activeTracks.isNotEmpty()) {
-                                        viewModel.playTrack(activeTracks.first(), activeTracks)
-                                    }
-                                }
+                                onClick = { viewModel.openPlaylist(playlist) }
                             )
                         }
                     }
@@ -309,13 +372,12 @@ fun HomeScreen(
                 item {
                     Text(
                         text = "Forgotten favorites",
-                        color = AccentCoral,
+                        color = PaletteSand,
                         fontSize = 22.sp,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
                     )
 
-                    val favoritesList = if (activeTracks.size >= 5) activeTracks.take(5) else fallbackTracks.take(5)
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -333,7 +395,7 @@ fun HomeScreen(
                     Spacer(modifier = Modifier.height(28.dp))
                 }
 
-                // Section 5: Listen together / Stations (Wide 16:9 Banner Cards)
+                // Section 5: Listen together / Stations (Wide Banner Cards)
                 item {
                     Column(
                         modifier = Modifier
@@ -342,14 +404,14 @@ fun HomeScreen(
                     ) {
                         Text(
                             text = "STATION",
-                            color = TextSecondary,
+                            color = PaletteSageGreen,
                             fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontWeight = FontWeight.Bold,
                             letterSpacing = 1.sp
                         )
                         Text(
                             text = "Listen together",
-                            color = AccentCoral,
+                            color = PaletteSand,
                             fontSize = 22.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -375,13 +437,12 @@ fun HomeScreen(
                 item {
                     Text(
                         text = "Music videos for you",
-                        color = AccentCoral,
+                        color = PaletteSand,
                         fontSize = 22.sp,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
                     )
 
-                    val videoTracks = if (activeTracks.size >= 4) activeTracks.takeLast(4) else fallbackTracks.takeLast(4)
                     LazyRow(
                         contentPadding = PaddingValues(horizontal = 20.dp),
                         horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -416,7 +477,7 @@ fun KeepListeningCard(
             modifier = Modifier
                 .size(140.dp)
                 .clip(RoundedCornerShape(14.dp))
-                .background(SurfaceDark)
+                .background(PaletteOxfordBlue)
                 .border(1.dp, BorderGlass, RoundedCornerShape(14.dp)),
             contentAlignment = Alignment.Center
         ) {
@@ -427,19 +488,19 @@ fun KeepListeningCard(
                 modifier = Modifier.fillMaxSize()
             )
 
-            // Centered Frosted Play Icon
+            // Frosted Play Icon
             Box(
                 modifier = Modifier
                     .size(38.dp)
                     .clip(CircleShape)
-                    .background(Color.Black.copy(alpha = 0.55f))
-                    .border(1.dp, Color.White.copy(alpha = 0.3f), CircleShape),
+                    .background(PaletteDarkNavy.copy(alpha = 0.65f))
+                    .border(1.dp, PaletteSand.copy(alpha = 0.5f), CircleShape),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Default.PlayArrow,
                     contentDescription = "Play",
-                    tint = Color.White,
+                    tint = PaletteSand,
                     modifier = Modifier.size(22.dp)
                 )
             }
@@ -449,7 +510,7 @@ fun KeepListeningCard(
 
         Text(
             text = track.title,
-            color = TextPrimary,
+            color = PaletteCream,
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
@@ -457,7 +518,7 @@ fun KeepListeningCard(
         )
 
         Text(
-            text = "${track.artist} • ${track.durationText ?: "3:20"}",
+            text = "${track.artist} • ${track.durationText ?: "3:24"}",
             color = TextSecondary,
             fontSize = 12.sp,
             maxLines = 1,
@@ -484,7 +545,7 @@ fun ArtistCircleCard(
             modifier = Modifier
                 .size(86.dp)
                 .clip(CircleShape)
-                .background(SurfaceDark)
+                .background(PaletteOxfordBlue)
                 .border(1.dp, BorderSubtle, CircleShape)
         )
 
@@ -492,7 +553,7 @@ fun ArtistCircleCard(
 
         Text(
             text = artist.name,
-            color = TextPrimary,
+            color = PaletteCream,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
@@ -516,14 +577,14 @@ fun PlaylistBentoCard(
                 modifier = Modifier
                     .size(140.dp)
                     .clip(RoundedCornerShape(14.dp))
-                    .background(Color(0xFF9E86FF))
+                    .background(PaletteSand)
                     .border(1.dp, BorderGlass, RoundedCornerShape(14.dp)),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Default.Favorite,
                     contentDescription = "Liked",
-                    tint = Color.White,
+                    tint = PaletteDarkNavy,
                     modifier = Modifier.size(54.dp)
                 )
             }
@@ -535,7 +596,7 @@ fun PlaylistBentoCard(
                 modifier = Modifier
                     .size(140.dp)
                     .clip(RoundedCornerShape(14.dp))
-                    .background(SurfaceDark)
+                    .background(PaletteOxfordBlue)
                     .border(1.dp, BorderGlass, RoundedCornerShape(14.dp))
             )
         }
@@ -544,7 +605,7 @@ fun PlaylistBentoCard(
 
         Text(
             text = playlist.title,
-            color = TextPrimary,
+            color = PaletteCream,
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
@@ -570,7 +631,7 @@ fun ForgottenFavoriteRow(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(SurfaceDark)
+            .background(PaletteOxfordBlue)
             .clickable { onPlay() }
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -595,7 +656,7 @@ fun ForgottenFavoriteRow(
             Column {
                 Text(
                     text = track.title,
-                    color = TextPrimary,
+                    color = PaletteCream,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
@@ -614,7 +675,7 @@ fun ForgottenFavoriteRow(
         Icon(
             imageVector = Icons.Default.MoreVert,
             contentDescription = "Options",
-            tint = TextSecondary,
+            tint = PaletteSlateBlue,
             modifier = Modifier.size(20.dp)
         )
     }
@@ -635,7 +696,7 @@ fun StationBannerCard(
                 .width(220.dp)
                 .height(124.dp)
                 .clip(RoundedCornerShape(14.dp))
-                .background(SurfaceDark)
+                .background(PaletteOxfordBlue)
                 .border(1.dp, BorderGlass, RoundedCornerShape(14.dp)),
             contentAlignment = Alignment.Center
         ) {
@@ -650,14 +711,14 @@ fun StationBannerCard(
                 modifier = Modifier
                     .size(40.dp)
                     .clip(CircleShape)
-                    .background(Color.Black.copy(alpha = 0.6f))
-                    .border(1.dp, Color.White.copy(alpha = 0.3f), CircleShape),
+                    .background(PaletteDarkNavy.copy(alpha = 0.65f))
+                    .border(1.dp, PaletteSand.copy(alpha = 0.5f), CircleShape),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Default.PlayArrow,
                     contentDescription = "Play",
-                    tint = Color.White,
+                    tint = PaletteSand,
                     modifier = Modifier.size(24.dp)
                 )
             }
@@ -667,7 +728,7 @@ fun StationBannerCard(
 
         Text(
             text = station.title,
-            color = TextPrimary,
+            color = PaletteCream,
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
@@ -699,7 +760,7 @@ fun VideoCard(
                 .width(200.dp)
                 .height(115.dp)
                 .clip(RoundedCornerShape(14.dp))
-                .background(SurfaceDark)
+                .background(PaletteOxfordBlue)
                 .border(1.dp, BorderGlass, RoundedCornerShape(14.dp)),
             contentAlignment = Alignment.Center
         ) {
@@ -714,14 +775,14 @@ fun VideoCard(
                 modifier = Modifier
                     .size(36.dp)
                     .clip(CircleShape)
-                    .background(Color.Black.copy(alpha = 0.6f))
-                    .border(1.dp, Color.White.copy(alpha = 0.3f), CircleShape),
+                    .background(PaletteDarkNavy.copy(alpha = 0.65f))
+                    .border(1.dp, PaletteSand.copy(alpha = 0.5f), CircleShape),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Default.PlayArrow,
                     contentDescription = "Play",
-                    tint = Color.White,
+                    tint = PaletteSand,
                     modifier = Modifier.size(20.dp)
                 )
             }
@@ -731,7 +792,7 @@ fun VideoCard(
 
         Text(
             text = track.title,
-            color = TextPrimary,
+            color = PaletteCream,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,

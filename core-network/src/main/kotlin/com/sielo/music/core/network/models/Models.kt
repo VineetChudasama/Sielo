@@ -28,3 +28,21 @@ data class SieloAlbum(
     val year: String? = null,
     val thumbnailUrl: String? = null
 )
+
+@Serializable
+data class SieloArtist(
+    val id: String,
+    val name: String,
+    val imageUrl: String? = null,
+    val role: String? = "Artist"
+)
+
+@Serializable
+data class ArtistDetails(
+    val id: String,
+    val name: String,
+    val imageUrl: String? = null,
+    val bio: String? = null,
+    val latestAlbum: SieloAlbum? = null,
+    val topSongs: List<SieloTrack> = emptyList()
+)
