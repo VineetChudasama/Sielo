@@ -1,12 +1,20 @@
-# Sielo Music 🎵
+<p align="center">
+  <img src="app/src/main/res/drawable/app_logo.png" alt="Sielo Logo" width="120" height="120" />
+</p>
 
-[![Kotlin](https://img.shields.io/badge/Kotlin-2.0-7F52FF.svg?logo=kotlin&logoColor=white)](https://kotlinlang.org)
-[![Android](https://img.shields.io/badge/Platform-Android-3DDC84.svg?logo=android&logoColor=white)](https://developer.android.com)
-[![Jetpack Compose](https://img.shields.io/badge/UI-Jetpack%20Compose-4285F4.svg?logo=jetpackcompose&logoColor=white)](https://developer.android.com/jetpack/compose)
-[![Media3](https://img.shields.io/badge/Audio-Media3%20ExoPlayer-FF6F00.svg)](https://developer.android.com/media/media3)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+<h1 align="center">Sielo</h1>
 
-**Sielo** is an open-source, modern music streaming app designed with an obsidian-dark glassmorphism aesthetic, lossless audio streaming, real-time synchronized lyrics, tactile interactive controls, and listening analytics.
+<p align="center">
+  <strong>A tactile, lossless music streaming app crafted with Jetpack Compose & AndroidX Media3</strong>
+</p>
+
+<p align="center">
+  <a href="https://kotlinlang.org"><img src="https://img.shields.io/badge/Kotlin-2.0-7F52FF.svg?logo=kotlin&logoColor=white" alt="Kotlin" /></a>
+  <a href="https://developer.android.com"><img src="https://img.shields.io/badge/Platform-Android-3DDC84.svg?logo=android&logoColor=white" alt="Android" /></a>
+  <a href="https://developer.android.com/jetpack/compose"><img src="https://img.shields.io/badge/UI-Jetpack%20Compose-4285F4.svg?logo=jetpackcompose&logoColor=white" alt="Jetpack Compose" /></a>
+  <a href="https://developer.android.com/media/media3"><img src="https://img.shields.io/badge/Audio-Media3%20ExoPlayer-FF6F00.svg" alt="Media3" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License" /></a>
+</p>
 
 ---
 
@@ -14,13 +22,13 @@
 
 ### 🎧 High-Fidelity Audio Streaming
 - **Dual Stream Engine**: High-quality audio streaming powered by **YouTube Music InnerTube** and **JioSaavn** (lossless DES-decrypted 320kbps AAC).
-- **Background Media3 Playback**: Rock-solid background audio playback and lock-screen controls via AndroidX Media3 MediaSessionService.
+- **Background Media3 Playback**: Rock-solid background audio playback and lock-screen controls via AndroidX Media3 `MediaSessionService`.
 - **Intelligent Fallback**: Automatic stream resolution and format selection for instant playback with minimal buffering.
 
 ### 🎙️ Synchronized Lyrics
 - **Real-Time Synchronized Lyrics**: Powered by LRCLIB with 1:1 millisecond timestamp synchronization.
 - **Original Language Lyrics**: Preserves authentic lyrics in their native script (Devanagari, Gurmukhi, Hangul, Japanese, Roman, etc.).
-- **Live Sync Fine-Tuning**: Built-in real-time offset adjustment controls (−0.5s / +0.5s) for on-the-fly timing adjustments.
+- **Live Sync Fine-Tuning**: Built-in real-time offset adjustment controls (`−0.5s` / `+0.5s`) for on-the-fly timing adjustments.
 - **Acoustic Calibration**: Automatic intro offset calibration for acoustic cuts and live edits.
 - **Interactive Seeking**: Tap any lyric line to jump directly to that timestamp in the audio.
 
@@ -28,7 +36,7 @@
 - **Tactile Vinyl Player**: Interactive rotating vinyl disc with realistic vinyl groove textures and album artwork.
 - **Animated Waveform Progress Bar**: Interactive, scrubbable animated waveform visualizer.
 - **Floating Island Mini-Player**: Smooth floating mini-player with swipe-to-dismiss and persistent playback controls.
-- **Custom Typography**: Tailored static type system featuring **Sora** (Headings, Stats, Active Lyrics) and **Urbanist** (Song titles, Metadata, UI elements).
+- **Custom Typography**: Tailored static type system featuring **Macondo** (Brand Identity), **Sora** (Headings, Stats, Active Lyrics), and **Urbanist** (Song titles, Metadata, UI elements).
 - **Infinite Genre Marquee**: Smooth infinite looping genre carousels for effortless music discovery.
 
 ### 🔍 Search & Music Discovery
@@ -46,57 +54,12 @@
 
 Sielo follows **Clean Architecture** principles and is organized into modular Gradle layers:
 
-`
-Sielo/
-├── app/                  # Main Android Application & Jetpack Compose UI
-│   ├── ui/               # Screens, Theme, Components, Navigation
-│   └── viewmodel/        # Architecture ViewModels & StateFlow bindings
-├── core-audio/           # Media3 ExoPlayer Engine & Background PlaybackService
-├── core-lyrics/          # LRCLIB API Client, LRC Parser & Transliteration Engine
-├── core-network/         # InnerTube API, JioSaavn Stream Resolvers & Artist Decoders
-└── core-database/        # Room Database, Listening History DAO & Entities
-`
-
-### Tech Stack
-- **Language**: Kotlin (Coroutines, StateFlow, Flow)
-- **UI Framework**: Jetpack Compose + Material 3
-- **Dependency Injection**: Dagger Hilt
-- **Audio Engine**: AndroidX Media3 (ExoPlayer, MediaSession)
-- **Networking**: OkHttp 4, Kotlinx Serialization
-- **Image Loading**: Coil 3
-- **Local Database**: Room (KSP)
-
----
-
-## 🚀 Getting Started
-
-### Prerequisites
-- Android Studio Ladybug / Meerkat or newer
-- JDK 17 or higher
-- Android SDK 34+ (minSdk 26)
-
-### Clone & Build
-`ash
-# Clone the repository
-git clone https://github.com/VineetChudasama/Sielo.git
-cd Sielo
-
-# Build Debug APK
-./gradlew assembleDebug
-`
-
-The compiled APK will be located at:
-`
-app/build/outputs/apk/debug/app-debug.apk
-`
-
-### Install to Connected Device
-`ash
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-`
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+```text
+Sielo
+├── app/                  # Main Android Application & Compose UI
+│   ├── ui/               # Screens, Themes & Tactile Components
+│   └── viewmodel/        # StateFlow ViewModels
+├── core-audio/           # Media3 ExoPlayer & Background Service
+├── core-lyrics/          # LRCLIB API & Synced Lyrics Engine
+├── core-network/         # InnerTube & JioSaavn Lossless Resolvers
+└── core-database/        # Room DB & Listening Analytics
