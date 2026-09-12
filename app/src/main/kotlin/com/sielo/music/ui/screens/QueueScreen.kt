@@ -53,6 +53,8 @@ import com.sielo.music.ui.theme.SurfaceDark
 import com.sielo.music.ui.theme.TextMuted
 import com.sielo.music.ui.theme.TextPrimary
 import com.sielo.music.ui.theme.TextSecondary
+import com.sielo.music.ui.theme.SoraFontFamily
+import com.sielo.music.ui.theme.UrbanistFontFamily
 import com.sielo.music.viewmodel.PlayerViewModel
 
 @Composable
@@ -110,13 +112,16 @@ fun QueueScreen(
                     Text(
                         text = "Up Next Queue",
                         color = TextPrimary,
+                        fontFamily = SoraFontFamily,
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
                         text = "${upcomingTracks.size} upcoming songs",
                         color = TextSecondary,
-                        fontSize = 12.sp
+                        fontFamily = UrbanistFontFamily,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Normal
                     )
                 }
             }
@@ -127,6 +132,7 @@ fun QueueScreen(
             Text(
                 text = "NOW PLAYING",
                 color = AccentCoral,
+                fontFamily = SoraFontFamily,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.sp,
@@ -163,8 +169,9 @@ fun QueueScreen(
                     Text(
                         text = track.title,
                         color = TextPrimary,
+                        fontFamily = UrbanistFontFamily,
                         fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
+                        fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -172,7 +179,9 @@ fun QueueScreen(
                     Text(
                         text = track.artist,
                         color = PaletteSand,
+                        fontFamily = UrbanistFontFamily,
                         fontSize = 13.sp,
+                        fontWeight = FontWeight.Normal,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -191,6 +200,7 @@ fun QueueScreen(
             Text(
                 text = "UP NEXT (${upcomingTracks.size} SONGS)",
                 color = TextSecondary,
+                fontFamily = SoraFontFamily,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.sp,
@@ -284,8 +294,9 @@ fun QueueScreen(
                                 Text(
                                     text = qTrack.title,
                                     color = TextPrimary,
+                                    fontFamily = UrbanistFontFamily,
                                     fontSize = 14.sp,
-                                    fontWeight = FontWeight.Medium,
+                                    fontWeight = FontWeight.SemiBold,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
@@ -293,7 +304,9 @@ fun QueueScreen(
                                 Text(
                                     text = qTrack.artist,
                                     color = TextSecondary,
+                                    fontFamily = UrbanistFontFamily,
                                     fontSize = 12.sp,
+                                    fontWeight = FontWeight.Normal,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
@@ -302,7 +315,9 @@ fun QueueScreen(
                             Text(
                                 text = qTrack.durationText ?: "",
                                 color = TextMuted,
-                                fontSize = 12.sp
+                                fontFamily = UrbanistFontFamily,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Normal
                             )
                         }
                     }

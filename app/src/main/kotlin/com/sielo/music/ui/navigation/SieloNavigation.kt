@@ -2,10 +2,12 @@ package com.sielo.music.ui.navigation
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Analytics
+import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.Analytics
+import androidx.compose.material.icons.outlined.Headphones
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.Search
@@ -31,6 +33,13 @@ sealed class Screen(
         unselectedIcon = Icons.Outlined.Search
     )
 
+    data object ListenTogether : Screen(
+        route = "listen_together",
+        title = "Listen Together",
+        selectedIcon = Icons.Filled.Headphones,
+        unselectedIcon = Icons.Outlined.Headphones
+    )
+
     data object Stats : Screen(
         route = "stats",
         title = "Stats",
@@ -46,6 +55,8 @@ sealed class Screen(
     )
 
     companion object {
-        val bottomNavItems = listOf(Home, Search, Stats, Profile)
+        val bottomNavItems: List<Screen>
+            get() = listOf(Home, Search, ListenTogether, Stats, Profile)
     }
 }
+

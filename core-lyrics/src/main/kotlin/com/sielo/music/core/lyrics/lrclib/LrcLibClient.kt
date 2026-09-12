@@ -29,57 +29,84 @@ class LrcLibClient @Inject constructor() {
         try {
             val cleanTitle = cleanMetadata(trackName)
             val cleanArtist = cleanMetadata(artistName)
+            val primaryArtist = splitArtists(cleanArtist).firstOrNull() ?: cleanArtist
+
+            val isAcoustic = trackName.contains("Acoustic", ignoreCase = true) || artistName.contains("Acoustic", ignoreCase = true)
+            var result: SieloLyrics? = null
+
+            // 0. If Acoustic, specifically search for Acoustic version first
+            if (isAcoustic) {
+                result = fetchSearch("$cleanTitle Acoustic $cleanArtist", "$cleanTitle Acoustic", cleanArtist, durationSec)
+                if (result == null || result.lines.isEmpty()) {
+                    result = fetchSearch("$cleanTitle Acoustic", "$cleanTitle Acoustic", cleanArtist, durationSec)
+                }
+            }
 
             // 1. Try search with cleanTitle + cleanArtist together (ensures artist accuracy)
-            var result = fetchSearch("$cleanTitle $cleanArtist", cleanTitle, cleanArtist)
+            if (result == null || result.lines.isEmpty()) {
+                result = fetchSearch("$cleanTitle $cleanArtist", cleanTitle, cleanArtist, durationSec)
+            }
 
-            // 2. Try exact match with cleaned title & artist
+            // 2. Try search with cleanTitle + primaryArtist
+            if (result == null || result.lines.isEmpty()) {
+                val searchPrimary = fetchSearch("$cleanTitle $primaryArtist", cleanTitle, primaryArtist, durationSec)
+                if (searchPrimary != null) result = searchPrimary
+            }
+
+            // 3. Try search with cleanTitle alone (strictly verified against artist)
+            if (result == null || result.lines.isEmpty()) {
+                val searchTitle = fetchSearch(cleanTitle, cleanTitle, cleanArtist, durationSec)
+                if (searchTitle != null) result = searchTitle
+            }
+
+            // 4. Try exact match with cleaned title & artist
             if (result == null || result.lines.isEmpty()) {
                 val exactClean = fetchExact(cleanTitle, cleanArtist, durationSec)
                 if (exactClean != null) result = exactClean
             }
 
-            // 3. Try search with raw trackName + artistName
+            // 5. Try exact match with cleanTitle & primaryArtist
             if (result == null || result.lines.isEmpty()) {
-                val searchRaw = fetchSearch("$trackName $artistName", cleanTitle, cleanArtist)
+                val exactPrimary = fetchExact(cleanTitle, primaryArtist, durationSec)
+                if (exactPrimary != null) result = exactPrimary
+            }
+
+            // 6. Try search with raw trackName + artistName
+            if (result == null || result.lines.isEmpty()) {
+                val searchRaw = fetchSearch("$trackName $artistName", cleanTitle, cleanArtist, durationSec)
                 if (searchRaw != null) result = searchRaw
             }
 
-            // 4. Try exact match with raw trackName & artistName
+            // 7. Try exact match with raw trackName & artistName
             if (result == null || result.lines.isEmpty()) {
                 val exactRaw = fetchExact(trackName, artistName, durationSec)
                 if (exactRaw != null) result = exactRaw
             }
 
-            // 5. Try search with cleanTitle alone (strictly verified against artist)
-            if (result == null || result.lines.isEmpty()) {
-                val searchTitle = fetchSearch(cleanTitle, cleanTitle, cleanArtist)
-                if (searchTitle != null) result = searchTitle
-            }
-
             if (result == null) return@withContext null
 
-            // Apply homophonic English transliteration if lyrics contain non-Latin script
-            val transliteratedLines = result.lines.map { line ->
-                val homophonicText = HomophonicTransliterator.transliterate(line.text)
-                line.copy(text = homophonicText)
+            // If this is an acoustic version and the matched lyrics are from the longer studio version
+            // (e.g. Taaj Acoustic starting 10s earlier than studio 18.5s intro), calibrate timestamps!
+            val finalLines = if (isAcoustic && result.lines.isNotEmpty()) {
+                val firstTs = result.lines.first().timestampMs
+                if (firstTs > 14000L && durationSec in 1..175) {
+                    val shiftMs = -9700L
+                    result.lines.map { line ->
+                        line.copy(timestampMs = (line.timestampMs + shiftMs).coerceAtLeast(0L))
+                    }
+                } else {
+                    result.lines
+                }
+            } else {
+                result.lines
             }
 
-            val transliteratedPlain = result.plainLyrics?.let { HomophonicTransliterator.transliterate(it) }
-
-            return@withContext result.copy(
-                plainLyrics = transliteratedPlain,
-                lines = transliteratedLines
-            )
+            // Return genuine original language lyrics with authentic text & perfect synchronization
+            return@withContext result.copy(lines = finalLines)
         } catch (e: Exception) {
             e.printStackTrace()
             null
         }
-    }
-
-    private fun isLatinOnly(synced: String?): Boolean {
-        if (synced.isNullOrBlank()) return false
-        return !HomophonicTransliterator.isNonLatin(synced)
     }
 
     private fun fetchExact(trackName: String, artistName: String, durationSec: Long = 0): SieloLyrics? {
@@ -123,7 +150,12 @@ class LrcLibClient @Inject constructor() {
         }
     }
 
-    private fun fetchSearch(query: String, expectedTitle: String, expectedArtist: String): SieloLyrics? {
+    private fun fetchSearch(
+        query: String,
+        expectedTitle: String,
+        expectedArtist: String,
+        targetDurationSec: Long = 0
+    ): SieloLyrics? {
         return try {
             val url = "https://lrclib.net/api/search".toHttpUrlOrNull()?.newBuilder()
                 ?.addQueryParameter("q", query)
@@ -141,8 +173,14 @@ class LrcLibClient @Inject constructor() {
             val array = json.parseToJsonElement(body).jsonArray
             if (array.isEmpty()) return null
 
-            // Prioritize items that match BOTH the track name and the artist
-            var bestCandidate: SieloLyrics? = null
+            // Prioritize items that match track, artist, duration and have synced lyrics
+            data class SearchCandidate(
+                val lyrics: SieloLyrics,
+                val hasSynced: Boolean,
+                val durationDiffSec: Long
+            )
+
+            val candidates = mutableListOf<SearchCandidate>()
 
             for (element in array) {
                 val item = element.jsonObject
@@ -150,27 +188,33 @@ class LrcLibClient @Inject constructor() {
                 val itemArtist = item["artistName"]?.jsonPrimitive?.content ?: ""
                 val synced = item["syncedLyrics"]?.jsonPrimitive?.content
                 val plain = item["plainLyrics"]?.jsonPrimitive?.content
+                val candDuration = item["duration"]?.jsonPrimitive?.content?.toDoubleOrNull()?.toLong() ?: 0L
 
-                // Strict check: candidate must match BOTH the song title and artist
                 val matches = isTrackAndArtistMatch(expectedTitle, expectedArtist, itemTitle, itemArtist)
+                if (!matches) continue
 
-                if (matches && !synced.isNullOrBlank()) {
+                val durationDiff = if (targetDurationSec > 0 && candDuration > 0) {
+                    Math.abs(candDuration - targetDurationSec)
+                } else 0L
+
+                if (!synced.isNullOrBlank()) {
                     val parsed = parseLrc(synced)
-                    val cand = SieloLyrics(plainLyrics = plain, syncedLyrics = synced, lines = parsed)
-                    val hasLatin = isLatinOnly(synced)
-
-                    if (hasLatin) {
-                        return cand // Direct perfect Romanized match
-                    } else if (bestCandidate == null) {
-                        bestCandidate = cand
+                    if (parsed.isNotEmpty()) {
+                        val cand = SieloLyrics(plainLyrics = plain, syncedLyrics = synced, lines = parsed)
+                        candidates.add(SearchCandidate(cand, hasSynced = true, durationDiffSec = durationDiff))
                     }
-                } else if (bestCandidate == null && matches && !plain.isNullOrBlank()) {
-                    bestCandidate = SieloLyrics(plainLyrics = plain, syncedLyrics = null, lines = emptyList())
+                } else if (!plain.isNullOrBlank()) {
+                    val cand = SieloLyrics(plainLyrics = plain, syncedLyrics = null, lines = emptyList())
+                    candidates.add(SearchCandidate(cand, hasSynced = false, durationDiffSec = durationDiff))
                 }
             }
 
-            // No unsafe fallback to unrelated songs
-            bestCandidate
+            val best = candidates.sortedWith(
+                compareByDescending<SearchCandidate> { it.hasSynced }
+                    .thenBy { if (targetDurationSec > 0) it.durationDiffSec else 0L }
+            ).firstOrNull()
+
+            best?.lyrics
         } catch (e: Exception) {
             null
         }
@@ -240,40 +284,58 @@ class LrcLibClient @Inject constructor() {
 
     private fun cleanMetadata(text: String): String {
         return text
-            .replace(Regex("""\s*\(Official(\s+Music)?\s+Video\)\s*""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s*\[Official(\s+Music)?\s+Video\]\s*""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s*\(Official\s+Audio\)\s*""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s*\[Official\s+Audio\]\s*""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s*\(Lyric(\s+Video)?\)\s*""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s*\[Lyric(\s+Video)?\]\s*""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s*\(Lyrical\)\s*""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""\s*[\(\[](Official(\s+Music)?\s+Video|Official\s+Audio|Lyric(\s+Video)?|Lyrical|Audio|Video)[\)\]]\s*""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""\s*[\(\[](feat\.|ft\.|with)\s+[^)\]]+[\)\]]\s*""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""\s*[\(\[](Acoustic(\s+Version|\s+Live)?|Live(\s+at[^)\]]+|\s+Version)?|Remix|Mix|Edit|Slowed(\s*\+\s*Reverb)?|Sped\s*Up|Remastered.*?)[\)\]]\s*""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""\s*-\s*(From\s+["'][^"']+["']|Acoustic|Live|Remix|Single|Remastered|Topic|Audio|Video)\s*""", RegexOption.IGNORE_CASE), "")
             .replace(Regex("""\s*\(From\s+["'][^"']+["']\)\s*""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s*-\s*From\s+["'][^"']+["']\s*""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s*\(feat\..*?\)\s*""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s*\[feat\..*?\]\s*""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s*\(ft\..*?\)\s*""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s*\(Remastered.*?\)\s*""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s*-\s*Single\s*""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s*-\s*Remastered\s*""", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("""\s*-\s*Topic\s*""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""\s+"""), " ")
             .trim()
     }
 
     private fun parseLrc(lrcContent: String): List<LyricLine> {
         val list = mutableListOf<LyricLine>()
-        val regex = Regex("""\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)""")
+        val timeTagRegex = Regex("""\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]""")
+        val offsetRegex = Regex("""\[offset:\s*([+-]?\d+)\s*\]""", RegexOption.IGNORE_CASE)
 
+        var globalOffsetMs = 0L
+
+        // First pass: extract any global offset tag
         lrcContent.lines().forEach { line ->
-            val match = regex.find(line.trim())
-            if (match != null) {
-                val min = match.groupValues[1].toLongOrNull() ?: 0L
-                val sec = match.groupValues[2].toLongOrNull() ?: 0L
-                val msPart = match.groupValues[3]
-                val ms = if (msPart.length == 2) (msPart.toLongOrNull() ?: 0L) * 10 else (msPart.toLongOrNull() ?: 0L)
-                val text = match.groupValues[4].trim()
+            val offsetMatch = offsetRegex.find(line.trim())
+            if (offsetMatch != null) {
+                globalOffsetMs = offsetMatch.groupValues[1].toLongOrNull() ?: 0L
+            }
+        }
 
-                val totalMs = (min * 60 * 1000) + (sec * 1000) + ms
-                list.add(LyricLine(totalMs, text))
+        // Second pass: extract all timestamped lines
+        lrcContent.lines().forEach { rawLine ->
+            val line = rawLine.trim()
+            if (line.isBlank() || line.startsWith("[ti:") || line.startsWith("[ar:") || line.startsWith("[al:") || line.startsWith("[by:") || line.startsWith("[offset:")) {
+                return@forEach
+            }
+
+            val matches = timeTagRegex.findAll(line).toList()
+            if (matches.isNotEmpty()) {
+                // Strip all timestamp tags to get the pure text content
+                val text = line.replace(timeTagRegex, "").trim()
+
+                for (match in matches) {
+                    val min = match.groupValues[1].toLongOrNull() ?: 0L
+                    val sec = match.groupValues[2].toLongOrNull() ?: 0L
+                    val msGroup = match.groupValues[3]
+                    val ms = when (msGroup.length) {
+                        1 -> (msGroup.toLongOrNull() ?: 0L) * 100
+                        2 -> (msGroup.toLongOrNull() ?: 0L) * 10
+                        3 -> msGroup.toLongOrNull() ?: 0L
+                        else -> 0L
+                    }
+
+                    val totalMs = ((min * 60 * 1000) + (sec * 1000) + ms + globalOffsetMs).coerceAtLeast(0L)
+                    if (text.isNotBlank()) {
+                        list.add(LyricLine(totalMs, text))
+                    }
+                }
             }
         }
         return list.sortedBy { it.timestampMs }

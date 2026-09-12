@@ -25,9 +25,24 @@ object JioSaavnSongArtworkResolver {
         .retryOnConnectionFailure(true)
         .build()
 
+    // Persistent in-memory cache so resolved studio artworks are instantly retrieved without re-fetching
+    private val memoryCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    private fun cacheKey(title: String?, artist: String?): String {
+        return "${title?.trim()?.lowercase()}::${artist?.trim()?.lowercase()}"
+    }
+
+    fun getCachedArtwork(title: String?, artist: String?): String? {
+        val key = cacheKey(title, artist)
+        return memoryCache[key]
+    }
+
     suspend fun resolveSongArtwork(title: String?, artist: String?): String? = withContext(Dispatchers.IO) {
         val cleanTitle = title?.trim() ?: ""
         if (cleanTitle.isBlank()) return@withContext null
+
+        val key = cacheKey(title, artist)
+        memoryCache[key]?.let { return@withContext it }
 
         val filteredTitle = cleanTitle
             .replace(Regex("(?i)\\s*\\(official.*?\\)"), "")
@@ -51,7 +66,11 @@ object JioSaavnSongArtworkResolver {
         val query1 = "$filteredTitle $cleanArtist".trim()
         val query2 = filteredTitle.trim()
 
-        fetchArtworkForQuery(query1) ?: if (query1 != query2) fetchArtworkForQuery(query2) else null
+        val resolved = fetchArtworkForQuery(query1) ?: if (query1 != query2) fetchArtworkForQuery(query2) else null
+        if (!resolved.isNullOrBlank()) {
+            memoryCache[key] = resolved
+        }
+        resolved
     }
 
     private fun fetchArtworkForQuery(query: String): String? {

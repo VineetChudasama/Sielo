@@ -56,6 +56,9 @@ import com.sielo.music.ui.theme.MacondoFontFamily
 import com.sielo.music.ui.theme.PaletteCream
 import com.sielo.music.ui.theme.PaletteDarkNavy
 import com.sielo.music.ui.theme.PaletteOxfordBlue
+import androidx.compose.foundation.basicMarquee
+import com.sielo.music.ui.theme.SoraFontFamily
+import com.sielo.music.ui.theme.UrbanistFontFamily
 import com.sielo.music.ui.theme.PaletteSageGreen
 import com.sielo.music.ui.theme.PaletteSand
 import com.sielo.music.ui.theme.PaletteSlateBlue
@@ -268,6 +271,7 @@ fun HomeScreen(
                     Text(
                         text = "Keep listening",
                         color = PaletteSand,
+                        fontFamily = SoraFontFamily,
                         fontSize = 22.sp,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
@@ -299,6 +303,7 @@ fun HomeScreen(
                         Text(
                             text = "Similar to",
                             color = TextSecondary,
+                            fontFamily = UrbanistFontFamily,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Medium
                         )
@@ -310,6 +315,7 @@ fun HomeScreen(
                             Text(
                                 text = topArtistName,
                                 color = PaletteSand,
+                                fontFamily = SoraFontFamily,
                                 fontSize = 22.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -348,6 +354,7 @@ fun HomeScreen(
                         Text(
                             text = "Your playlists",
                             color = TextSecondary,
+                            fontFamily = UrbanistFontFamily,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Medium
                         )
@@ -359,6 +366,7 @@ fun HomeScreen(
                             Text(
                                 text = "Curated For You",
                                 color = PaletteSand,
+                                fontFamily = SoraFontFamily,
                                 fontSize = 22.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -398,13 +406,16 @@ fun HomeScreen(
                             Text(
                                 text = "Rediscover Your Favorites",
                                 color = PaletteSand,
+                                fontFamily = SoraFontFamily,
                                 fontSize = 22.sp,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
                                 text = "Songs you loved a few days ago, ready for replay",
                                 color = TextSecondary,
-                                fontSize = 12.sp
+                                fontFamily = UrbanistFontFamily,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Normal
                             )
                         }
 
@@ -427,7 +438,6 @@ fun HomeScreen(
                 }
 
                 // Section 5: Explore Trending Music Genres (10 Trending Genres with Song Drilldown)
-                // Section 5: Explore Trending Music Genres (10 Trending Genres with Song Drilldown)
                 item {
                     Column(
                         modifier = Modifier
@@ -437,7 +447,8 @@ fun HomeScreen(
                         Text(
                             text = "DISCOVER",
                             color = PaletteSageGreen,
-                            fontSize = 11.sp,
+                            fontFamily = SoraFontFamily,
+                            fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                             letterSpacing = 1.sp
                         )
@@ -445,7 +456,8 @@ fun HomeScreen(
                         Text(
                             text = "Trending Music Genres",
                             color = PaletteSand,
-                            fontSize = 22.sp,
+                            fontFamily = SoraFontFamily,
+                            fontSize = 24.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -454,7 +466,7 @@ fun HomeScreen(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 20.dp, vertical = 10.dp),
+                            .padding(horizontal = 20.dp, vertical = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         for (chunk in trendingGenres.chunked(2)) {
@@ -492,7 +504,7 @@ fun TrendingGenreCard(
 ) {
     Box(
         modifier = modifier
-            .height(98.dp)
+            .height(102.dp)
             .clip(RoundedCornerShape(16.dp))
             .background(
                 Brush.linearGradient(
@@ -514,35 +526,37 @@ fun TrendingGenreCard(
             Column(
                 modifier = Modifier
                     .weight(1f)
-                    .padding(end = 4.dp),
+                    .padding(end = 6.dp),
                 verticalArrangement = Arrangement.Center
             ) {
                 Text(
                     text = genre.icon,
-                    fontSize = 20.sp
+                    fontSize = 22.sp
                 )
-                Spacer(modifier = Modifier.height(2.dp))
+                Spacer(modifier = Modifier.height(3.dp))
                 Text(
                     text = genre.name,
                     color = PaletteCream,
-                    fontSize = 13.sp,
+                    fontFamily = SoraFontFamily,
+                    fontSize = 14.sp,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE)
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
                     text = genre.description,
                     color = TextSecondary,
-                    fontSize = 10.sp,
-                    lineHeight = 13.sp,
+                    fontFamily = UrbanistFontFamily,
+                    fontSize = 11.5.sp,
+                    lineHeight = 14.sp,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE)
                 )
             }
             Box(
                 modifier = Modifier
-                    .size(28.dp)
+                    .size(30.dp)
                     .clip(CircleShape)
                     .background(PaletteDarkNavy.copy(alpha = 0.6f)),
                 contentAlignment = Alignment.Center
@@ -551,7 +565,7 @@ fun TrendingGenreCard(
                     imageVector = Icons.Default.PlayArrow,
                     contentDescription = "Explore",
                     tint = PaletteSand,
-                    modifier = Modifier.size(16.dp)
+                    modifier = Modifier.size(17.dp)
                 )
             }
         }
@@ -765,6 +779,7 @@ fun KeepListeningCard(
         Text(
             text = track.title,
             color = PaletteCream,
+            fontFamily = UrbanistFontFamily,
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
@@ -774,7 +789,9 @@ fun KeepListeningCard(
         Text(
             text = "${track.artist} • ${track.durationText ?: "3:24"}",
             color = TextSecondary,
+            fontFamily = UrbanistFontFamily,
             fontSize = 12.sp,
+            fontWeight = FontWeight.Normal,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
@@ -803,6 +820,7 @@ fun ArtistCircleCard(
         Text(
             text = artist.name,
             color = PaletteCream,
+            fontFamily = UrbanistFontFamily,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
@@ -854,6 +872,7 @@ fun PlaylistBentoCard(
         Text(
             text = playlist.title,
             color = PaletteCream,
+            fontFamily = UrbanistFontFamily,
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
@@ -863,7 +882,9 @@ fun PlaylistBentoCard(
         Text(
             text = playlist.subtitle,
             color = TextSecondary,
+            fontFamily = UrbanistFontFamily,
             fontSize = 12.sp,
+            fontWeight = FontWeight.Normal,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
@@ -903,6 +924,7 @@ fun RediscoverFavoriteRow(
                 Text(
                     text = track.title,
                     color = PaletteCream,
+                    fontFamily = UrbanistFontFamily,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
@@ -911,7 +933,9 @@ fun RediscoverFavoriteRow(
                 Text(
                     text = track.artist,
                     color = TextSecondary,
+                    fontFamily = UrbanistFontFamily,
                     fontSize = 12.sp,
+                    fontWeight = FontWeight.Normal,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )

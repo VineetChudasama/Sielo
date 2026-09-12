@@ -67,6 +67,18 @@ import com.sielo.music.ui.theme.TextPrimary
 import com.sielo.music.ui.theme.TextSecondary
 import com.sielo.music.viewmodel.PlayerViewModel
 
+import com.sielo.music.ui.theme.SoraFontFamily
+import com.sielo.music.ui.theme.UrbanistFontFamily
+
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Pause
+
 @Composable
 fun PlayerScreen(
     viewModel: PlayerViewModel,
@@ -80,6 +92,7 @@ fun PlayerScreen(
     val track = playbackState.currentTrack ?: return
     var showLyrics by remember { mutableStateOf(false) }
     var isQueueOpen by remember { mutableStateOf(false) }
+    val lyricOffsetMs by viewModel.lyricOffsetMs.collectAsState()
 
     // Step-by-step back handling:
     // 1. If separated Queue screen is open -> close Queue screen and return to Player screen
@@ -106,17 +119,32 @@ fun PlayerScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 24.dp, vertical = 28.dp),
+                .padding(horizontal = 24.dp, vertical = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceBetween
         ) {
-            // Header Bar
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            // Header Bar (Balanced & Perfectly Centered Title in Between)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp),
+                contentAlignment = Alignment.Center
             ) {
-                IconButton(onClick = onClose) {
+                // Centered Title: "Lyrics" or "Now Playing"
+                Text(
+                    text = if (showLyrics) "Lyrics" else "Now Playing",
+                    color = TextPrimary,
+                    fontFamily = SoraFontFamily,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center
+                )
+
+                // Left Action (Close)
+                IconButton(
+                    onClick = onClose,
+                    modifier = Modifier.align(Alignment.CenterStart)
+                ) {
                     Icon(
                         imageVector = Icons.Default.Close,
                         contentDescription = "Close",
@@ -124,14 +152,11 @@ fun PlayerScreen(
                     )
                 }
 
-                Text(
-                    text = if (showLyrics) "Synchronized Lyrics" else "Now Playing",
-                    color = TextPrimary,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                // Right Actions (Lyrics + Queue)
+                Row(
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     // Lyrics Toggle Button
                     IconButton(onClick = {
                         showLyrics = !showLyrics
@@ -156,11 +181,67 @@ fun PlayerScreen(
                 }
             }
 
+            // Sync Fine-Tuning Pill in Lyrics Mode
+            if (showLyrics && !lyrics?.lines.isNullOrEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 2.dp, bottom = 2.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "−0.5s",
+                        color = if (lyricOffsetMs < 0) AccentCoral else TextSecondary,
+                        fontFamily = UrbanistFontFamily,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 12.sp,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(SurfaceDark)
+                            .border(1.dp, BorderGlass, RoundedCornerShape(12.dp))
+                            .clickable { viewModel.adjustLyricOffset(-500L) }
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+
+                    Spacer(modifier = Modifier.width(10.dp))
+
+                    Text(
+                        text = if (lyricOffsetMs == 0L) "Sync: 0.0s" else "Sync: ${if (lyricOffsetMs > 0) "+" else ""}${lyricOffsetMs / 1000.0}s",
+                        color = if (lyricOffsetMs != 0L) AccentCoral else TextSecondary,
+                        fontFamily = SoraFontFamily,
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 11.sp,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { viewModel.resetLyricOffset() }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+
+                    Spacer(modifier = Modifier.width(10.dp))
+
+                    Text(
+                        text = "+0.5s",
+                        color = if (lyricOffsetMs > 0) AccentCoral else TextSecondary,
+                        fontFamily = UrbanistFontFamily,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 12.sp,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(SurfaceDark)
+                            .border(1.dp, BorderGlass, RoundedCornerShape(12.dp))
+                            .clickable { viewModel.adjustLyricOffset(500L) }
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
             // Center Content: Rotating Vinyl Disc or Centered Synced Lyrics
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth(),
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
                 contentAlignment = Alignment.Center
             ) {
                 if (!showLyrics) {
@@ -171,7 +252,7 @@ fun PlayerScreen(
                         isPlaying = playbackState.isPlaying
                     )
                 } else {
-                    // Centered Synced Lyrics View
+                    // Centered Synced Lyrics View with Smooth Top/Bottom Edge Fading
                     if (isLyricsLoading) {
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
@@ -186,54 +267,78 @@ fun PlayerScreen(
                             Text(
                                 text = "Finding lyrics...",
                                 color = TextSecondary,
-                                fontSize = 14.sp
+                                fontFamily = UrbanistFontFamily,
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 15.sp
                             )
                         }
                     } else if (lyrics?.lines.isNullOrEmpty()) {
                         Text(
                             text = lyrics?.plainLyrics ?: "No synchronized lyrics available",
                             color = TextSecondary,
+                            fontFamily = UrbanistFontFamily,
+                            fontWeight = FontWeight.Medium,
                             textAlign = TextAlign.Center,
-                            fontSize = 16.sp,
-                            lineHeight = 24.sp,
+                            fontSize = 17.sp,
+                            lineHeight = 26.sp,
                             modifier = Modifier.padding(horizontal = 20.dp)
                         )
                     } else {
                         val lines = lyrics!!.lines
                         val listState = rememberLazyListState()
 
-                        val activeIndex = lines.indexOfLast { it.timestampMs <= playbackState.currentPositionMs }
-                            .coerceAtLeast(0)
+                        val currentMs = playbackState.currentPositionMs
+                        val activeIndex = lines.indexOfLast { (it.timestampMs + lyricOffsetMs) <= currentMs }
 
-                        // Automatically keep the playing lyric line centered
+                        // Smoothly scroll to keep the currently active lyric line centered
                         LaunchedEffect(activeIndex) {
-                            if (lines.isNotEmpty() && activeIndex in lines.indices) {
-                                listState.animateScrollToItem(
-                                    index = activeIndex,
-                                    scrollOffset = -180
-                                )
+                            if (lines.isNotEmpty()) {
+                                if (activeIndex in lines.indices) {
+                                    listState.animateScrollToItem(
+                                        index = activeIndex,
+                                        scrollOffset = 0
+                                    )
+                                } else if (activeIndex == -1) {
+                                    listState.animateScrollToItem(index = 0, scrollOffset = 0)
+                                }
                             }
                         }
 
                         LazyColumn(
                             state = listState,
-                            modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(vertical = 120.dp),
-                            verticalArrangement = Arrangement.spacedBy(20.dp),
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
+                                .drawWithContent {
+                                    drawContent()
+                                    drawRect(
+                                        brush = Brush.verticalGradient(
+                                            0.0f to Color.Transparent,
+                                            0.10f to Color.Black,
+                                            0.90f to Color.Black,
+                                            1.0f to Color.Transparent
+                                        ),
+                                        blendMode = BlendMode.DstIn
+                                    )
+                                },
+                            contentPadding = PaddingValues(top = 220.dp, bottom = 280.dp),
+                            verticalArrangement = Arrangement.spacedBy(22.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             itemsIndexed(lines) { index, line ->
                                 val isActive = index == activeIndex
                                 Text(
                                     text = line.text,
-                                    color = if (isActive) PaletteCream else PaletteSlateBlue.copy(alpha = 0.5f),
-                                    fontSize = if (isActive) 22.sp else 16.sp,
+                                    color = if (isActive) PaletteCream else PaletteSlateBlue.copy(alpha = 0.40f),
+                                    fontFamily = if (isActive) SoraFontFamily else UrbanistFontFamily,
+                                    fontSize = if (isActive) 24.sp else 17.sp,
                                     fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
+                                    lineHeight = if (isActive) 34.sp else 24.sp,
                                     textAlign = TextAlign.Center,
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .clip(RoundedCornerShape(8.dp))
-                                        .clickable { viewModel.seekTo(line.timestampMs) }
+                                        .clickable { viewModel.seekTo((line.timestampMs + lyricOffsetMs).coerceAtLeast(0L)) }
                                         .padding(horizontal = 16.dp, vertical = 6.dp)
                                 )
                             }
@@ -243,88 +348,185 @@ fun PlayerScreen(
             }
 
             // Bottom Track Info & Tactile Controls
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                // Title & Artist
-                Text(
-                    text = track.title,
-                    color = TextPrimary,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    textAlign = TextAlign.Center
-                )
-
-                Spacer(modifier = Modifier.height(4.dp))
-
-                Text(
-                    text = track.artist,
-                    color = TextSecondary,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium
-                )
-
-                Spacer(modifier = Modifier.height(24.dp))
-
-                // Premium Animated Waveform Progress Bar & Interactive Seeking
-                WaveformProgressBar(
-                    currentPositionMs = playbackState.currentPositionMs,
-                    durationMs = playbackState.durationMs,
-                    isPlaying = playbackState.isPlaying,
-                    trackId = track.id,
-                    onSeek = { targetMs -> viewModel.seekTo(targetMs) }
-                )
-
-                Spacer(modifier = Modifier.height(20.dp))
-
-                // Controls
-                Row(
+            if (!showLyrics) {
+                // Full Screen Vinyl Mode Controls
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(56.dp)
-                            .clip(CircleShape)
-                            .background(SurfaceDark)
-                            .border(1.dp, BorderGlass, CircleShape)
-                            .clickable { viewModel.skipPrevious() },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.SkipPrevious,
-                            contentDescription = "Previous",
-                            tint = TextPrimary,
-                            modifier = Modifier.size(28.dp)
-                        )
-                    }
-
-                    TactilePlayButton(
-                        isPlaying = playbackState.isPlaying,
-                        onClick = { viewModel.togglePlayPause() },
-                        size = 72
+                    // Title & Artist (Song Title: Urbanist 600, Metadata: Urbanist 400)
+                    Text(
+                        text = track.title,
+                        color = TextPrimary,
+                        fontFamily = UrbanistFontFamily,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center
                     )
 
-                    Box(
-                        modifier = Modifier
-                            .size(56.dp)
-                            .clip(CircleShape)
-                            .background(SurfaceDark)
-                            .border(1.dp, BorderGlass, CircleShape)
-                            .clickable { viewModel.skipNext() },
-                        contentAlignment = Alignment.Center
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    Text(
+                        text = track.artist,
+                        color = TextSecondary,
+                        fontFamily = UrbanistFontFamily,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Normal
+                    )
+
+                    Spacer(modifier = Modifier.height(22.dp))
+
+                    // Premium Animated Waveform Progress Bar & Interactive Seeking
+                    WaveformProgressBar(
+                        currentPositionMs = playbackState.currentPositionMs,
+                        durationMs = playbackState.durationMs,
+                        isPlaying = playbackState.isPlaying,
+                        trackId = track.id,
+                        onSeek = { targetMs -> viewModel.seekTo(targetMs) }
+                    )
+
+                    Spacer(modifier = Modifier.height(18.dp))
+
+                    // Controls
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.SkipNext,
-                            contentDescription = "Next",
-                            tint = TextPrimary,
-                            modifier = Modifier.size(28.dp)
+                        Box(
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(CircleShape)
+                                .background(SurfaceDark)
+                                .border(1.dp, BorderGlass, CircleShape)
+                                .clickable { viewModel.skipPrevious() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.SkipPrevious,
+                                contentDescription = "Previous",
+                                tint = TextPrimary,
+                                modifier = Modifier.size(28.dp)
+                            )
+                        }
+
+                        TactilePlayButton(
+                            isPlaying = playbackState.isPlaying,
+                            onClick = { viewModel.togglePlayPause() },
+                            size = 72
                         )
+
+                        Box(
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(CircleShape)
+                                .background(SurfaceDark)
+                                .border(1.dp, BorderGlass, CircleShape)
+                                .clickable { viewModel.skipNext() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.SkipNext,
+                                contentDescription = "Next",
+                                tint = TextPrimary,
+                                modifier = Modifier.size(28.dp)
+                            )
+                        }
                     }
+                }
+            } else {
+                // Compact Streamlined Bar in Lyrics Mode (Prevents Overlap & Keeps Maximum Focus on Lyrics)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(SurfaceDark)
+                        .border(1.dp, BorderGlass, RoundedCornerShape(18.dp))
+                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = track.title,
+                                color = TextPrimary,
+                                fontFamily = UrbanistFontFamily,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = track.artist,
+                                color = TextSecondary,
+                                fontFamily = UrbanistFontFamily,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Normal,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            IconButton(
+                                onClick = { viewModel.skipPrevious() },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.SkipPrevious,
+                                    contentDescription = "Previous",
+                                    tint = TextPrimary,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .size(42.dp)
+                                    .clip(CircleShape)
+                                    .background(PaletteCream)
+                                    .clickable { viewModel.togglePlayPause() },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = if (playbackState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                    contentDescription = if (playbackState.isPlaying) "Pause" else "Play",
+                                    tint = ObsidianBlack,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+
+                            IconButton(
+                                onClick = { viewModel.skipNext() },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.SkipNext,
+                                    contentDescription = "Next",
+                                    tint = TextPrimary,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    WaveformProgressBar(
+                        currentPositionMs = playbackState.currentPositionMs,
+                        durationMs = playbackState.durationMs,
+                        isPlaying = playbackState.isPlaying,
+                        trackId = track.id,
+                        onSeek = { targetMs -> viewModel.seekTo(targetMs) }
+                    )
                 }
             }
         }

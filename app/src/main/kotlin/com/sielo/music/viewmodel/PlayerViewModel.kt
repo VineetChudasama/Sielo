@@ -32,6 +32,9 @@ class PlayerViewModel @Inject constructor(
     private val _isLyricsLoading = MutableStateFlow(false)
     val isLyricsLoading: StateFlow<Boolean> = _isLyricsLoading.asStateFlow()
 
+    private val _lyricOffsetMs = MutableStateFlow(0L)
+    val lyricOffsetMs: StateFlow<Long> = _lyricOffsetMs.asStateFlow()
+
     private var currentLoadedTrackId: String? = null
     private var lyricsJob: Job? = null
 
@@ -40,17 +43,30 @@ class PlayerViewModel @Inject constructor(
             playbackState.collect { state ->
                 val track = state.currentTrack
                 if (track != null) {
+                    val durationSec = if (track.durationSeconds > 0) track.durationSeconds else (state.durationMs / 1000)
                     if (currentLoadedTrackId != track.id) {
                         currentLoadedTrackId = track.id
-                        fetchLyrics(track.id, track.title, track.artist, track.durationSeconds)
+                        _lyricOffsetMs.value = 0L
+                        fetchLyrics(track.id, track.title, track.artist, durationSec)
+                    } else if (durationSec > 0 && (_lyrics.value == null || _lyrics.value?.lines.isNullOrEmpty()) && !_isLyricsLoading.value) {
+                        fetchLyrics(track.id, track.title, track.artist, durationSec)
                     }
                 } else {
                     currentLoadedTrackId = null
                     _lyrics.value = null
+                    _lyricOffsetMs.value = 0L
                     _isLyricsLoading.value = false
                 }
             }
         }
+    }
+
+    fun adjustLyricOffset(deltaMs: Long) {
+        _lyricOffsetMs.value += deltaMs
+    }
+
+    fun resetLyricOffset() {
+        _lyricOffsetMs.value = 0L
     }
 
     private fun fetchLyrics(trackId: String, track: String, artist: String, durationSec: Long) {

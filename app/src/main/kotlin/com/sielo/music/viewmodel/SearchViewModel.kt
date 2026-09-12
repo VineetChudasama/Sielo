@@ -57,12 +57,12 @@ class SearchViewModel @Inject constructor(
     private val _isSearching = MutableStateFlow(false)
     val isSearching: StateFlow<Boolean> = _isSearching.asStateFlow()
 
-    // Recent Search Queries for Dropdown
-    val recentSearches: StateFlow<List<SearchHistoryEntity>> = searchHistoryDao.getRecentSearchQueries(8)
+    // Recent Search Queries
+    val recentSearches: StateFlow<List<SearchHistoryEntity>> = searchHistoryDao.getRecentSearchQueries(15)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Previously Searched & Played Tracks (ONLY tracks played after searching)
-    val previousPlayedSongs: StateFlow<List<SearchPlayHistoryEntity>> = searchPlayHistoryDao.getRecentSearchPlays(8)
+    val previousPlayedSongs: StateFlow<List<SearchPlayHistoryEntity>> = searchPlayHistoryDao.getRecentSearchPlays(10)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val favorites = favoriteTrackDao.getAllFavorites()
@@ -81,26 +81,28 @@ class SearchViewModel @Inject constructor(
         }
 
         searchJob = viewModelScope.launch {
-            delay(300) // 300ms Debounce
+            // Ultra-responsive debounce for instant single-alphabet feedback
+            delay(120)
             executeSearch(query, _filterCategory.value)
         }
     }
 
     fun submitSearch(query: String) {
-        if (query.isBlank()) return
-        _searchQuery.value = query
-        saveSearchQuery(query)
+        val trimmed = query.trim()
+        if (trimmed.isBlank()) return
+        _searchQuery.value = trimmed
+        saveSearchQuery(trimmed)
         searchJob?.cancel()
         searchJob = viewModelScope.launch {
-            executeSearch(query, _filterCategory.value)
+            executeSearch(trimmed, _filterCategory.value)
         }
     }
 
     fun saveSearchQuery(query: String) {
         val trimmed = query.trim()
-        if (trimmed.isNotBlank()) {
+        if (trimmed.isNotBlank() && trimmed.length >= 1) {
             viewModelScope.launch {
-                searchHistoryDao.insertSearchQuery(SearchHistoryEntity(trimmed))
+                searchHistoryDao.insertSearchQuery(SearchHistoryEntity(query = trimmed, timestampMs = System.currentTimeMillis()))
             }
         }
     }
@@ -136,31 +138,94 @@ class SearchViewModel @Inject constructor(
     }
 
     private fun executeSearch(query: String, category: String) {
+        val trimmed = query.trim()
+        if (trimmed.length >= 2) {
+            saveSearchQuery(trimmed)
+        }
         viewModelScope.launch {
             _isSearching.value = true
             when (category) {
                 "Artists" -> {
-                    val artists = innerTubeClient.searchArtists(query)
-                    _artistResults.value = artists
+                    val artists = innerTubeClient.searchArtists(trimmed)
+                    _artistResults.value = rankArtists(artists, trimmed)
                     _searchResults.value = emptyList()
                 }
                 "Songs" -> {
-                    val tracks = innerTubeClient.search(query)
-                    _searchResults.value = tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+                    val tracks = innerTubeClient.search(trimmed)
+                    val deduplicated = tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+                    _searchResults.value = rankTracks(deduplicated, trimmed)
                     _artistResults.value = emptyList()
                 }
                 else -> { // "All" or other
-                    val tracks = innerTubeClient.search(query)
-                    val artists = innerTubeClient.searchArtists(query)
-                    _searchResults.value = tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
-                    _artistResults.value = artists
+                    val tracks = innerTubeClient.search(trimmed)
+                    val artists = innerTubeClient.searchArtists(trimmed)
+                    val deduplicated = tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+                    _searchResults.value = rankTracks(deduplicated, trimmed)
+                    _artistResults.value = rankArtists(artists, trimmed)
                 }
             }
             _isSearching.value = false
         }
     }
 
+    private fun rankTracks(tracks: List<SieloTrack>, query: String): List<SieloTrack> {
+        val q = query.trim().lowercase()
+        if (q.isBlank()) return tracks
+        val words = q.split(Regex("\\s+")).filter { it.isNotBlank() }
+
+        return tracks.sortedByDescending { track ->
+            val title = track.title.trim().lowercase()
+            val artist = track.artist.trim().lowercase()
+            var score = 0
+
+            // Exact match
+            if (title == q) score += 1000
+            else if (artist == q) score += 800
+            // Starts with exact query string
+            else if (title.startsWith(q)) score += 600
+            else if (artist.startsWith(q)) score += 500
+            // Word boundary match (e.g. "Star" in "A Star Is Born" or "The Starboy")
+            else if (title.contains(" $q") || title.contains("($q") || title.contains("[$q")) score += 400
+            else if (artist.contains(" $q")) score += 350
+            // Substring contains
+            else if (title.contains(q)) score += 200
+            else if (artist.contains(q)) score += 150
+
+            // Multi-word / token matching
+            for (w in words) {
+                if (title.startsWith(w)) score += 60
+                else if (title.contains(w)) score += 30
+                if (artist.startsWith(w)) score += 40
+                else if (artist.contains(w)) score += 20
+            }
+            score
+        }
+    }
+
+    private fun rankArtists(artists: List<SieloArtist>, query: String): List<SieloArtist> {
+        val q = query.trim().lowercase()
+        if (q.isBlank()) return artists
+        val words = q.split(Regex("\\s+")).filter { it.isNotBlank() }
+
+        return artists.sortedByDescending { artist ->
+            val name = artist.name.trim().lowercase()
+            var score = 0
+
+            if (name == q) score += 1000
+            else if (name.startsWith(q)) score += 700
+            else if (name.contains(" $q")) score += 500
+            else if (name.contains(q)) score += 300
+
+            for (w in words) {
+                if (name.startsWith(w)) score += 80
+                else if (name.contains(w)) score += 40
+            }
+            score
+        }
+    }
+
     fun openArtist(artist: SieloArtist) {
+        saveSearchQuery(artist.name)
         viewModelScope.launch {
             _isArtistLoading.value = true
             _selectedArtist.value = ArtistDetails(
@@ -183,6 +248,8 @@ class SearchViewModel @Inject constructor(
     fun playTrack(track: SieloTrack, queue: List<SieloTrack>) {
         if (_searchQuery.value.isNotBlank()) {
             saveSearchQuery(_searchQuery.value)
+        } else {
+            saveSearchQuery(track.title)
         }
         // Save to Search Play History specifically
         viewModelScope.launch {

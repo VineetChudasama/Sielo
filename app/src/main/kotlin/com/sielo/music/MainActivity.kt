@@ -28,6 +28,7 @@ import com.sielo.music.ui.components.MiniPlayerIsland
 import com.sielo.music.ui.components.SieloBottomBar
 import com.sielo.music.ui.navigation.Screen
 import com.sielo.music.ui.screens.HomeScreen
+import com.sielo.music.ui.screens.ListenTogetherScreen
 import com.sielo.music.ui.screens.PlayerScreen
 import com.sielo.music.ui.screens.ProfileScreen
 import com.sielo.music.ui.screens.SearchScreen
@@ -103,6 +104,9 @@ class MainActivity : ComponentActivity() {
                             }
                             composable(Screen.Search.route) {
                                 SearchScreen(viewModel = searchViewModel, modifier = Modifier.fillMaxSize())
+                            }
+                            composable(Screen.ListenTogether.route) {
+                                ListenTogetherScreen(modifier = Modifier.fillMaxSize())
                             }
                             composable(Screen.Stats.route) {
                                 StatsScreen(viewModel = statsViewModel, modifier = Modifier.fillMaxSize())

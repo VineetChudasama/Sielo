@@ -166,17 +166,185 @@ class InnerTubeClient @Inject constructor() {
     }
 
     suspend fun searchArtists(query: String): List<SieloArtist> = withContext(Dispatchers.IO) {
-        val saavnArtists = searchArtistsSaavn(query)
-        val ytPhoto = YouTubeArtistImageResolver.resolveArtistImageUrl(query)
-        if (ytPhoto != null && saavnArtists.isNotEmpty()) {
-            saavnArtists.mapIndexed { idx, artist ->
-                if (idx == 0 && (artist.imageUrl.isNullOrBlank() || artist.name.equals(query, ignoreCase = true))) {
-                    artist.copy(imageUrl = ytPhoto)
-                } else artist
-            }
-        } else {
-            saavnArtists
+        val cleanQuery = query.trim()
+        if (cleanQuery.isBlank()) return@withContext emptyList()
+
+        // 1. Primary: Search YouTube Music for Verified Official Artists (returns official channel avatars & IDs)
+        val ytArtists = searchYouTubeArtists(cleanQuery)
+            .filter { isValidOfficialArtist(it.name) }
+            .distinctBy { it.name.trim().lowercase() }
+
+        if (ytArtists.isNotEmpty()) {
+            return@withContext ytArtists
         }
+
+        // 2. Secondary: JioSaavn verified artist search with strict deduplication & YouTube photo resolution
+        val saavnArtists = searchArtistsSaavn(cleanQuery)
+            .filter { isValidOfficialArtist(it.name) }
+            .distinctBy { it.name.trim().lowercase() }
+
+        // Filter out alias duplicates (e.g. 'Abel "The Weeknd" Tesfaye' when 'The Weeknd' exists)
+        val deduplicatedSaavn = filterAliasDuplicates(saavnArtists)
+
+        // Attach official YouTube profile photo to verified artists
+        deduplicatedSaavn.map { artist ->
+            val officialPhoto = YouTubeArtistImageResolver.resolveArtistImageUrl(artist.name)
+            if (!officialPhoto.isNullOrBlank()) {
+                artist.copy(imageUrl = officialPhoto)
+            } else {
+                artist
+            }
+        }
+    }
+
+    private fun isValidOfficialArtist(name: String): Boolean {
+        val lower = name.trim().lowercase()
+        if (lower.isBlank()) return false
+        val spamKeywords = listOf("tribute", "karaoke", "cover band", "fan club", "various artists", "various", "dj remix", "compilation", "soundtrack")
+        if (spamKeywords.any { lower.contains(it) }) return false
+        return true
+    }
+
+    private fun filterAliasDuplicates(artists: List<SieloArtist>): List<SieloArtist> {
+        val result = mutableListOf<SieloArtist>()
+        for (artist in artists) {
+            val name = artist.name.trim()
+            val hasQuotes = name.contains("\"") || name.contains("“") || name.contains("”") || name.contains("'")
+            if (hasQuotes) {
+                val extractedInsideQuotes = Regex("""["“']([^"”']+)["”']""").find(name)?.groupValues?.getOrNull(1)?.trim()
+                if (!extractedInsideQuotes.isNullOrBlank()) {
+                    val alreadyHasCanonical = artists.any { it.name.equals(extractedInsideQuotes, ignoreCase = true) }
+                    if (alreadyHasCanonical) {
+                        continue // Skip the alias duplicate
+                    }
+                }
+            }
+            result.add(artist)
+        }
+        return result
+    }
+
+    private fun searchYouTubeArtists(query: String): List<SieloArtist> {
+        return try {
+            val requestBody = """
+                {
+                    "context": {
+                        "client": {
+                            "clientName": "WEB_REMIX",
+                            "clientVersion": "1.20260114.01.00",
+                            "hl": "en",
+                            "gl": "US"
+                        }
+                    },
+                    "query": "${query.replace("\"", "\\\"")}",
+                    "params": "EgWKAQIgAWoQEAMQBBAJEAoQBRAREBAQFQ%3D%3D"
+                }
+            """.trimIndent()
+
+            val request = Request.Builder()
+                .url("https://music.youtube.com/youtubei/v1/search")
+                .post(requestBody.toRequestBody(JSON_MEDIA))
+                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
+                .addHeader("Origin", "https://music.youtube.com")
+                .addHeader("Referer", "https://music.youtube.com/")
+                .build()
+
+            val response = client.newCall(request).execute()
+            val bodyString = response.body?.string() ?: return emptyList()
+            parseYouTubeArtistSearchResults(bodyString)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            emptyList()
+        }
+    }
+
+    private fun parseYouTubeArtistSearchResults(jsonString: String): List<SieloArtist> {
+        val artists = mutableListOf<SieloArtist>()
+        try {
+            val root = json.parseToJsonElement(jsonString).jsonObject
+            val tabs = root["contents"]?.jsonObject
+                ?.get("tabbedSearchResultsRenderer")?.jsonObject
+                ?.get("tabs")?.jsonArray
+
+            val contents = tabs?.getOrNull(0)?.jsonObject
+                ?.get("tabRenderer")?.jsonObject
+                ?.get("content")?.jsonObject
+                ?.get("sectionListRenderer")?.jsonObject
+                ?.get("contents")?.jsonArray ?: return emptyList()
+
+            for (section in contents) {
+                // 1. Check musicCardShelfRenderer (Top Result)
+                val cardShelf = section.jsonObject["musicCardShelfRenderer"]?.jsonObject
+                if (cardShelf != null) {
+                    val titleRuns = cardShelf["title"]?.jsonObject?.get("runs")?.jsonArray
+                    val title = titleRuns?.mapNotNull { it.jsonObject["text"]?.jsonPrimitive?.content }
+                        ?.joinToString("")?.trim() ?: ""
+                    val browseId = cardShelf["title"]?.jsonObject?.get("runs")?.jsonArray?.getOrNull(0)?.jsonObject
+                        ?.get("navigationEndpoint")?.jsonObject?.get("browseEndpoint")?.jsonObject
+                        ?.get("browseId")?.jsonPrimitive?.content ?: ""
+
+                    val thumbs = cardShelf["thumbnail"]?.jsonObject
+                        ?.get("musicThumbnailRenderer")?.jsonObject
+                        ?.get("thumbnail")?.jsonObject
+                        ?.get("thumbnails")?.jsonArray
+                    val rawUrl = thumbs?.lastOrNull()?.jsonObject?.get("url")?.jsonPrimitive?.content
+                    val imgUrl = if (!rawUrl.isNullOrBlank()) YouTubeArtistImageResolver.upgradeImageUrl(rawUrl) else null
+
+                    if (title.isNotBlank() && isValidOfficialArtist(title)) {
+                        artists.add(
+                            SieloArtist(
+                                id = browseId.ifBlank { title },
+                                name = title,
+                                imageUrl = imgUrl,
+                                role = "Artist"
+                            )
+                        )
+                    }
+                }
+
+                // 2. Check musicShelfRenderer
+                val shelfItems = section.jsonObject["musicShelfRenderer"]?.jsonObject?.get("contents")?.jsonArray
+                    ?: section.jsonObject["itemSectionRenderer"]?.jsonObject?.get("contents")?.jsonArray
+
+                shelfItems?.forEach { item ->
+                    val responsiveItem = item.jsonObject["musicResponsiveListItemRenderer"]?.jsonObject
+                    if (responsiveItem != null) {
+                        val flexCols = responsiveItem["flexColumns"]?.jsonArray
+                        val nameRuns = flexCols?.getOrNull(0)?.jsonObject
+                            ?.get("musicResponsiveListItemFlexColumnRenderer")?.jsonObject
+                            ?.get("text")?.jsonObject
+                            ?.get("runs")?.jsonArray
+                        val name = nameRuns?.mapNotNull { it.jsonObject["text"]?.jsonPrimitive?.content }
+                            ?.joinToString("")?.trim() ?: ""
+
+                        val browseId = nameRuns?.getOrNull(0)?.jsonObject
+                            ?.get("navigationEndpoint")?.jsonObject?.get("browseEndpoint")?.jsonObject
+                            ?.get("browseId")?.jsonPrimitive?.content ?: ""
+
+                        val thumbs = responsiveItem["thumbnail"]?.jsonObject
+                            ?.get("musicThumbnailRenderer")?.jsonObject
+                            ?.get("thumbnail")?.jsonObject
+                            ?.get("thumbnails")?.jsonArray
+                        val rawUrl = thumbs?.lastOrNull()?.jsonObject?.get("url")?.jsonPrimitive?.content
+                        val imgUrl = if (!rawUrl.isNullOrBlank()) YouTubeArtistImageResolver.upgradeImageUrl(rawUrl) else null
+
+                        if (name.isNotBlank() && isValidOfficialArtist(name)) {
+                            artists.add(
+                                SieloArtist(
+                                    id = browseId.ifBlank { name },
+                                    name = name,
+                                    imageUrl = imgUrl,
+                                    role = "Artist"
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return filterAliasDuplicates(artists).distinctBy { it.name.trim().lowercase() }
     }
 
     suspend fun getArtistPhotoFromYouTube(artistName: String): String? {
@@ -549,6 +717,18 @@ class InnerTubeClient @Inject constructor() {
                 null
             }
 
+            val fixedColumns = item["fixedColumns"]?.jsonArray
+            val fixedRuns = fixedColumns?.flatMap { col ->
+                col.jsonObject["musicResponsiveListItemFixedColumnRenderer"]?.jsonObject
+                    ?.get("text")?.jsonObject
+                    ?.get("runs")?.jsonArray
+                    ?.mapNotNull { it.jsonObject["text"]?.jsonPrimitive?.content?.trim() } ?: emptyList()
+            } ?: emptyList()
+
+            val allPotentialDurations = (allSubtitleTexts + fixedRuns)
+            val durationText = allPotentialDurations.firstOrNull { it.matches(Regex("""^\d{1,2}:\d{2}(:\d{2})?$""")) }
+            val durationSeconds = durationText?.let { parseDurationToSeconds(it) } ?: 0L
+
             if (!isPureMusicTrack(title, artist)) {
                 return null
             }
@@ -557,10 +737,20 @@ class InnerTubeClient @Inject constructor() {
                 id = videoId,
                 title = title,
                 artist = artist,
-                thumbnailUrl = thumbUrl
+                thumbnailUrl = thumbUrl,
+                durationSeconds = durationSeconds
             )
         } catch (e: Exception) {
             return null
+        }
+    }
+
+    private fun parseDurationToSeconds(text: String): Long {
+        val parts = text.trim().split(":").mapNotNull { it.toLongOrNull() }
+        return when (parts.size) {
+            2 -> parts[0] * 60L + parts[1]
+            3 -> parts[0] * 3600L + parts[1] * 60L + parts[2]
+            else -> 0L
         }
     }
 

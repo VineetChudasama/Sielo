@@ -28,9 +28,20 @@ object YouTubeArtistImageResolver {
 
     private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
 
+    // In-memory cache so resolved artist photos are retained across screens without re-fetching
+    private val artistMemoryCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    fun getCachedArtistImageUrl(artistName: String): String? {
+        val key = artistName.trim().lowercase()
+        return artistMemoryCache[key]
+    }
+
     suspend fun resolveArtistImageUrl(artistName: String): String? = withContext(Dispatchers.IO) {
         val cleanName = artistName.trim()
         if (cleanName.isBlank()) return@withContext null
+
+        val key = cleanName.lowercase()
+        artistMemoryCache[key]?.let { return@withContext it }
 
         try {
             val requestBody = """
@@ -57,7 +68,11 @@ object YouTubeArtistImageResolver {
 
             val response = client.newCall(request).execute()
             val bodyString = response.body?.string() ?: return@withContext null
-            parseArtistPhoto(bodyString, cleanName)
+            val resolved = parseArtistPhoto(bodyString, cleanName)
+            if (!resolved.isNullOrBlank()) {
+                artistMemoryCache[key] = resolved
+            }
+            resolved
         } catch (e: Exception) {
             e.printStackTrace()
             null
@@ -143,7 +158,7 @@ object YouTubeArtistImageResolver {
         return null
     }
 
-    private fun upgradeImageUrl(url: String): String {
+    fun upgradeImageUrl(url: String): String {
         return url.replace(Regex("=w\\d+-h\\d+.*"), "=w600-h600-p-l90-rj")
             .replace(Regex("=s\\d+.*"), "=s600-c-k-c0x00ffffff-no-rj")
     }

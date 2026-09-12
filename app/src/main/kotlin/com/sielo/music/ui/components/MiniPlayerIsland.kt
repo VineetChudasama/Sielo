@@ -152,11 +152,11 @@ fun MiniPlayerIsland(
                 )
                 .clickable { onClick() }
         ) {
-            // Custom Progress Bar: starts immediately from 0:00 behind the disc intersection (42dp), no end dots
+            // Custom Progress Bar: starts 0.4dp behind (41.6dp), no end dots
             Canvas(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 42.dp, end = 20.dp, top = 2.dp)
+                    .padding(start = 41.6.dp, end = 20.dp, top = 2.dp)
                     .height(2.5.dp)
                     .align(Alignment.TopCenter)
             ) {
@@ -204,16 +204,18 @@ fun MiniPlayerIsland(
                         Text(
                             text = track.artist,
                             color = PaletteSageGreen, // #778D7A
+                            fontFamily = com.sielo.music.ui.theme.UrbanistFontFamily,
                             fontSize = 11.5.sp,
-                            fontWeight = FontWeight.Medium,
+                            fontWeight = FontWeight.Normal,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = track.title,
                             color = PaletteCream, // #F4F1DE
+                            fontFamily = com.sielo.music.ui.theme.UrbanistFontFamily,
                             fontSize = 13.5.sp,
-                            fontWeight = FontWeight.Bold,
+                            fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             modifier = Modifier
                                 .fillMaxWidth()

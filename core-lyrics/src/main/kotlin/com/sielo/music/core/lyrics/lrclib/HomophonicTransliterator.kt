@@ -5,8 +5,8 @@ import java.lang.reflect.Method
 
 /**
  * Phonetic/homophonic transliterator that converts non-Latin scripts
- * (Devanagari, Korean Hangul, Japanese Kana, Punjabi Gurmukhi, Cyrillic, etc.)
- * into clear English alphabet (Latin) lyrics so users worldwide can sing along.
+ * (Devanagari, Punjabi Gurmukhi, Korean Hangul, Japanese Kana, Cyrillic, etc.)
+ * into clear, natural English phonetic lyrics so users worldwide can sing along comfortably.
  */
 object HomophonicTransliterator {
 
@@ -57,7 +57,13 @@ object HomophonicTransliterator {
     fun transliterate(text: String): String {
         if (text.isBlank() || !isNonLatin(text)) return text
 
-        // 1. Try Android ICU Transliterator (covers 100+ languages with high accuracy)
+        // 1. Primary: Custom natural phonetic transliteration (covers Punjabi, Hindi, Korean, Japanese, Cyrillic)
+        val customResult = transliterateKotlin(text)
+        if (customResult != text && !isNonLatin(customResult)) {
+            return cleanTransliteratedText(customResult)
+        }
+
+        // 2. Fallback to Android ICU Transliterator for other world languages
         try {
             val inst = icuInstance
             val meth = icuMethod
@@ -68,15 +74,26 @@ object HomophonicTransliterator {
                 }
             }
         } catch (e: Throwable) {
-            // Fallback to pure-Kotlin transliteration below
+            // No-op
         }
 
-        // 2. Pure Kotlin phonetic transliteration fallback
-        return cleanTransliteratedText(transliterateKotlin(text))
+        return cleanTransliteratedText(customResult)
     }
 
     private fun cleanTransliteratedText(text: String): String {
-        return text
+        val normalized = java.text.Normalizer.normalize(text, java.text.Normalizer.Form.NFD)
+        val withoutDiacritics = normalized.replace(Regex("""\p{M}"""), "")
+        return withoutDiacritics
+            .replace("j̣", "j")
+            .replace("ḳ", "k")
+            .replace("ṣ", "sh")
+            .replace("ẓ", "z")
+            .replace("ḍ", "d")
+            .replace("ṭ", "t")
+            .replace("ṇ", "n")
+            .replace("ṛ", "r")
+            .replace("ṁ", "m")
+            .replace("ḥ", "h")
             .replace(Regex("""\s+"""), " ")
             .replace(" ' ", "'")
             .trim()
@@ -84,10 +101,41 @@ object HomophonicTransliterator {
 
     private fun transliterateKotlin(input: String): String {
         val sb = StringBuilder()
+        val words = input.split(Regex("""(\s+)"""))
+        for (token in words) {
+            if (token.isBlank()) {
+                sb.append(token)
+                continue
+            }
+            sb.append(transliterateWord(token))
+        }
+        return sb.toString()
+    }
+
+    private fun transliterateWord(word: String): String {
+        val sb = StringBuilder()
         var i = 0
-        while (i < input.length) {
-            val ch = input[i]
+        val n = word.length
+
+        while (i < n) {
+            val ch = word[i]
             val code = ch.code
+
+            // Punjabi Gurmukhi (U+0A00 - U+0A7F)
+            if (code in 0x0A00..0x0A7F) {
+                val gurResult = transliterateGurmukhiWordChar(word, i)
+                sb.append(gurResult.first)
+                i += gurResult.second
+                continue
+            }
+
+            // Devanagari (Hindi, Marathi, etc. U+0900 - U+097F)
+            if (code in 0x0900..0x097F) {
+                val devResult = transliterateDevanagariWordChar(word, i)
+                sb.append(devResult.first)
+                i += devResult.second
+                continue
+            }
 
             // Korean Hangul Syllables (U+AC00 - U+D7A3)
             if (code in 0xAC00..0xD7A3) {
@@ -102,14 +150,6 @@ object HomophonicTransliterator {
 
                 sb.append(initial).append(vowel).append(finalConsonant)
                 i++
-                continue
-            }
-
-            // Devanagari (Hindi, Marathi, etc. U+0900 - U+097F)
-            if (code in 0x0900..0x097F) {
-                val devResult = transliterateDevanagariChar(input, i)
-                sb.append(devResult.first)
-                i += devResult.second
                 continue
             }
 
@@ -139,11 +179,142 @@ object HomophonicTransliterator {
         return sb.toString()
     }
 
-    private fun transliterateDevanagariChar(input: String, index: Int): Pair<String, Int> {
-        val ch = input[index]
+    private fun transliterateGurmukhiWordChar(word: String, index: Int): Pair<String, Int> {
+        val ch = word[index]
         val code = ch.code
+        val n = word.length
 
-        // Matras (vowel signs)
+        // Addak (0x0A71 ੱ) - geminates next consonant
+        if (code == 0x0A71) {
+            if (index + 1 < n) {
+                val nextRes = transliterateGurmukhiWordChar(word, index + 1)
+                val geminated = if (nextRes.first.isNotEmpty()) "${nextRes.first.first()}${nextRes.first}" else nextRes.first
+                return Pair(geminated, 1 + nextRes.second)
+            }
+            return Pair("", 1)
+        }
+
+        // Tippi (0x0A70 ੰ) or Bindi (0x0A02 ਂ)
+        if (code == 0x0A70 || code == 0x0A02) {
+            return Pair("n", 1)
+        }
+
+        // Matras
+        val matra = GURMUKHI_MATRAS[code]
+        if (matra != null) {
+            return Pair(matra, 1)
+        }
+
+        // Independent vowels
+        val vowel = GURMUKHI_VOWELS[code]
+        if (vowel != null) {
+            if (index + 1 < n && (word[index + 1].code == 0x0A70 || word[index + 1].code == 0x0A02)) {
+                return Pair("${vowel}n", 2)
+            }
+            return Pair(vowel, 1)
+        }
+
+        // Consonants
+        val consonant = GURMUKHI_CONSONANTS[code]
+        if (consonant != null) {
+            if (index + 1 < n) {
+                val nextCode = word[index + 1].code
+                if (nextCode == 0x0A4D) { // Halant
+                    return Pair(consonant, 2)
+                }
+                if (GURMUKHI_MATRAS.containsKey(nextCode)) {
+                    val matraStr = GURMUKHI_MATRAS[nextCode] ?: ""
+                    if (index + 2 < n && (word[index + 2].code == 0x0A70 || word[index + 2].code == 0x0A02)) {
+                        val nas = when (matraStr) {
+                            "e" -> "ein"
+                            "o" -> "on"
+                            "a" -> "an"
+                            else -> "${matraStr}n"
+                        }
+                        return Pair(consonant + nas, 3)
+                    }
+                    return Pair(consonant + matraStr, 2)
+                }
+                if (nextCode == 0x0A70 || nextCode == 0x0A02) {
+                    return Pair("${consonant}an", 2)
+                }
+            }
+
+            // Inherent 'a' / Schwa rule
+            val isWordEnd = index + 1 >= n || !word[index + 1].isLetter()
+            if (isWordEnd) {
+                return Pair(consonant, 1)
+            }
+
+            val isWordStart = index == 0
+            val nextAfterCons = index + 2
+            val nextHasMatra = nextAfterCons < n && GURMUKHI_MATRAS.containsKey(word[nextAfterCons].code)
+
+            if (!isWordStart && nextHasMatra) {
+                return Pair(consonant, 1)
+            } else {
+                return Pair("${consonant}a", 1)
+            }
+        }
+
+        return Pair(ch.toString(), 1)
+    }
+
+    private fun transliterateDevanagariWordChar(word: String, index: Int): Pair<String, Int> {
+        val ch = word[index]
+        val code = ch.code
+        val n = word.length
+
+        val isNukta = (index + 1 < n && word[index + 1].code == 0x093C)
+
+        if (DEVANAGARI_CONSONANTS.containsKey(code) || (isNukta && NUKTA_CONSONANTS.containsKey(code))) {
+            val cons = if (isNukta) NUKTA_CONSONANTS[code] ?: DEVANAGARI_CONSONANTS[code] ?: "" else DEVANAGARI_CONSONANTS[code] ?: ""
+            val idx = if (isNukta) index + 2 else index + 1
+
+            if (idx < n) {
+                val nextCode = word[idx].code
+                if (nextCode == 0x094D) { // Virama / Halant
+                    return Pair(cons, (idx - index) + 1)
+                }
+                if (DEVANAGARI_MATRAS.containsKey(nextCode)) {
+                    val matra = DEVANAGARI_MATRAS[nextCode] ?: ""
+                    if (idx + 1 < n && (word[idx + 1].code == 0x0902 || word[idx + 1].code == 0x0901)) {
+                        val nas = when (matra) {
+                            "e" -> "ein"
+                            "o" -> "on"
+                            "a" -> "an"
+                            else -> "${matra}n"
+                        }
+                        return Pair(cons + nas, (idx - index) + 2)
+                    } else {
+                        return Pair(cons + matra, (idx - index) + 1)
+                    }
+                }
+                if (nextCode == 0x0902 || nextCode == 0x0901) {
+                    return Pair("${cons}an", (idx - index) + 1)
+                }
+            }
+
+            // Word end
+            val isWordEnd = idx >= n || !word[idx].isLetter()
+            if (isWordEnd) {
+                return Pair(cons, idx - index)
+            }
+
+            // Schwa deletion (e.g. mujhko, itna, karta, apna, saveron)
+            val isWordStart = index == 0
+            val nextIsNukta = (idx + 1 < n && word[idx + 1].code == 0x093C)
+            val nextAfterCons = if (nextIsNukta) idx + 2 else idx + 1
+            val nextHasMatra = (nextAfterCons < n && DEVANAGARI_MATRAS.containsKey(word[nextAfterCons].code))
+
+            if (!isWordStart && nextHasMatra) {
+                return Pair(cons, idx - index)
+            } else {
+                return Pair("${cons}a", idx - index)
+            }
+        }
+
+        // Matras
         val matra = DEVANAGARI_MATRAS[code]
         if (matra != null) {
             return Pair(matra, 1)
@@ -152,26 +323,15 @@ object HomophonicTransliterator {
         // Independent vowels
         val vowel = DEVANAGARI_VOWELS[code]
         if (vowel != null) {
-            return Pair(vowel, 1)
-        }
-
-        // Consonants
-        val consonant = DEVANAGARI_CONSONANTS[code]
-        if (consonant != null) {
-            // Check next char for virama (halant) or vowel matra
-            if (index + 1 < input.length) {
-                val nextCode = input[index + 1].code
-                if (nextCode == 0x094D) { // Virama / Halant (suppresses inherent 'a')
-                    return Pair(consonant, 2)
+            if (index + 1 < n && (word[index + 1].code == 0x0902 || word[index + 1].code == 0x0901)) {
+                val nas = when (vowel) {
+                    "a", "aa" -> "an"
+                    "u", "oo" -> "un"
+                    else -> "${vowel}n"
                 }
-                if (DEVANAGARI_MATRAS.containsKey(nextCode)) {
-                    val matraStr = DEVANAGARI_MATRAS[nextCode] ?: ""
-                    return Pair(consonant + matraStr, 2)
-                }
+                return Pair(nas, 2)
             }
-            // Inherent 'a' vowel unless followed by space or punctuation at end of word
-            val hasInherentA = (index + 1 < input.length && input[index + 1].code in 0x0900..0x097F)
-            return Pair(if (hasInherentA) "${consonant}a" else consonant, 1)
+            return Pair(vowel, 1)
         }
 
         // Anusvara or Chandrabindu
@@ -181,6 +341,67 @@ object HomophonicTransliterator {
 
         return Pair(ch.toString(), 1)
     }
+
+    // Punjabi Gurmukhi Tables
+    private val GURMUKHI_VOWELS = mapOf(
+        0x0A05 to "a", 0x0A06 to "aa", 0x0A07 to "i", 0x0A08 to "i",
+        0x0A09 to "u", 0x0A0A to "u", 0x0A0F to "e", 0x0A10 to "ai",
+        0x0A13 to "o", 0x0A14 to "au"
+    )
+
+    private val GURMUKHI_MATRAS = mapOf(
+        0x0A3E to "a", 0x0A3F to "i", 0x0A40 to "i", 0x0A41 to "u",
+        0x0A42 to "u", 0x0A47 to "e", 0x0A48 to "ai", 0x0A4B to "o",
+        0x0A4C to "au"
+    )
+
+    private val GURMUKHI_CONSONANTS = mapOf(
+        0x0A15 to "k", 0x0A16 to "kh", 0x0A17 to "g", 0x0A18 to "gh", 0x0A19 to "ng",
+        0x0A1A to "ch", 0x0A1B to "chh", 0x0A1C to "j", 0x0A1D to "jh", 0x0A1E to "ny",
+        0x0A1F to "t", 0x0A20 to "th", 0x0A21 to "d", 0x0A22 to "dh", 0x0A23 to "n",
+        0x0A24 to "t", 0x0A25 to "th", 0x0A26 to "d", 0x0A27 to "dh", 0x0A28 to "n",
+        0x0A2A to "p", 0x0A2B to "f", 0x0A2C to "b", 0x0A2D to "bh", 0x0A2E to "m",
+        0x0A2F to "y", 0x0A30 to "r", 0x0A32 to "l", 0x0A33 to "l", 0x0A35 to "v",
+        0x0A36 to "sh", 0x0A38 to "s", 0x0A39 to "h", 0x0A59 to "kh", 0x0A5A to "g",
+        0x0A5B to "z", 0x0A5C to "r", 0x0A5E to "f"
+    )
+
+    // Devanagari Tables
+    private val DEVANAGARI_VOWELS = mapOf(
+        0x0905 to "a", 0x0906 to "aa", 0x0907 to "i", 0x0908 to "i",
+        0x0909 to "u", 0x090A to "u", 0x090B to "ri", 0x090F to "e",
+        0x0910 to "ai", 0x0913 to "o", 0x0914 to "au",
+        0x090D to "e", 0x0911 to "o", 0x0972 to "a"
+    )
+
+    private val DEVANAGARI_MATRAS = mapOf(
+        0x093E to "a", 0x093F to "i", 0x0940 to "i", 0x0941 to "u",
+        0x0942 to "u", 0x0943 to "ri", 0x0947 to "e", 0x0948 to "ai",
+        0x094B to "o", 0x094C to "au",
+        0x0945 to "e", 0x0949 to "o"
+    )
+
+    private val DEVANAGARI_CONSONANTS = mapOf(
+        0x0915 to "k", 0x0916 to "kh", 0x0917 to "g", 0x0918 to "gh", 0x0919 to "ng",
+        0x091A to "ch", 0x091B to "chh", 0x091C to "j", 0x091D to "jh", 0x091E to "ny",
+        0x091F to "t", 0x0920 to "th", 0x0921 to "d", 0x0922 to "dh", 0x0923 to "n",
+        0x0924 to "t", 0x0925 to "th", 0x0926 to "d", 0x0927 to "dh", 0x0928 to "n",
+        0x092A to "p", 0x092B to "ph", 0x092C to "b", 0x092D to "bh", 0x092E to "m",
+        0x092F to "y", 0x0930 to "r", 0x0932 to "l", 0x0933 to "l", 0x0934 to "l",
+        0x0935 to "v", 0x0936 to "sh", 0x0937 to "sh", 0x0938 to "s", 0x0939 to "h",
+        0x0958 to "q", 0x0959 to "kh", 0x095A to "gh", 0x095B to "z", 0x095C to "r",
+        0x095D to "rh", 0x095E to "f", 0x095F to "y"
+    )
+
+    private val NUKTA_CONSONANTS = mapOf(
+        0x0915 to "q",
+        0x0916 to "kh",
+        0x0917 to "gh",
+        0x091C to "z",
+        0x0921 to "r",
+        0x0922 to "rh",
+        0x092B to "f"
+    )
 
     // Korean Hangul Tables
     private val HANGUL_INITIALS = arrayOf(
@@ -195,30 +416,6 @@ object HomophonicTransliterator {
         "", "g", "kk", "ks", "n", "nj", "nh", "d", "l", "lg",
         "lm", "lb", "ls", "lt", "lp", "lh", "m", "b", "bs", "s",
         "ss", "ng", "j", "ch", "k", "t", "p", "h"
-    )
-
-    // Devanagari Tables
-    private val DEVANAGARI_VOWELS = mapOf(
-        0x0905 to "a", 0x0906 to "aa", 0x0907 to "i", 0x0908 to "ee",
-        0x0909 to "u", 0x090A to "oo", 0x090B to "ri", 0x090F to "e",
-        0x0910 to "ai", 0x0913 to "o", 0x0914 to "au"
-    )
-
-    private val DEVANAGARI_MATRAS = mapOf(
-        0x093E to "aa", 0x093F to "i", 0x0940 to "ee", 0x0941 to "u",
-        0x0942 to "oo", 0x0943 to "ri", 0x0947 to "e", 0x0948 to "ai",
-        0x094B to "o", 0x094C to "au"
-    )
-
-    private val DEVANAGARI_CONSONANTS = mapOf(
-        0x0915 to "k", 0x0916 to "kh", 0x0917 to "g", 0x0918 to "gh", 0x0919 to "ng",
-        0x091A to "ch", 0x091B to "chh", 0x091C to "j", 0x091D to "jh", 0x091E to "ny",
-        0x091F to "t", 0x0920 to "th", 0x0921 to "d", 0x0922 to "dh", 0x0923 to "n",
-        0x0924 to "t", 0x0925 to "th", 0x0926 to "d", 0x0927 to "dh", 0x0928 to "n",
-        0x092A to "p", 0x092B to "ph", 0x092C to "b", 0x092D to "bh", 0x092E to "m",
-        0x092F to "y", 0x0930 to "r", 0x0932 to "l", 0x0935 to "v", 0x0936 to "sh",
-        0x0937 to "sh", 0x0938 to "s", 0x0939 to "h", 0x0958 to "q", 0x0959 to "kh",
-        0x095A to "g", 0x095B to "z", 0x095C to "r", 0x095D to "rh", 0x095E to "f"
     )
 
     // Japanese Kana Table

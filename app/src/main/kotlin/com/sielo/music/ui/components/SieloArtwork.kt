@@ -35,10 +35,102 @@ import com.sielo.music.core.network.innertube.YouTubeArtistImageResolver
 import com.sielo.music.ui.theme.BorderGlass
 import com.sielo.music.ui.theme.BorderSubtle
 import com.sielo.music.ui.theme.PaletteCream
+import android.graphics.Bitmap
+import androidx.compose.runtime.State
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.core.graphics.drawable.toBitmap
+import androidx.palette.graphics.Palette
+import coil.imageLoader
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
 import com.sielo.music.ui.theme.PaletteDarkNavy
 import com.sielo.music.ui.theme.PaletteOxfordBlue
 import com.sielo.music.ui.theme.PaletteSand
 import com.sielo.music.ui.theme.PaletteSlateBlue
+
+object ArtworkPaletteCache {
+    private val colorCache = ConcurrentHashMap<String, Color>()
+
+    fun get(key: String): Color? = colorCache[key]
+    fun put(key: String, color: Color) {
+        colorCache[key] = color
+    }
+}
+
+/**
+ * Extracts and caches the dynamic vibrant / dominant artwork color for ambient glow and disc accents.
+ */
+@Composable
+fun rememberArtworkDominantColor(
+    artworkUrl: String?,
+    title: String? = "",
+    artist: String? = "",
+    defaultColor: Color = PaletteSand
+): State<Color> {
+    val context = LocalContext.current
+    val cacheKey = remember(artworkUrl, title, artist) {
+        "${artworkUrl ?: ""}-${title ?: ""}-${artist ?: ""}"
+    }
+
+    val initialColor = remember(cacheKey) {
+        ArtworkPaletteCache.get(cacheKey) ?: defaultColor
+    }
+
+    return produceState(initialValue = initialColor, key1 = cacheKey) {
+        val cached = ArtworkPaletteCache.get(cacheKey)
+        if (cached != null) {
+            value = cached
+            return@produceState
+        }
+
+        val resolvedSaavn = JioSaavnSongArtworkResolver.getCachedArtwork(title, artist)
+        val raw = artworkUrl?.trim() ?: ""
+        val effectiveUrl = when {
+            !resolvedSaavn.isNullOrBlank() -> resolvedSaavn
+            raw.isNotBlank() && !raw.contains("i.ytimg.com") && !raw.contains("default-music") -> raw
+            else -> raw
+        }
+
+        if (effectiveUrl.isBlank()) {
+            value = defaultColor
+            return@produceState
+        }
+
+        withContext(Dispatchers.IO) {
+            try {
+                val request = ImageRequest.Builder(context)
+                    .data(effectiveUrl)
+                    .allowHardware(false)
+                    .size(100, 100)
+                    .build()
+                val result = context.imageLoader.execute(request)
+                if (result is coil.request.SuccessResult) {
+                    val bitmap = result.drawable.toBitmap()
+                    val palette = Palette.from(bitmap).generate()
+                    val dominantInt = palette.getVibrantColor(
+                        palette.getDominantColor(
+                            palette.getLightVibrantColor(
+                                palette.getMutedColor(defaultColor.toArgb())
+                            )
+                        )
+                    )
+                    val extracted = Color(dominantInt)
+                    val finalColor = if (extracted == Color.Black || extracted == Color.Transparent || extracted == Color.Unspecified) {
+                        defaultColor
+                    } else {
+                        extracted
+                    }
+                    ArtworkPaletteCache.put(cacheKey, finalColor)
+                    value = finalColor
+                }
+            } catch (_: Exception) {
+                value = defaultColor
+            }
+        }
+    }
+}
 
 /**
  * Universal Album Art Resolver for Sielo Music.
@@ -69,15 +161,22 @@ fun SieloSongArtwork(
 ) {
     val context = LocalContext.current
 
-    // Dynamically fetch original song artwork from JioSaavn on the fly when needed
+    // Synchronous memory cache check to avoid reloading on screen transitions
+    val raw = thumbnailUrl?.trim() ?: ""
+    val cached = JioSaavnSongArtworkResolver.getCachedArtwork(title, artist)
+    val isAlreadyStudioArt = raw.isNotBlank() && !raw.contains("i.ytimg.com") && !raw.contains("lh3.googleusercontent.com") && !raw.contains("default-music") && !raw.contains("default-film")
+    val initialResolved = cached ?: if (isAlreadyStudioArt) raw else null
+
+    // Dynamically resolve high-res studio artwork without flashing raw video thumbnails
     val resolvedUrl by produceState<String?>(
-        initialValue = thumbnailUrl?.trim()?.ifBlank { null },
+        initialValue = initialResolved,
         key1 = thumbnailUrl,
         key2 = title,
         key3 = artist
     ) {
-        val raw = thumbnailUrl?.trim() ?: ""
-        if (!title.isNullOrBlank()) {
+        if (!cached.isNullOrBlank()) {
+            value = cached
+        } else if (!title.isNullOrBlank()) {
             val saavnCover = JioSaavnSongArtworkResolver.resolveSongArtwork(title, artist)
             if (!saavnCover.isNullOrBlank()) {
                 value = saavnCover
@@ -93,7 +192,11 @@ fun SieloSongArtwork(
         if (!resolvedUrl.isNullOrBlank()) {
             ImageRequest.Builder(context)
                 .data(resolvedUrl)
-                .crossfade(true)
+                .memoryCacheKey(resolvedUrl)
+                .memoryCachePolicy(CachePolicy.ENABLED)
+                .diskCachePolicy(CachePolicy.DISABLED)
+                .networkCachePolicy(CachePolicy.ENABLED)
+                .crossfade(200)
                 .build()
         } else null
     }
@@ -173,8 +276,7 @@ fun SieloSongArtwork(
 
 /**
  * Dynamic YouTube Artist Photo component.
- * Imports artist photo directly from YouTube Music on demand.
- * Does NOT store or cache anything locally on disk.
+ * Retains loaded artist photos in memory across screen transitions without re-fetching.
  */
 @Composable
 fun SieloArtistPhoto(
@@ -189,14 +291,20 @@ fun SieloArtistPhoto(
         name.trim().firstOrNull { it.isLetterOrDigit() }?.uppercase() ?: "A"
     }
 
+    val raw = imageUrl?.trim() ?: ""
+    val cachedPhoto = YouTubeArtistImageResolver.getCachedArtistImageUrl(name)
+    val isDirectPhoto = raw.isNotBlank() && (raw.contains("ggpht.com") || raw.contains("googleusercontent.com")) && !raw.contains("i.ytimg.com") && !raw.contains("default-music")
+    val initialPhoto = cachedPhoto ?: if (isDirectPhoto) raw else null
+
     // Directly fetch artist photo from YouTube Music on the fly when needed
     val resolvedUrl by produceState<String?>(
-        initialValue = if (!imageUrl.isNullOrBlank() && (imageUrl.contains("ggpht.com") || imageUrl.contains("googleusercontent.com")) && !imageUrl.contains("i.ytimg.com")) imageUrl else null,
+        initialValue = initialPhoto,
         key1 = imageUrl,
         key2 = name
     ) {
-        val raw = imageUrl?.trim() ?: ""
-        if (raw.isNotBlank() && (raw.contains("ggpht.com") || raw.contains("googleusercontent.com")) && !raw.contains("i.ytimg.com") && !raw.contains("default-music")) {
+        if (!cachedPhoto.isNullOrBlank()) {
+            value = cachedPhoto
+        } else if (isDirectPhoto) {
             value = raw
         } else if (name.isNotBlank()) {
             val ytPhoto = YouTubeArtistImageResolver.resolveArtistImageUrl(name)
@@ -212,7 +320,11 @@ fun SieloArtistPhoto(
         if (!resolvedUrl.isNullOrBlank()) {
             ImageRequest.Builder(context)
                 .data(resolvedUrl)
-                .crossfade(true)
+                .memoryCacheKey(resolvedUrl)
+                .memoryCachePolicy(CachePolicy.ENABLED)
+                .diskCachePolicy(CachePolicy.DISABLED)
+                .networkCachePolicy(CachePolicy.ENABLED)
+                .crossfade(200)
                 .build()
         } else null
     }

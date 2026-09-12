@@ -20,6 +20,7 @@ private val SieloColorScheme = darkColorScheme(
 fun SieloTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = SieloColorScheme,
+        typography = SieloTypography,
         content = content
     )
 }

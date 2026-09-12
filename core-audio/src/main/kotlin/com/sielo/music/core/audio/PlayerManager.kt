@@ -293,7 +293,7 @@ class PlayerManager @Inject constructor(
                     lastTrackingTimestamp = System.currentTimeMillis()
                 }
 
-                delay(100)
+                delay(50)
             }
         }
     }

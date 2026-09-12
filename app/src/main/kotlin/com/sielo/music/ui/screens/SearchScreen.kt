@@ -18,13 +18,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Favorite
@@ -38,6 +38,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -46,10 +47,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -67,9 +72,16 @@ import com.sielo.music.ui.theme.PaletteSlateBlue
 import com.sielo.music.ui.theme.SurfaceElevated
 import com.sielo.music.ui.theme.TextMuted
 import com.sielo.music.ui.theme.TextSecondary
+import com.sielo.music.ui.theme.SoraFontFamily
+import com.sielo.music.ui.theme.UrbanistFontFamily
 import com.sielo.music.viewmodel.SearchViewModel
 
-data class GenreCard(val title: String, val query: String, val bgColor: Color)
+data class GenreCard(
+    val title: String,
+    val query: String,
+    val imageUrl: String,
+    val gradientColors: List<Color>
+)
 
 @Composable
 fun SearchScreen(
@@ -86,16 +98,7 @@ fun SearchScreen(
     val recentSearches by viewModel.recentSearches.collectAsState()
     val previousPlayedSongs by viewModel.previousPlayedSongs.collectAsState()
 
-    var isSearchFocused by remember { mutableStateOf(false) }
-
-    // Handle device system back gesture when artist is open or search has text/focus
-    BackHandler(enabled = selectedArtist != null || searchQuery.isNotEmpty() || isSearchFocused) {
-        when {
-            selectedArtist != null -> viewModel.closeArtist()
-            isSearchFocused -> isSearchFocused = false
-            searchQuery.isNotEmpty() -> viewModel.clearSearch()
-        }
-    }
+    var isDedicatedSearchOpen by remember { mutableStateOf(false) }
 
     // Render Artist Profile Screen if an artist is selected
     if (selectedArtist != null) {
@@ -113,12 +116,54 @@ fun SearchScreen(
     val categories = listOf("All", "Songs", "Artists")
 
     val genres = listOf(
-        GenreCard("Pop & Hits", "Pop Hits 2026", PaletteOxfordBlue),
-        GenreCard("Hip-Hop & R&B", "Hip Hop R&B Hits", Color(0xFF1B263B)),
-        GenreCard("Chill & Lo-Fi", "Chill Lo-Fi Study Beats", Color(0xFF23352A)),
-        GenreCard("Indie & Alt", "Indie Alternative Hits", Color(0xFF332D22)),
-        GenreCard("Electronic & Dance", "Electronic Dance EDM", Color(0xFF18283E)),
-        GenreCard("Bollywood & Sufi", "Arijit Singh Bollywood Hits", Color(0xFF273642))
+        GenreCard(
+            title = "Pop & Hits",
+            query = "Pop Hits 2026",
+            imageUrl = "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?q=80&w=600&auto=format&fit=crop",
+            gradientColors = listOf(Color(0xFF8338EC).copy(alpha = 0.55f), Color(0xFF0F172A).copy(alpha = 0.95f))
+        ),
+        GenreCard(
+            title = "Hip-Hop & R&B",
+            query = "Hip Hop R&B Hits",
+            imageUrl = "https://images.unsplash.com/photo-1509198397868-475647b2a1e5?q=80&w=600&auto=format&fit=crop",
+            gradientColors = listOf(Color(0xFFD4A373).copy(alpha = 0.55f), Color(0xFF1A120B).copy(alpha = 0.95f))
+        ),
+        GenreCard(
+            title = "Chill & Lo-Fi",
+            query = "Chill Lo-Fi Study Beats",
+            imageUrl = "https://images.unsplash.com/photo-1518609878373-06d740f60d8b?q=80&w=600&auto=format&fit=crop",
+            gradientColors = listOf(Color(0xFF2A9D8F).copy(alpha = 0.55f), Color(0xFF0D2522).copy(alpha = 0.95f))
+        ),
+        GenreCard(
+            title = "Indie & Alt",
+            query = "Indie Alternative Hits",
+            imageUrl = "https://images.unsplash.com/photo-1465847899084-d164df4dedc6?q=80&w=600&auto=format&fit=crop",
+            gradientColors = listOf(Color(0xFFE76F51).copy(alpha = 0.55f), Color(0xFF22110D).copy(alpha = 0.95f))
+        ),
+        GenreCard(
+            title = "Electronic & Dance",
+            query = "Electronic Dance EDM",
+            imageUrl = "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?q=80&w=600&auto=format&fit=crop",
+            gradientColors = listOf(Color(0xFF00B4D8).copy(alpha = 0.55f), Color(0xFF081B29).copy(alpha = 0.95f))
+        ),
+        GenreCard(
+            title = "Bollywood & Sufi",
+            query = "Arijit Singh Bollywood Hits",
+            imageUrl = "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?q=80&w=600&auto=format&fit=crop",
+            gradientColors = listOf(Color(0xFFE63946).copy(alpha = 0.55f), Color(0xFF1E0A0D).copy(alpha = 0.95f))
+        ),
+        GenreCard(
+            title = "Rock & Classic",
+            query = "Classic Modern Rock Hits",
+            imageUrl = "https://images.unsplash.com/photo-1498038432885-c6f3f1b912ee?q=80&w=600&auto=format&fit=crop",
+            gradientColors = listOf(Color(0xFF6C1D45).copy(alpha = 0.55f), Color(0xFF14070E).copy(alpha = 0.95f))
+        ),
+        GenreCard(
+            title = "Workout & Energy",
+            query = "Workout Energy Motivation Beats",
+            imageUrl = "https://images.unsplash.com/photo-1534438327276-14e5300c3a48?q=80&w=600&auto=format&fit=crop",
+            gradientColors = listOf(Color(0xFFF77F00).copy(alpha = 0.55f), Color(0xFF220C00).copy(alpha = 0.95f))
+        )
     )
 
     Box(
@@ -126,173 +171,430 @@ fun SearchScreen(
             .fillMaxSize()
             .background(PaletteDarkNavy)
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(top = 20.dp)
-        ) {
-            // Header
-            Text(
-                text = "Search",
-                color = PaletteCream,
-                fontSize = 26.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(horizontal = 20.dp)
-            )
+        if (isDedicatedSearchOpen || searchQuery.isNotBlank()) {
+            // ==========================================
+            // DEDICATED SEARCH SCREEN VIEW
+            // ==========================================
+            val focusRequester = remember { FocusRequester() }
 
-            Spacer(modifier = Modifier.height(14.dp))
+            LaunchedEffect(isDedicatedSearchOpen) {
+                if (isDedicatedSearchOpen && searchQuery.isBlank()) {
+                    try {
+                        focusRequester.requestFocus()
+                    } catch (_: Exception) {}
+                }
+            }
 
-            // Search Bar with Focus Tracking
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { viewModel.onSearchQueryChanged(it) },
-                placeholder = { Text("Songs, artists, genres...", color = TextSecondary, fontSize = 14.sp) },
-                leadingIcon = {
-                    Icon(imageVector = Icons.Default.Search, contentDescription = "Search", tint = PaletteSand)
-                },
-                trailingIcon = {
-                    if (searchQuery.isNotEmpty()) {
-                        IconButton(onClick = { viewModel.clearSearch() }) {
-                            Icon(imageVector = Icons.Default.Clear, contentDescription = "Clear", tint = TextMuted)
+            BackHandler {
+                isDedicatedSearchOpen = false
+                viewModel.clearSearch()
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(top = 16.dp)
+            ) {
+                // Top Search Bar with Back Navigation Button
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(
+                        onClick = {
+                            isDedicatedSearchOpen = false
+                            viewModel.clearSearch()
+                        },
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back",
+                            tint = PaletteSand,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { viewModel.onSearchQueryChanged(it) },
+                        placeholder = { Text("Songs, artists, albums...", color = TextSecondary, fontFamily = UrbanistFontFamily, fontSize = 14.sp) },
+                        leadingIcon = {
+                            Icon(imageVector = Icons.Default.Search, contentDescription = "Search", tint = PaletteSand)
+                        },
+                        trailingIcon = {
+                            if (searchQuery.isNotEmpty()) {
+                                IconButton(onClick = { viewModel.clearSearch() }) {
+                                    Icon(imageVector = Icons.Default.Clear, contentDescription = "Clear", tint = TextMuted)
+                                }
+                            }
+                        },
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        keyboardActions = KeyboardActions(
+                            onSearch = {
+                                if (searchQuery.isNotBlank()) {
+                                    viewModel.submitSearch(searchQuery)
+                                }
+                            }
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .focusRequester(focusRequester),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = PaletteOxfordBlue,
+                            unfocusedContainerColor = PaletteOxfordBlue,
+                            focusedBorderColor = PaletteSand,
+                            unfocusedBorderColor = BorderGlass,
+                            focusedTextColor = PaletteCream,
+                            unfocusedTextColor = PaletteCream
+                        ),
+                        singleLine = true
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Category Filter Chips
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 20.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(categories) { category ->
+                        val isSelected = category == filterCategory
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (isSelected) PaletteSand else PaletteOxfordBlue)
+                                .border(1.dp, if (isSelected) PaletteSand else BorderGlass, RoundedCornerShape(12.dp))
+                                .clickable { viewModel.setCategory(category) }
+                                .padding(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = category,
+                                color = if (isSelected) PaletteDarkNavy else TextSecondary,
+                                fontFamily = UrbanistFontFamily,
+                                fontSize = 12.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                            )
                         }
                     }
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp)
-                    .onFocusChanged { isSearchFocused = it.isFocused },
-                shape = RoundedCornerShape(16.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor = PaletteOxfordBlue,
-                    unfocusedContainerColor = PaletteOxfordBlue,
-                    focusedBorderColor = PaletteSand,
-                    unfocusedBorderColor = BorderGlass,
-                    focusedTextColor = PaletteCream,
-                    unfocusedTextColor = PaletteCream
-                ),
-                singleLine = true
-            )
+                }
 
-            // Previous Searches Dropdown Box (appears when focused & searches exist)
-            if (isSearchFocused && recentSearches.isNotEmpty() && searchQuery.isBlank()) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Column(
+                Spacer(modifier = Modifier.height(12.dp))
+
+                if (searchQuery.isBlank()) {
+                    // Full Dropdown / List of ALL Past Searches
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp)
+                    ) {
+                        if (recentSearches.isNotEmpty()) {
+                            item {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 8.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "All Past Searches",
+                                        color = TextSecondary,
+                                        fontFamily = UrbanistFontFamily,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = "Clear all",
+                                        color = PaletteSageGreen,
+                                        fontFamily = UrbanistFontFamily,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        modifier = Modifier.clickable { viewModel.clearAllSearches() }
+                                    )
+                                }
+                            }
+
+                            items(recentSearches) { item ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .clickable { viewModel.submitSearch(item.query) }
+                                        .padding(vertical = 10.dp, horizontal = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Search,
+                                            contentDescription = "Search",
+                                            tint = PaletteSlateBlue,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        Text(
+                                            text = item.query,
+                                            color = PaletteCream,
+                                            fontSize = 15.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { viewModel.deleteSearchQuery(item.query) },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Clear,
+                                            contentDescription = "Remove",
+                                            tint = TextMuted,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
+                            item {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(top = 40.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "Type to search songs, artists, or albums...",
+                                        color = TextSecondary,
+                                        fontSize = 14.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else if (isSearching) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = PaletteSand)
+                    }
+                } else {
+                    // Live Search Results (Ranked by Relevance)
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(bottom = 140.dp)
+                    ) {
+                        // 1. Artists Section
+                        if (filterCategory == "Artists" || (filterCategory == "All" && artistResults.isNotEmpty())) {
+                            item {
+                                Text(
+                                    text = "Artists",
+                                    color = PaletteSand,
+                                    fontFamily = SoraFontFamily,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
+                                )
+                            }
+
+                            if (filterCategory == "Artists") {
+                                items(artistResults) { artist ->
+                                    SearchArtistFullRow(
+                                        artist = artist,
+                                        onClick = { viewModel.openArtist(artist) }
+                                    )
+                                }
+                            } else {
+                                item {
+                                    LazyRow(
+                                        contentPadding = PaddingValues(horizontal = 20.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                        modifier = Modifier.padding(vertical = 8.dp)
+                                    ) {
+                                        items(artistResults) { artist ->
+                                            SearchArtistCard(
+                                                artist = artist,
+                                                onClick = { viewModel.openArtist(artist) }
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.height(14.dp))
+                                }
+                            }
+                        }
+
+                        // 2. Songs Section
+                        if (filterCategory != "Artists" && searchResults.isNotEmpty()) {
+                            item {
+                                Text(
+                                    text = "Songs",
+                                    color = PaletteSand,
+                                    fontFamily = SoraFontFamily,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
+                                )
+                            }
+
+                            items(searchResults) { track ->
+                                SearchResultTrackRow(
+                                    track = track,
+                                    onPlay = { viewModel.playTrack(track, searchResults) },
+                                    onFavorite = { viewModel.toggleFavorite(track) }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // ==========================================
+            // MAIN SEARCH LANDING SCREEN (IDLE)
+            // ==========================================
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(top = 20.dp)
+            ) {
+                // Header
+                Text(
+                    text = "Search",
+                    color = PaletteCream,
+                    fontFamily = SoraFontFamily,
+                    fontSize = 26.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 20.dp)
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Tappable Search Bar (Opens dedicated search screen on tap)
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 20.dp)
-                        .clip(RoundedCornerShape(14.dp))
+                        .clip(RoundedCornerShape(16.dp))
                         .background(PaletteOxfordBlue)
-                        .border(1.dp, BorderGlass, RoundedCornerShape(14.dp))
-                        .padding(vertical = 8.dp)
+                        .border(1.dp, BorderGlass, RoundedCornerShape(16.dp))
+                        .clickable { isDedicatedSearchOpen = true }
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    contentAlignment = Alignment.CenterStart
                 ) {
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        Icon(
+                            imageVector = Icons.Default.Search,
+                            contentDescription = "Search",
+                            tint = PaletteSand,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
                         Text(
-                            text = "Recent Searches",
+                            text = "Songs, artists, genres...",
                             color = TextSecondary,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = "Clear all",
-                            color = PaletteSageGreen,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.clickable { viewModel.clearAllSearches() }
-                        )
-                    }
-
-                    recentSearches.take(5).forEach { item ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    isSearchFocused = false
-                                    viewModel.submitSearch(item.query)
-                                }
-                                .padding(horizontal = 14.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Search,
-                                    contentDescription = "Recent",
-                                    tint = PaletteSlateBlue,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Text(
-                                    text = item.query,
-                                    color = PaletteCream,
-                                    fontSize = 14.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                            IconButton(
-                                onClick = { viewModel.deleteSearchQuery(item.query) },
-                                modifier = Modifier.size(24.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Clear,
-                                    contentDescription = "Remove",
-                                    tint = TextMuted,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Category Filter Chips
-            LazyRow(
-                contentPadding = PaddingValues(horizontal = 20.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(categories) { category ->
-                    val isSelected = category == filterCategory
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(if (isSelected) PaletteSand else PaletteOxfordBlue)
-                            .border(1.dp, if (isSelected) PaletteSand else BorderGlass, RoundedCornerShape(12.dp))
-                            .clickable { viewModel.setCategory(category) }
-                            .padding(horizontal = 14.dp, vertical = 6.dp)
-                    ) {
-                        Text(
-                            text = category,
-                            color = if (isSelected) PaletteDarkNavy else TextSecondary,
-                            fontSize = 12.sp,
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                            fontFamily = UrbanistFontFamily,
+                            fontSize = 14.sp
                         )
                     }
                 }
-            }
 
-            Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(20.dp))
 
-            if (isSearching) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = PaletteSand)
-                }
-            } else if (searchQuery.isBlank()) {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(bottom = 140.dp)
                 ) {
-                    // Previously Searched & Played Songs (Above Browse Categories)
+                    // Recent Searches Chips (Keep ONLY past 3 searches in the scroll)
+                    if (recentSearches.isNotEmpty()) {
+                        item {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 20.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 20.dp, vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Recent Searches",
+                                        color = PaletteCream,
+                                        fontFamily = SoraFontFamily,
+                                        fontSize = 18.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "Clear all",
+                                        color = PaletteSageGreen,
+                                        fontFamily = UrbanistFontFamily,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        modifier = Modifier.clickable { viewModel.clearAllSearches() }
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.height(10.dp))
+
+                                LazyRow(
+                                    contentPadding = PaddingValues(horizontal = 20.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    items(recentSearches.take(3)) { item ->
+                                        Row(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(20.dp))
+                                                .background(PaletteOxfordBlue)
+                                                .border(1.dp, BorderGlass, RoundedCornerShape(20.dp))
+                                                .clickable {
+                                                    isDedicatedSearchOpen = true
+                                                    viewModel.submitSearch(item.query)
+                                                }
+                                                .padding(start = 12.dp, top = 6.dp, bottom = 6.dp, end = 6.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Search,
+                                                contentDescription = null,
+                                                tint = PaletteSlateBlue,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = item.query,
+                                                color = PaletteCream,
+                                                fontFamily = UrbanistFontFamily,
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            IconButton(
+                                                onClick = { viewModel.deleteSearchQuery(item.query) },
+                                                modifier = Modifier.size(20.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Clear,
+                                                    contentDescription = "Delete",
+                                                    tint = TextMuted,
+                                                    modifier = Modifier.size(12.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Previously Searched & Played Songs
                     if (previousPlayedSongs.isNotEmpty()) {
                         item {
                             Column(
@@ -303,12 +605,14 @@ fun SearchScreen(
                                 Text(
                                     text = "Recently Played & Searched",
                                     color = PaletteCream,
+                                    fontFamily = SoraFontFamily,
                                     fontSize = 18.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
                                     text = "Quick replay from your recent searches",
                                     color = TextSecondary,
+                                    fontFamily = UrbanistFontFamily,
                                     fontSize = 12.sp,
                                     modifier = Modifier.padding(bottom = 12.dp)
                                 )
@@ -329,11 +633,12 @@ fun SearchScreen(
                         }
                     }
 
-                    // Browse Categories Section
+                    // Browse Categories Section with Themed Backgrounds
                     item {
                         Text(
                             text = "Browse Categories",
                             color = PaletteCream,
+                            fontFamily = SoraFontFamily,
                             fontSize = 18.sp,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 12.dp)
@@ -345,7 +650,7 @@ fun SearchScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = 20.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             for (rowChunk in genres.chunked(2)) {
                                 Row(
@@ -356,92 +661,65 @@ fun SearchScreen(
                                         Box(
                                             modifier = Modifier
                                                 .weight(1f)
-                                                .height(84.dp)
-                                                .clip(RoundedCornerShape(14.dp))
-                                                .background(genre.bgColor)
-                                                .border(1.dp, BorderGlass, RoundedCornerShape(14.dp))
+                                                .height(96.dp)
+                                                .clip(RoundedCornerShape(16.dp))
+                                                .border(1.dp, BorderGlass, RoundedCornerShape(16.dp))
                                                 .clickable {
-                                                    isSearchFocused = false
+                                                    isDedicatedSearchOpen = true
                                                     viewModel.submitSearch(genre.query)
                                                 }
-                                                .padding(14.dp),
-                                            contentAlignment = Alignment.BottomStart
                                         ) {
+                                            // Thematic Image
+                                            AsyncImage(
+                                                model = genre.imageUrl,
+                                                contentDescription = genre.title,
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+
+                                            // Atmospheric Genre Color Gradient
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .background(
+                                                        Brush.linearGradient(
+                                                            colors = genre.gradientColors,
+                                                            start = Offset(0f, 0f),
+                                                            end = Offset(300f, 300f)
+                                                        )
+                                                    )
+                                            )
+
+                                            // Text Readability Ambient Fade
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .background(
+                                                        Brush.verticalGradient(
+                                                            colors = listOf(
+                                                                Color.Transparent,
+                                                                Color.Black.copy(alpha = 0.35f),
+                                                                Color.Black.copy(alpha = 0.80f)
+                                                            )
+                                                        )
+                                                    )
+                                            )
+
+                                            // Title
                                             Text(
                                                 text = genre.title,
                                                 color = PaletteCream,
-                                                fontSize = 14.sp,
-                                                fontWeight = FontWeight.SemiBold
+                                                fontFamily = SoraFontFamily,
+                                                fontSize = 15.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier
+                                                    .align(Alignment.BottomStart)
+                                                    .padding(14.dp)
                                             )
                                         }
                                     }
                                 }
                             }
-                        }
-                    }
-                }
-            } else {
-                // Search Results
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 140.dp)
-                ) {
-                    // 1. Artists Section (when "All" or "Artists" category)
-                    if (filterCategory == "Artists" || (filterCategory == "All" && artistResults.isNotEmpty())) {
-                        item {
-                            Text(
-                                text = "Artists",
-                                color = PaletteSand,
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
-                            )
-                        }
-
-                        if (filterCategory == "Artists") {
-                            items(artistResults) { artist ->
-                                SearchArtistFullRow(
-                                    artist = artist,
-                                    onClick = { viewModel.openArtist(artist) }
-                                )
-                            }
-                        } else {
-                            item {
-                                LazyRow(
-                                    contentPadding = PaddingValues(horizontal = 20.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(14.dp),
-                                    modifier = Modifier.padding(vertical = 8.dp)
-                                ) {
-                                    items(artistResults) { artist ->
-                                        SearchArtistCard(
-                                            artist = artist,
-                                            onClick = { viewModel.openArtist(artist) }
-                                        )
-                                    }
-                                }
-                                Spacer(modifier = Modifier.height(14.dp))
-                            }
-                        }
-                    }
-
-                    // 2. Songs Section (when "All" or "Songs" category)
-                    if (filterCategory != "Artists" && searchResults.isNotEmpty()) {
-                        item {
-                            Text(
-                                text = "Songs",
-                                color = PaletteSand,
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
-                            )
-                        }
-
-                        items(searchResults) { track ->
-                            SearchResultTrackRow(
-                                track = track,
-                                onPlay = { viewModel.playTrack(track, searchResults) },
-                                onFavorite = { viewModel.toggleFavorite(track) }
-                            )
                         }
                     }
                 }
@@ -498,6 +776,7 @@ fun PreviousPlayedTrackCard(
         Text(
             text = event.songTitle,
             color = PaletteCream,
+            fontFamily = UrbanistFontFamily,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
@@ -507,7 +786,9 @@ fun PreviousPlayedTrackCard(
         Text(
             text = event.artistName,
             color = TextSecondary,
+            fontFamily = UrbanistFontFamily,
             fontSize = 11.sp,
+            fontWeight = FontWeight.Normal,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
@@ -536,6 +817,7 @@ fun SearchArtistCard(
         Text(
             text = artist.name,
             color = PaletteCream,
+            fontFamily = UrbanistFontFamily,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
@@ -545,7 +827,9 @@ fun SearchArtistCard(
         Text(
             text = "Artist",
             color = TextSecondary,
-            fontSize = 11.sp
+            fontFamily = UrbanistFontFamily,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Normal
         )
     }
 }
@@ -586,6 +870,7 @@ fun SearchArtistFullRow(
                     Text(
                         text = artist.name,
                         color = PaletteCream,
+                        fontFamily = UrbanistFontFamily,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
@@ -595,7 +880,9 @@ fun SearchArtistFullRow(
                     Text(
                         text = "Artist • Tap to view profile & albums",
                         color = PaletteSageGreen,
+                        fontFamily = UrbanistFontFamily,
                         fontSize = 12.sp,
+                        fontWeight = FontWeight.Normal,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -651,6 +938,7 @@ fun SearchResultTrackRow(
                     Text(
                         text = track.title,
                         color = PaletteCream,
+                        fontFamily = UrbanistFontFamily,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
@@ -660,7 +948,9 @@ fun SearchResultTrackRow(
                     Text(
                         text = "${track.artist} • ${track.album ?: "Single"}",
                         color = TextSecondary,
+                        fontFamily = UrbanistFontFamily,
                         fontSize = 12.sp,
+                        fontWeight = FontWeight.Normal,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
