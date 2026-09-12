@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.Calendar
@@ -39,7 +40,18 @@ class HomeViewModel @Inject constructor(
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
-    val recentHistory: StateFlow<List<ListeningEventEntity>> = listeningHistoryDao.getRecentHistory(10)
+    // 5 Most Recently Played Unique Tracks (guaranteed exact 5, replay maintains position without dropping others)
+    val recentPlayedSongs: StateFlow<List<ListeningEventEntity>> = listeningHistoryDao.getRecentUniquePlayedSongs(5)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Tracks played before 2 days ago that user hasn't listened to in the last 2 days
+    val rediscoveredFavorites: StateFlow<List<ListeningEventEntity>> = listeningHistoryDao.getRediscoveredFavorites(
+        twoDaysAgoMs = System.currentTimeMillis() - (2L * 24 * 60 * 60 * 1000L),
+        limit = 5
+    ).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Most listened artist dynamically computed from listening history
+    val topArtistStat = listeningHistoryDao.getTopArtists(sinceMs = 0L, limit = 1)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val favorites = favoriteTrackDao.getAllFavorites()
@@ -60,8 +72,49 @@ class HomeViewModel @Inject constructor(
     private val _isArtistLoading = MutableStateFlow(false)
     val isArtistLoading: StateFlow<Boolean> = _isArtistLoading.asStateFlow()
 
+    // Trending Genres State
+    val trendingGenres: List<GenreItem> = listOf(
+        GenreItem("pop", "Pop", "🔥", "Top Global Pop Hits 2026", 0xFF6366F1, "Chart-topping global anthems"),
+        GenreItem("hiphop", "Hip-Hop & Rap", "⚡", "Hip Hop Rap Bangers 2026", 0xFFEC4899, "Heavy 808s & modern flow"),
+        GenreItem("rnb", "R&B / Soul", "🌙", "Midnight R&B Soul Hits", 0xFF8B5CF6, "Late night sensual melodies"),
+        GenreItem("indie", "Indie & Alt", "🎸", "Indie Alternative Rock Hits", 0xFF10B981, "Dreamy guitars & indie vibe"),
+        GenreItem("edm", "Electronic & EDM", "🌊", "EDM Dance Club Hits 2026", 0xFF06B6D4, "High energy synths & festival beats"),
+        GenreItem("bollywood", "Bollywood Melodies", "🪕", "Bollywood Romantic Hits Arijit Singh", 0xFFF59E0B, "Soulful Indian melodies & romance"),
+        GenreItem("lofi", "Chill Lo-Fi", "☕", "Chill Lo Fi Study Beats", 0xFF64748B, "Warm tape hiss & relaxing beats"),
+        GenreItem("rock", "Rock & Metal", "🥁", "Modern Rock Guitar Anthems", 0xFFEF4444, "Raw guitars & stadium anthems"),
+        GenreItem("acoustic", "Acoustic & Folk", "🌾", "Acoustic Pop Folk Melodies", 0xFFD97706, "Intimate strings & stripped vocals"),
+        GenreItem("latin", "Latin & Reggaeton", "🌴", "Latin Reggaeton Fiesta Hits", 0xFF14B8A6, "Sun-soaked infectious rhythms")
+    )
+
+    private val _selectedGenre = MutableStateFlow<GenreItem?>(null)
+    val selectedGenre: StateFlow<GenreItem?> = _selectedGenre.asStateFlow()
+
+    private val _genreTracks = MutableStateFlow<List<SieloTrack>>(emptyList())
+    val genreTracks: StateFlow<List<SieloTrack>> = _genreTracks.asStateFlow()
+
+    private val _isGenreLoading = MutableStateFlow(false)
+    val isGenreLoading: StateFlow<Boolean> = _isGenreLoading.asStateFlow()
+
     init {
         loadFeed("Top Hits 2026")
+    }
+
+    fun openGenre(genre: GenreItem) {
+        _selectedGenre.value = genre
+        viewModelScope.launch {
+            _isGenreLoading.value = true
+            val tracks = innerTubeClient.search(genre.seedQuery)
+            val clean = if (tracks.isNotEmpty()) {
+                tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+            } else defaultGenreTracks(genre.name)
+            _genreTracks.value = clean
+            _isGenreLoading.value = false
+        }
+    }
+
+    fun closeGenre() {
+        _selectedGenre.value = null
+        _genreTracks.value = emptyList()
     }
 
     fun openArtist(artistName: String, imageUrl: String? = null) {
@@ -169,23 +222,60 @@ class HomeViewModel @Inject constructor(
         }
     }
 
-    val similarArtists: List<ArtistProfile> = listOf(
-        ArtistProfile("SZA", "https://yt3.googleusercontent.com/yLBjfGExL_iEyNmOd5VjEVt6tQWg8Upr1mpafHQfsv-MU3875DnCI74VsslG0lZtiGjg0lf1wTk=s500-c-k-c0x00ffffff-no-rj"),
-        ArtistProfile("The Weeknd", "https://yt3.googleusercontent.com/WHvw1ak1FcJaHeEiTmG2iN0dqEjjPxAtT_tA8ruJ3MlNr9I-RHsAur1iAenYeQN_d6LNPH2Z8Ic=s500-c-k-c0x00ffffff-no-rj"),
-        ArtistProfile("H.E.R.", "https://yt3.googleusercontent.com/OAONz3oAx1BmChjbCCG9ZFMGiOXsBkoTX-qc2noEI9Aik7hK4FuV1n2EiiEZZJ4M3raCiuOdkQ=s500-c-k-c0x00ffffff-no-rj"),
-        ArtistProfile("Kendrick Lamar", "https://yt3.googleusercontent.com/j1szYhuen1uT1D1icpjxHMFyBc0xINWK1eMtSzrB0TL5jliB7t3JB_wJ6UA9twV7VelxpKEc=s500-c-k-c0x00ffffff-no-rj"),
-        ArtistProfile("Dua Lipa", "https://yt3.googleusercontent.com/c3upBFWLu55hnBvqncQS9ZEF_hkvHsNTQiB7m7ZYYavLFMzfyn9Bwo-1VF4HSPGo3G2EdwGtgWg=s500-c-k-c0x00ffffff-no-rj"),
-        ArtistProfile("Metro Boomin", "https://yt3.googleusercontent.com/K3VTXT-b8S-B4G-aqWTHhehGM8z7qJbMIIUGpsbkLbIChdj_-uXKhmNZdP0mfj4fwHoIQw5hYA=s500-c-k-c0x00ffffff-no-rj"),
-        ArtistProfile("Billie Eilish", "https://yt3.googleusercontent.com/dirvtoDAmx-u0UR76-pxfhYL6Wxj2vfL2geUcxDwk62tTWWhGG6QDGc63RG3NdOz38-yBwRHDQ=s500-c-k-c0x00ffffff-no-rj"),
-        ArtistProfile("Arijit Singh", "https://yt3.googleusercontent.com/DcEzZrPCQRSSs47rMbdJ3UJkQUCN3X8SKf8aCnvOgd2BmPihAz-0jBGJgEVh9_P8EiSBVNyixDs=s500-c-k-c0x00ffffff-no-rj")
-    )
+    private val _dynamicSimilarArtists = MutableStateFlow<List<ArtistProfile>>(emptyList())
+    val dynamicSimilarArtists: StateFlow<List<ArtistProfile>> = _dynamicSimilarArtists.asStateFlow()
 
-    val featuredStations: List<StationItem> = listOf(
-        StationItem("Top Hits Station 🎧", "Global Hot 100", "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=600&auto=format&fit=crop&q=80", "Top Hits 2026"),
-        StationItem("Midnight Chill 🌙", "Atmospheric Waves", "https://images.unsplash.com/photo-1518609878373-06d740f60d8b?w=600&auto=format&fit=crop&q=80", "Midnight Chill R&B"),
-        StationItem("Synthwave FM 🌊", "Retro Cyberdeck", "https://images.unsplash.com/photo-1508700115892-45ecd05ae2ad?w=600&auto=format&fit=crop&q=80", "Synthwave Cyberpunk"),
-        StationItem("Bollywood Anthems 🔥", "T-Series & Friends", "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=600&auto=format&fit=crop&q=80", "Arijit Singh Hits")
-    )
+    private var lastResolvedArtist: String? = null
+
+    fun loadDynamicSimilarArtists(topArtistName: String) {
+        if (topArtistName == lastResolvedArtist && _dynamicSimilarArtists.value.isNotEmpty()) return
+        lastResolvedArtist = topArtistName
+        viewModelScope.launch {
+            val names = getSimilarArtistNames(topArtistName)
+            val list = mutableListOf<ArtistProfile>()
+            for (name in names) {
+                try {
+                    val searchResult = innerTubeClient.searchArtists(name)
+                    val img = searchResult.firstOrNull()?.imageUrl
+                    val finalImg = if (!img.isNullOrBlank() && !img.contains("default-music") && !img.contains("default-film")) {
+                        img
+                    } else {
+                        "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=500&auto=format&fit=crop&q=80"
+                    }
+                    list.add(ArtistProfile(name, finalImg))
+                } catch (e: Exception) {
+                    list.add(ArtistProfile(name, "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=500&auto=format&fit=crop&q=80"))
+                }
+            }
+            if (list.isNotEmpty()) {
+                _dynamicSimilarArtists.value = list
+            }
+        }
+    }
+
+    private fun getSimilarArtistNames(topArtistName: String): List<String> {
+        val lower = topArtistName.lowercase()
+        return when {
+            lower.contains("sza") || lower.contains("summer walker") || lower.contains("jhené") -> listOf(
+                "Summer Walker", "H.E.R.", "Frank Ocean", "Daniel Caesar", "Jhené Aiko"
+            )
+            lower.contains("weeknd") || lower.contains("bruno mars") || lower.contains("dua lipa") -> listOf(
+                "The Weeknd", "Dua Lipa", "Bruno Mars", "Post Malone", "Khalid"
+            )
+            lower.contains("kendrick") || lower.contains("drake") || lower.contains("travis") || lower.contains("metro") -> listOf(
+                "Kendrick Lamar", "Drake", "J. Cole", "Travis Scott", "21 Savage"
+            )
+            lower.contains("arijit") || lower.contains("atif") || lower.contains("shreya") -> listOf(
+                "Arijit Singh", "Atif Aslam", "Shreya Ghoshal", "Jubin Nautiyal", "Armaan Malik"
+            )
+            lower.contains("taylor") || lower.contains("olivia") || lower.contains("billie") -> listOf(
+                "Taylor Swift", "Olivia Rodrigo", "Billie Eilish", "Sabrina Carpenter", "Lorde"
+            )
+            else -> listOf(
+                "The Weeknd", "SZA", "Kendrick Lamar", "Dua Lipa", "Taylor Swift"
+            )
+        }
+    }
 
     val customPlaylists: List<PlaylistCardItem> = listOf(
         PlaylistCardItem(
@@ -239,59 +329,40 @@ class HomeViewModel @Inject constructor(
         )
     )
 
-    fun playArtistRadio(artist: String) {
-        viewModelScope.launch {
-            _isLoading.value = true
-            val tracks = innerTubeClient.search(artist)
-            if (tracks.isNotEmpty()) {
-                val clean = tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
-                playTrack(clean.first(), clean)
-            }
-            _isLoading.value = false
-        }
-    }
-
-    fun playStation(station: StationItem) {
-        viewModelScope.launch {
-            _isLoading.value = true
-            val tracks = innerTubeClient.search(station.seedQuery)
-            if (tracks.isNotEmpty()) {
-                val clean = tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
-                playTrack(clean.first(), clean)
-            }
-            _isLoading.value = false
-        }
-    }
-
     private fun defaultStarterTracks(): List<SieloTrack> = listOf(
-        SieloTrack("fHI8X4OXluQ", "Blinding Lights", "The Weeknd", durationText = "3:20", thumbnailUrl = "https://i.ytimg.com/vi/fHI8X4OXluQ/hqdefault.jpg"),
-        SieloTrack("4NRXx6U8ABQ", "Starboy", "The Weeknd ft. Daft Punk", durationText = "3:50", thumbnailUrl = "https://i.ytimg.com/vi/4NRXx6U8ABQ/hqdefault.jpg"),
-        SieloTrack("b1kbLwvqugk", "Die For You", "The Weeknd", durationText = "4:20", thumbnailUrl = "https://i.ytimg.com/vi/b1kbLwvqugk/hqdefault.jpg"),
-        SieloTrack("34Na4j8AVgA", "Save Your Tears", "The Weeknd", durationText = "3:35", thumbnailUrl = "https://i.ytimg.com/vi/34Na4j8AVgA/hqdefault.jpg"),
-        SieloTrack("L_LUpnjgPso", "After Hours", "The Weeknd", durationText = "6:01", thumbnailUrl = "https://i.ytimg.com/vi/L_LUpnjgPso/hqdefault.jpg"),
-        SieloTrack("sT98E_u6k8Q", "Levitating", "Dua Lipa", durationText = "3:23", thumbnailUrl = "https://i.ytimg.com/vi/sT98E_u6k8Q/hqdefault.jpg"),
-        SieloTrack("JGwWNGJdvx8", "Shape of You", "Ed Sheeran", durationText = "3:53", thumbnailUrl = "https://i.ytimg.com/vi/JGwWNGJdvx8/hqdefault.jpg"),
-        SieloTrack("k2qgadSvNyU", "New Rules", "Dua Lipa", durationText = "3:29", thumbnailUrl = "https://i.ytimg.com/vi/k2qgadSvNyU/hqdefault.jpg"),
-        SieloTrack("OPf0YbXqDm0", "Uptown Funk", "Mark Ronson ft. Bruno Mars", durationText = "4:30", thumbnailUrl = "https://i.ytimg.com/vi/OPf0YbXqDm0/hqdefault.jpg"),
-        SieloTrack("0VwhorQBxU4", "Stay", "The Kid LAROI & Justin Bieber", durationText = "2:21", thumbnailUrl = "https://i.ytimg.com/vi/0VwhorQBxU4/hqdefault.jpg"),
-        SieloTrack("hT_nvWreIhg", "Counting Stars", "OneRepublic", durationText = "4:17", thumbnailUrl = "https://i.ytimg.com/vi/hT_nvWreIhg/hqdefault.jpg"),
-        SieloTrack("kJQP7kiw5Fk", "Despacito", "Luis Fonsi ft. Daddy Yankee", durationText = "3:48", thumbnailUrl = "https://i.ytimg.com/vi/kJQP7kiw5Fk/hqdefault.jpg"),
-        SieloTrack("9bZkp7q19f0", "Gangnam Style", "PSY", durationText = "3:39", thumbnailUrl = "https://i.ytimg.com/vi/9bZkp7q19f0/hqdefault.jpg"),
-        SieloTrack("YQHsXMglC9A", "Hello", "Adele", durationText = "4:55", thumbnailUrl = "https://i.ytimg.com/vi/YQHsXMglC9A/hqdefault.jpg")
+        SieloTrack("fW-Mxsnu", "Blinding Lights", "The Weeknd", durationText = "3:20"),
+        SieloTrack("TcDP-KUl", "Starboy", "The Weeknd ft. Daft Punk", durationText = "3:50"),
+        SieloTrack("9q41tYDn", "Die For You", "The Weeknd", durationText = "4:20"),
+        SieloTrack("tvxo4Jm0", "Save Your Tears", "The Weeknd", durationText = "3:35"),
+        SieloTrack("NIVEQweX", "After Hours", "The Weeknd", durationText = "6:01"),
+        SieloTrack("3IoDK8qI", "Levitating", "Dua Lipa", durationText = "3:23"),
+        SieloTrack("wwSCc15h", "Shape of You", "Ed Sheeran", durationText = "3:53"),
+        SieloTrack("EWoDxjbu", "New Rules", "Dua Lipa", durationText = "3:29"),
+        SieloTrack("wLxoOff5", "Uptown Funk", "Mark Ronson ft. Bruno Mars", durationText = "4:30"),
+        SieloTrack("kd8JSDbB", "Stay", "The Kid LAROI & Justin Bieber", durationText = "2:21")
     )
 
     private fun defaultGenreTracks(genre: String): List<SieloTrack> = when {
-        genre.contains("Electronic", ignoreCase = true) -> listOf(
-            SieloTrack("4NRXx6U8ABQ", "Starboy", "The Weeknd ft. Daft Punk", durationText = "3:50", thumbnailUrl = "https://i.ytimg.com/vi/4NRXx6U8ABQ/hqdefault.jpg"),
-            SieloTrack("OPf0YbXqDm0", "Uptown Funk", "Mark Ronson", durationText = "4:30", thumbnailUrl = "https://i.ytimg.com/vi/OPf0YbXqDm0/hqdefault.jpg")
+        genre.contains("Electronic", ignoreCase = true) || genre.contains("EDM", ignoreCase = true) -> listOf(
+            SieloTrack("TcDP-KUl", "Starboy", "The Weeknd ft. Daft Punk", durationText = "3:50"),
+            SieloTrack("wLxoOff5", "Uptown Funk", "Mark Ronson", durationText = "4:30")
         )
         genre.contains("Acoustic", ignoreCase = true) -> listOf(
-            SieloTrack("JGwWNGJdvx8", "Shape of You", "Ed Sheeran", durationText = "3:53", thumbnailUrl = "https://i.ytimg.com/vi/JGwWNGJdvx8/hqdefault.jpg"),
-            SieloTrack("YQHsXMglC9A", "Hello", "Adele", durationText = "4:55", thumbnailUrl = "https://i.ytimg.com/vi/YQHsXMglC9A/hqdefault.jpg")
+            SieloTrack("wwSCc15h", "Shape of You", "Ed Sheeran", durationText = "3:53"),
+            SieloTrack("3IoDK8qI", "Levitating", "Dua Lipa", durationText = "3:23")
         )
         else -> defaultStarterTracks().take(6)
     }
 }
+
+data class GenreItem(
+    val id: String,
+    val name: String,
+    val icon: String,
+    val seedQuery: String,
+    val accentColor: Long,
+    val description: String
+)
 
 data class ArtistProfile(
     val name: String,

@@ -211,7 +211,9 @@ fun WaveformSeekbar(
 fun RotatingVinylCard(
     artworkUrl: String?,
     isPlaying: Boolean,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    title: String? = "",
+    artist: String? = ""
 ) {
     val rotationAngle = remember { Animatable(0f) }
 
@@ -240,15 +242,15 @@ fun RotatingVinylCard(
             drawCircle(color = Color(0xFF202028), radius = size.minDimension / 3.2f, style = Stroke(2f))
         }
 
-        AsyncImage(
-            model = artworkUrl,
-            contentDescription = "Album Art",
-            contentScale = ContentScale.Crop,
+        SieloSongArtwork(
+            thumbnailUrl = artworkUrl,
+            title = title,
+            artist = artist,
             modifier = Modifier
                 .size(130.dp)
                 .rotate(rotationAngle.value % 360f)
-                .clip(CircleShape)
-                .border(2.dp, ObsidianBlack, CircleShape)
+                .border(2.dp, ObsidianBlack, CircleShape),
+            shape = CircleShape
         )
 
         Box(

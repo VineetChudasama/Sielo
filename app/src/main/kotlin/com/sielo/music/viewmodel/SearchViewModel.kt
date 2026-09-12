@@ -4,7 +4,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.sielo.music.core.audio.PlayerManager
 import com.sielo.music.core.database.dao.FavoriteTrackDao
+import com.sielo.music.core.database.dao.ListeningHistoryDao
+import com.sielo.music.core.database.dao.SearchHistoryDao
+import com.sielo.music.core.database.dao.SearchPlayHistoryDao
 import com.sielo.music.core.database.entity.FavoriteTrackEntity
+import com.sielo.music.core.database.entity.ListeningEventEntity
+import com.sielo.music.core.database.entity.SearchHistoryEntity
+import com.sielo.music.core.database.entity.SearchPlayHistoryEntity
 import com.sielo.music.core.network.innertube.InnerTubeClient
 import com.sielo.music.core.network.models.ArtistDetails
 import com.sielo.music.core.network.models.SieloArtist
@@ -24,7 +30,10 @@ import javax.inject.Inject
 class SearchViewModel @Inject constructor(
     private val innerTubeClient: InnerTubeClient,
     private val playerManager: PlayerManager,
-    private val favoriteTrackDao: FavoriteTrackDao
+    private val favoriteTrackDao: FavoriteTrackDao,
+    private val searchHistoryDao: SearchHistoryDao,
+    private val searchPlayHistoryDao: SearchPlayHistoryDao,
+    private val listeningHistoryDao: ListeningHistoryDao
 ) : ViewModel() {
 
     private val _searchQuery = MutableStateFlow("")
@@ -48,6 +57,14 @@ class SearchViewModel @Inject constructor(
     private val _isSearching = MutableStateFlow(false)
     val isSearching: StateFlow<Boolean> = _isSearching.asStateFlow()
 
+    // Recent Search Queries for Dropdown
+    val recentSearches: StateFlow<List<SearchHistoryEntity>> = searchHistoryDao.getRecentSearchQueries(8)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Previously Searched & Played Tracks (ONLY tracks played after searching)
+    val previousPlayedSongs: StateFlow<List<SearchPlayHistoryEntity>> = searchPlayHistoryDao.getRecentSearchPlays(8)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     val favorites = favoriteTrackDao.getAllFavorites()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -66,6 +83,37 @@ class SearchViewModel @Inject constructor(
         searchJob = viewModelScope.launch {
             delay(300) // 300ms Debounce
             executeSearch(query, _filterCategory.value)
+        }
+    }
+
+    fun submitSearch(query: String) {
+        if (query.isBlank()) return
+        _searchQuery.value = query
+        saveSearchQuery(query)
+        searchJob?.cancel()
+        searchJob = viewModelScope.launch {
+            executeSearch(query, _filterCategory.value)
+        }
+    }
+
+    fun saveSearchQuery(query: String) {
+        val trimmed = query.trim()
+        if (trimmed.isNotBlank()) {
+            viewModelScope.launch {
+                searchHistoryDao.insertSearchQuery(SearchHistoryEntity(trimmed))
+            }
+        }
+    }
+
+    fun deleteSearchQuery(query: String) {
+        viewModelScope.launch {
+            searchHistoryDao.deleteSearchQuery(query)
+        }
+    }
+
+    fun clearAllSearches() {
+        viewModelScope.launch {
+            searchHistoryDao.clearAllSearchHistory()
         }
     }
 
@@ -133,7 +181,34 @@ class SearchViewModel @Inject constructor(
     }
 
     fun playTrack(track: SieloTrack, queue: List<SieloTrack>) {
+        if (_searchQuery.value.isNotBlank()) {
+            saveSearchQuery(_searchQuery.value)
+        }
+        // Save to Search Play History specifically
+        viewModelScope.launch {
+            searchPlayHistoryDao.insertSearchPlay(
+                SearchPlayHistoryEntity(
+                    songId = track.id,
+                    songTitle = track.title,
+                    artistName = track.artist,
+                    albumName = track.album,
+                    thumbnailUrl = track.thumbnailUrl,
+                    playedAtMs = System.currentTimeMillis()
+                )
+            )
+        }
         playerManager.playTrack(track, queue)
+    }
+
+    fun playSearchPlayEvent(event: SearchPlayHistoryEntity) {
+        val track = SieloTrack(
+            id = event.songId,
+            title = event.songTitle,
+            artist = event.artistName,
+            album = event.albumName,
+            thumbnailUrl = event.thumbnailUrl
+        )
+        playerManager.playTrack(track, listOf(track))
     }
 
     fun toggleFavorite(track: SieloTrack) {

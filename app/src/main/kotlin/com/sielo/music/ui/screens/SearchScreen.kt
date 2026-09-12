@@ -29,6 +29,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -39,9 +40,13 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -78,13 +83,17 @@ fun SearchScreen(
     val isSearching by viewModel.isSearching.collectAsState()
     val selectedArtist by viewModel.selectedArtist.collectAsState()
     val isArtistLoading by viewModel.isArtistLoading.collectAsState()
+    val recentSearches by viewModel.recentSearches.collectAsState()
+    val previousPlayedSongs by viewModel.previousPlayedSongs.collectAsState()
 
-    // Handle device system back gesture when artist is open or search has text
-    BackHandler(enabled = selectedArtist != null || searchQuery.isNotEmpty()) {
-        if (selectedArtist != null) {
-            viewModel.closeArtist()
-        } else if (searchQuery.isNotEmpty()) {
-            viewModel.clearSearch()
+    var isSearchFocused by remember { mutableStateOf(false) }
+
+    // Handle device system back gesture when artist is open or search has text/focus
+    BackHandler(enabled = selectedArtist != null || searchQuery.isNotEmpty() || isSearchFocused) {
+        when {
+            selectedArtist != null -> viewModel.closeArtist()
+            isSearchFocused -> isSearchFocused = false
+            searchQuery.isNotEmpty() -> viewModel.clearSearch()
         }
     }
 
@@ -133,7 +142,7 @@ fun SearchScreen(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // Search Bar
+            // Search Bar with Focus Tracking
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { viewModel.onSearchQueryChanged(it) },
@@ -150,7 +159,8 @@ fun SearchScreen(
                 },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 20.dp),
+                    .padding(horizontal = 20.dp)
+                    .onFocusChanged { isSearchFocused = it.isFocused },
                 shape = RoundedCornerShape(16.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedContainerColor = PaletteOxfordBlue,
@@ -162,6 +172,87 @@ fun SearchScreen(
                 ),
                 singleLine = true
             )
+
+            // Previous Searches Dropdown Box (appears when focused & searches exist)
+            if (isSearchFocused && recentSearches.isNotEmpty() && searchQuery.isBlank()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(PaletteOxfordBlue)
+                        .border(1.dp, BorderGlass, RoundedCornerShape(14.dp))
+                        .padding(vertical = 8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Recent Searches",
+                            color = TextSecondary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "Clear all",
+                            color = PaletteSageGreen,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.clickable { viewModel.clearAllSearches() }
+                        )
+                    }
+
+                    recentSearches.take(5).forEach { item ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    isSearchFocused = false
+                                    viewModel.submitSearch(item.query)
+                                }
+                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Search,
+                                    contentDescription = "Recent",
+                                    tint = PaletteSlateBlue,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = item.query,
+                                    color = PaletteCream,
+                                    fontSize = 14.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            IconButton(
+                                onClick = { viewModel.deleteSearchQuery(item.query) },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Clear,
+                                    contentDescription = "Remove",
+                                    tint = TextMuted,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(12.dp))
 
@@ -197,43 +288,94 @@ fun SearchScreen(
                     CircularProgressIndicator(color = PaletteSand)
                 }
             } else if (searchQuery.isBlank()) {
-                // Genre Discovery Exploration Grid
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 20.dp)
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(bottom = 140.dp)
                 ) {
-                    Text(
-                        text = "Browse Categories",
-                        color = PaletteCream,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 12.dp)
-                    )
-
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(2),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                        contentPadding = PaddingValues(bottom = 140.dp)
-                    ) {
-                        items(genres) { genre ->
-                            Box(
+                    // Previously Searched & Played Songs (Above Browse Categories)
+                    if (previousPlayedSongs.isNotEmpty()) {
+                        item {
+                            Column(
                                 modifier = Modifier
-                                    .height(84.dp)
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .background(genre.bgColor)
-                                    .border(1.dp, BorderGlass, RoundedCornerShape(14.dp))
-                                    .clickable { viewModel.onSearchQueryChanged(genre.query) }
-                                    .padding(14.dp),
-                                contentAlignment = Alignment.BottomStart
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 20.dp)
                             ) {
                                 Text(
-                                    text = genre.title,
+                                    text = "Recently Played & Searched",
                                     color = PaletteCream,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.SemiBold
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold
                                 )
+                                Text(
+                                    text = "Quick replay from your recent searches",
+                                    color = TextSecondary,
+                                    fontSize = 12.sp,
+                                    modifier = Modifier.padding(bottom = 12.dp)
+                                )
+                            }
+
+                            LazyRow(
+                                contentPadding = PaddingValues(horizontal = 20.dp),
+                                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                modifier = Modifier.padding(bottom = 24.dp)
+                            ) {
+                                items(previousPlayedSongs) { event ->
+                                    PreviousPlayedTrackCard(
+                                        event = event,
+                                        onPlay = { viewModel.playSearchPlayEvent(event) }
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Browse Categories Section
+                    item {
+                        Text(
+                            text = "Browse Categories",
+                            color = PaletteCream,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 12.dp)
+                        )
+                    }
+
+                    item {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 20.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            for (rowChunk in genres.chunked(2)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    for (genre in rowChunk) {
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(84.dp)
+                                                .clip(RoundedCornerShape(14.dp))
+                                                .background(genre.bgColor)
+                                                .border(1.dp, BorderGlass, RoundedCornerShape(14.dp))
+                                                .clickable {
+                                                    isSearchFocused = false
+                                                    viewModel.submitSearch(genre.query)
+                                                }
+                                                .padding(14.dp),
+                                            contentAlignment = Alignment.BottomStart
+                                        ) {
+                                            Text(
+                                                text = genre.title,
+                                                color = PaletteCream,
+                                                fontSize = 14.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -309,6 +451,70 @@ fun SearchScreen(
 }
 
 @Composable
+fun PreviousPlayedTrackCard(
+    event: com.sielo.music.core.database.entity.SearchPlayHistoryEntity,
+    onPlay: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .width(130.dp)
+            .clickable { onPlay() }
+    ) {
+        Box(
+            modifier = Modifier
+                .size(130.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(PaletteOxfordBlue)
+                .border(1.dp, BorderGlass, RoundedCornerShape(14.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            com.sielo.music.ui.components.SieloSongArtwork(
+                thumbnailUrl = event.thumbnailUrl,
+                title = event.songTitle,
+                artist = event.artistName,
+                modifier = Modifier.fillMaxSize(),
+                shape = RoundedCornerShape(14.dp)
+            )
+
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(PaletteDarkNavy.copy(alpha = 0.65f))
+                    .border(1.dp, PaletteSand.copy(alpha = 0.5f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PlayArrow,
+                    contentDescription = "Play",
+                    tint = PaletteSand,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = event.songTitle,
+            color = PaletteCream,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+
+        Text(
+            text = event.artistName,
+            color = TextSecondary,
+            fontSize = 11.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
 fun SearchArtistCard(
     artist: SieloArtist,
     onClick: () -> Unit
@@ -319,34 +525,11 @@ fun SearchArtistCard(
             .width(96.dp)
             .clickable { onClick() }
     ) {
-        if (!artist.imageUrl.isNullOrBlank()) {
-            AsyncImage(
-                model = artist.imageUrl,
-                contentDescription = artist.name,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .size(86.dp)
-                    .clip(CircleShape)
-                    .background(PaletteOxfordBlue)
-                    .border(1.dp, BorderSubtle, CircleShape)
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .size(86.dp)
-                    .clip(CircleShape)
-                    .background(PaletteOxfordBlue)
-                    .border(1.dp, BorderSubtle, CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Person,
-                    contentDescription = "Artist",
-                    tint = PaletteSand,
-                    modifier = Modifier.size(36.dp)
-                )
-            }
-        }
+        com.sielo.music.ui.components.SieloArtistPhoto(
+            imageUrl = artist.imageUrl,
+            name = artist.name,
+            modifier = Modifier.size(86.dp)
+        )
 
         Spacer(modifier = Modifier.height(6.dp))
 
@@ -361,9 +544,8 @@ fun SearchArtistCard(
 
         Text(
             text = "Artist",
-            color = PaletteSageGreen,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Medium
+            color = TextSecondary,
+            fontSize = 11.sp
         )
     }
 }
@@ -376,10 +558,10 @@ fun SearchArtistFullRow(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 4.dp)
-            .clip(RoundedCornerShape(14.dp))
+            .padding(horizontal = 20.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(16.dp))
             .background(PaletteOxfordBlue)
-            .border(1.dp, BorderGlass, RoundedCornerShape(14.dp))
+            .border(1.dp, BorderGlass, RoundedCornerShape(16.dp))
             .clickable { onClick() }
             .padding(horizontal = 12.dp, vertical = 10.dp)
     ) {
@@ -392,32 +574,11 @@ fun SearchArtistFullRow(
                 modifier = Modifier.weight(1f),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                if (!artist.imageUrl.isNullOrBlank()) {
-                    AsyncImage(
-                        model = artist.imageUrl,
-                        contentDescription = artist.name,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .size(52.dp)
-                            .clip(CircleShape)
-                            .border(1.dp, BorderSubtle, CircleShape)
-                    )
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .size(52.dp)
-                            .clip(CircleShape)
-                            .background(SurfaceElevated),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Person,
-                            contentDescription = "Artist",
-                            tint = PaletteSand,
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
-                }
+                com.sielo.music.ui.components.SieloArtistPhoto(
+                    imageUrl = artist.imageUrl,
+                    name = artist.name,
+                    modifier = Modifier.size(52.dp)
+                )
 
                 Spacer(modifier = Modifier.width(14.dp))
 
@@ -476,14 +637,12 @@ fun SearchResultTrackRow(
                 modifier = Modifier.weight(1f),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                AsyncImage(
-                    model = track.thumbnailUrl,
-                    contentDescription = "Cover",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(SurfaceElevated)
+                com.sielo.music.ui.components.SieloSongArtwork(
+                    thumbnailUrl = track.thumbnailUrl,
+                    title = track.title,
+                    artist = track.artist,
+                    modifier = Modifier.size(48.dp),
+                    shape = RoundedCornerShape(10.dp)
                 )
 
                 Spacer(modifier = Modifier.width(12.dp))

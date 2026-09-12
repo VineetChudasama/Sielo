@@ -45,6 +45,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -55,15 +56,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
 import com.sielo.music.core.audio.model.PlaybackState
-import com.sielo.music.ui.theme.AccentCoral
-import com.sielo.music.ui.theme.BorderGlass
-import com.sielo.music.ui.theme.BorderSubtle
-import com.sielo.music.ui.theme.ObsidianBlack
+import com.sielo.music.ui.theme.PaletteCream
+import com.sielo.music.ui.theme.PaletteDarkNavy
+import com.sielo.music.ui.theme.PaletteOxfordBlue
+import com.sielo.music.ui.theme.PaletteSageGreen
+import com.sielo.music.ui.theme.PaletteSand
 import com.sielo.music.ui.theme.PaletteSlateBlue
-import com.sielo.music.ui.theme.SurfaceDark
-import com.sielo.music.ui.theme.SurfaceElevated
-import com.sielo.music.ui.theme.TextPrimary
-import com.sielo.music.ui.theme.TextSecondary
 import kotlinx.coroutines.isActive
 import kotlin.math.sin
 
@@ -75,7 +73,7 @@ import kotlin.math.sin
  * - Rectangular Player Card extending to the RIGHT (Z-Index Bottom, starts behind disc center).
  * - Internal Content Area padded past the disc overlap (Song Info -> Controls).
  * - Continuous pausable/resumable rotation synced with playback state.
- * - Adheres strictly to the application's design system and theme colors.
+ * - Glowing luminous border & elevation adhering strictly to Sielo palette.
  */
 @Composable
 fun MiniPlayerIsland(
@@ -107,48 +105,90 @@ fun MiniPlayerIsland(
         }
     }
 
-    // Proportional dimensions: Player height ~64-68dp, Disc diameter 112dp (enlarged by 4dp)
-    val discDiameter = 112.dp
+    // Proportional dimensions: Player height ~68dp, Disc diameter 116dp (increased by 4dp)
+    val discDiameter = 116.dp
     val cardStartOffset = 46.dp
-    val contentStartPadding = 72.dp // Total content X = 46 + 72 = 118dp (> 112dp disc edge)
+    val contentStartPadding = 74.dp // Total content X = 46 + 74 = 120dp (> 116dp disc edge)
 
     // PlayerContainer: Host for the layered disc and player card
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .padding(horizontal = 12.dp, vertical = 4.dp),
         contentAlignment = Alignment.CenterStart
     ) {
-        // LAYER 1 (Bottom): Sleek, compact Rectangular Player Card extending to the right
+        // LAYER 1 (Bottom): Glowing Rectangular Player Card extending to the right
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(start = cardStartOffset) // Begins behind the disc center
                 .zIndex(1f)
-                .shadow(elevation = 6.dp, shape = RoundedCornerShape(18.dp), spotColor = Color(0x33000000))
-                .clip(RoundedCornerShape(18.dp))
-                .background(SurfaceDark)
-                .border(1.dp, BorderGlass, RoundedCornerShape(18.dp))
+                .shadow(
+                    elevation = 12.dp,
+                    shape = RoundedCornerShape(20.dp),
+                    ambientColor = PaletteSand.copy(alpha = 0.3f),
+                    spotColor = PaletteSand.copy(alpha = 0.2f)
+                )
+                .clip(RoundedCornerShape(20.dp))
+                .background(
+                    Brush.horizontalGradient(
+                        listOf(
+                            PaletteOxfordBlue,
+                            Color(0xFF202E44),
+                            PaletteOxfordBlue
+                        )
+                    )
+                )
+                .border(
+                    width = 1.2.dp,
+                    brush = Brush.horizontalGradient(
+                        listOf(
+                            PaletteSlateBlue.copy(alpha = 0.45f),
+                            PaletteSand.copy(alpha = 0.55f),
+                            PaletteSlateBlue.copy(alpha = 0.45f)
+                        )
+                    ),
+                    shape = RoundedCornerShape(20.dp)
+                )
                 .clickable { onClick() }
         ) {
-            // Little Progress Bar sticking at the top edge, precisely mapped from the disc intersection (0%) to the right edge (100%)
-            LinearProgressIndicator(
-                progress = { progress },
+            // Custom Progress Bar: starts immediately from 0:00 behind the disc intersection (42dp), no end dots
+            Canvas(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 36.dp) // Starts precisely at the disc intersection so progress is visible immediately from 0:00
+                    .padding(start = 42.dp, end = 20.dp, top = 2.dp)
                     .height(2.5.dp)
-                    .clip(RoundedCornerShape(topStart = 1.5.dp, bottomStart = 1.5.dp))
-                    .align(Alignment.TopCenter),
-                color = AccentCoral,
-                trackColor = PaletteSlateBlue.copy(alpha = 0.25f)
-            )
+                    .align(Alignment.TopCenter)
+            ) {
+                val barWidth = size.width
+                val barHeight = size.height
+                val cornerRadius = CornerRadius(barHeight / 2f, barHeight / 2f)
+
+                // 1. Inactive background track (clean, uniform, no end dots)
+                drawRoundRect(
+                    color = PaletteSlateBlue.copy(alpha = 0.35f),
+                    topLeft = Offset.Zero,
+                    size = Size(barWidth, barHeight),
+                    cornerRadius = cornerRadius
+                )
+
+                // 2. Active played progress bar (advances immediately from 0:00 right from the disc intersection)
+                if (progress > 0f) {
+                    val activeWidth = (barWidth * progress).coerceIn(barHeight, barWidth)
+                    drawRoundRect(
+                        color = PaletteSand,
+                        topLeft = Offset.Zero,
+                        size = Size(activeWidth, barHeight),
+                        cornerRadius = cornerRadius
+                    )
+                }
+            }
 
             // Content Area: strictly reserved after disc overlap
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = contentStartPadding, end = 14.dp, top = 6.dp, bottom = 6.dp)
+                    .padding(start = contentStartPadding, end = 16.dp, top = 8.dp, bottom = 8.dp)
             ) {
                 // 1. Song Information (Artist & Title with Marquee & Sound Mute Toggle Button)
                 Row(
@@ -163,16 +203,16 @@ fun MiniPlayerIsland(
                     ) {
                         Text(
                             text = track.artist,
-                            color = TextSecondary,
-                            fontSize = 11.sp,
+                            color = PaletteSageGreen, // #778D7A
+                            fontSize = 11.5.sp,
                             fontWeight = FontWeight.Medium,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = track.title,
-                            color = TextPrimary,
-                            fontSize = 13.sp,
+                            color = PaletteCream, // #F4F1DE
+                            fontSize = 13.5.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             modifier = Modifier
@@ -189,7 +229,7 @@ fun MiniPlayerIsland(
                     // Sound / Mute Button
                     Box(
                         modifier = Modifier
-                            .size(26.dp)
+                            .size(28.dp)
                             .clip(CircleShape)
                             .clickable { onToggleMute() },
                         contentAlignment = Alignment.Center
@@ -202,20 +242,20 @@ fun MiniPlayerIsland(
                             },
                             contentDescription = if (playbackState.isMuted) "Unmute" else "Mute",
                             tint = if (playbackState.isMuted) {
-                                TextSecondary.copy(alpha = 0.45f)
+                                PaletteSlateBlue.copy(alpha = 0.45f)
                             } else if (playbackState.isPlaying) {
-                                AccentCoral
+                                PaletteSand
                             } else {
-                                TextSecondary.copy(alpha = 0.7f)
+                                PaletteSlateBlue
                             },
-                            modifier = Modifier.size(17.dp)
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(1.dp))
+                Spacer(modifier = Modifier.height(2.dp))
 
-                // 2. Playback Controls (Previous, Play/Pause, Next - enlarged)
+                // 2. Playback Controls (Previous, Play/Pause, Next)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -232,31 +272,33 @@ fun MiniPlayerIsland(
                         Icon(
                             imageVector = Icons.Default.SkipPrevious,
                             contentDescription = "Previous",
-                            tint = TextPrimary,
+                            tint = PaletteCream, // #F4F1DE
                             modifier = Modifier.size(22.dp)
                         )
                     }
 
-                    // Play / Pause Button
+                    // Play / Pause Button (Luminous Cream filled circle with dark icon matching reference)
                     if (playbackState.isBuffering) {
                         CircularProgressIndicator(
-                            modifier = Modifier.size(24.dp),
-                            color = AccentCoral,
+                            modifier = Modifier.size(26.dp),
+                            color = PaletteSand,
                             strokeWidth = 2.5.dp
                         )
                     } else {
                         Box(
                             modifier = Modifier
-                                .size(38.dp)
+                                .size(40.dp)
+                                .shadow(elevation = 6.dp, shape = CircleShape, spotColor = PaletteSand.copy(alpha = 0.4f))
                                 .clip(CircleShape)
+                                .background(PaletteCream) // #F4F1DE
                                 .clickable { onTogglePlay() },
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 imageVector = if (playbackState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                                 contentDescription = if (playbackState.isPlaying) "Pause" else "Play",
-                                tint = AccentCoral,
-                                modifier = Modifier.size(26.dp)
+                                tint = PaletteDarkNavy, // #0D1B2A
+                                modifier = Modifier.size(24.dp)
                             )
                         }
                     }
@@ -266,16 +308,14 @@ fun MiniPlayerIsland(
                         modifier = Modifier
                             .size(34.dp)
                             .clip(CircleShape)
-                            .background(SurfaceElevated)
-                            .border(1.dp, BorderGlass, CircleShape)
                             .clickable { onSkipNext() },
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = Icons.Default.SkipNext,
                             contentDescription = "Next",
-                            tint = TextPrimary,
-                            modifier = Modifier.size(20.dp)
+                            tint = PaletteCream, // #F4F1DE
+                            modifier = Modifier.size(22.dp)
                         )
                     }
                 }
@@ -288,38 +328,64 @@ fun MiniPlayerIsland(
                 .size(discDiameter)
                 .offset(x = 0.dp)
                 .zIndex(2f) // Visually sits ABOVE the player box
-                .shadow(elevation = 12.dp, shape = CircleShape, spotColor = Color(0x4D000000))
+                .shadow(
+                    elevation = 14.dp,
+                    shape = CircleShape,
+                    ambientColor = PaletteSand.copy(alpha = 0.25f),
+                    spotColor = PaletteDarkNavy.copy(alpha = 0.8f)
+                )
                 .clip(CircleShape)
-                .background(ObsidianBlack)
-                .border(2.dp, BorderSubtle, CircleShape)
+                .background(PaletteDarkNavy) // #0D1B2A
+                .border(
+                    width = 2.dp,
+                    brush = Brush.sweepGradient(
+                        listOf(
+                            PaletteSageGreen.copy(alpha = 0.7f),
+                            PaletteSand.copy(alpha = 0.6f),
+                            PaletteSageGreen.copy(alpha = 0.7f)
+                        )
+                    ),
+                    shape = CircleShape
+                )
                 .clickable { onClick() },
             contentAlignment = Alignment.Center
         ) {
             // Spinning Album Artwork
-            AsyncImage(
-                model = track.thumbnailUrl,
+            SieloSongArtwork(
+                thumbnailUrl = track.thumbnailUrl,
+                title = track.title,
+                artist = track.artist,
                 contentDescription = "Vinyl Record Artwork",
-                contentScale = ContentScale.Crop,
                 modifier = Modifier
                     .fillMaxSize()
-                    .rotate(rotationAngle.value % 360f)
+                    .rotate(rotationAngle.value % 360f),
+                shape = CircleShape
             )
 
             // Outer vinyl groove ring overlay
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .border(1.dp, Color(0x26000000), CircleShape)
+                    .border(1.dp, PaletteDarkNavy.copy(alpha = 0.35f), CircleShape)
             )
 
-            // Center Spindle Dot (matches theme surface)
+            // Center Vinyl Label & Spindle Dot
             Box(
                 modifier = Modifier
-                    .size(14.dp)
+                    .size(26.dp)
                     .clip(CircleShape)
-                    .background(SurfaceDark)
-                    .border(1.5.dp, BorderGlass, CircleShape)
-            )
+                    .background(PaletteDarkNavy.copy(alpha = 0.85f))
+                    .border(1.dp, PaletteSlateBlue.copy(alpha = 0.6f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                // Center Spindle Dot
+                Box(
+                    modifier = Modifier
+                        .size(9.dp)
+                        .clip(CircleShape)
+                        .background(PaletteSand) // #D4C4A8
+                )
+            }
         }
     }
 }

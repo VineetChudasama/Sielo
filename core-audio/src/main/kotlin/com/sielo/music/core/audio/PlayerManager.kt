@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -47,11 +48,19 @@ class PlayerManager @Inject constructor(
     private var mediaController: MediaController? = null
     private val scope = CoroutineScope(Dispatchers.Main + Job())
     private var progressTrackerJob: Job? = null
-    private var currentPlayingEventLogged = false
+    private var currentEventId: Long? = null
+    private var currentTrackAccumulatedPlayedMs: Long = 0L
+    private var lastTrackingTimestamp: Long = 0L
+    private var lastDbFlushTimestamp: Long = 0L
 
     init {
         scope.launch {
             getController()
+            withContext(Dispatchers.IO) {
+                try {
+                    listeningHistoryDao.sanitizeLegacyRecords()
+                } catch (_: Exception) {}
+            }
         }
     }
 
@@ -86,9 +95,9 @@ class PlayerManager @Inject constructor(
                 _playbackState.update { it.copy(isPlaying = isPlaying, isBuffering = false) }
                 if (isPlaying) {
                     startProgressTracking()
-                    recordHistoryIfEligible()
                 } else {
                     stopProgressTracking()
+                    flushCurrentListeningDuration()
                 }
             }
 
@@ -102,6 +111,7 @@ class PlayerManager @Inject constructor(
                 }
 
                 if (playbackState == Player.STATE_ENDED) {
+                    flushCurrentListeningDuration()
                     skipNext()
                 }
             }
@@ -109,13 +119,21 @@ class PlayerManager @Inject constructor(
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                 android.util.Log.e("SieloAudio", "ExoPlayer Error: ${error.errorCodeName} - ${error.message}", error)
                 _playbackState.update { it.copy(isBuffering = false, isPlaying = false) }
+                stopProgressTracking()
+                flushCurrentListeningDuration()
             }
         })
     }
 
     fun playTrack(track: SieloTrack, queue: List<SieloTrack> = listOf(track)) {
         scope.launch {
-            currentPlayingEventLogged = false
+            // Flush any previously tracked duration
+            flushCurrentListeningDuration()
+
+            currentTrackAccumulatedPlayedMs = 0L
+            lastTrackingTimestamp = System.currentTimeMillis()
+            lastDbFlushTimestamp = System.currentTimeMillis()
+
             _playbackState.update { 
                 it.copy(
                     currentTrack = track,
@@ -125,7 +143,7 @@ class PlayerManager @Inject constructor(
                 )
             }
 
-            // Immediately record start of history entry
+            // Immediately record start of history entry with 0ms played
             recordTrackStart(track)
 
             android.util.Log.d("SieloAudio", "Playing track: ${track.title} by ${track.artist} (id=${track.id})")
@@ -171,31 +189,46 @@ class PlayerManager @Inject constructor(
         }
     }
 
+    private fun extractPrimaryArtist(rawArtist: String): String {
+        if (rawArtist.isBlank()) return "Unknown Artist"
+        val cleaned = rawArtist.split(Regex("(?i)\\s*(?:,|&|feat\\.?|ft\\.?|/|;|x)\\s*")).firstOrNull()?.trim()
+        return if (!cleaned.isNullOrBlank()) cleaned else rawArtist.trim()
+    }
+
     private fun recordTrackStart(track: SieloTrack) {
         scope.launch(Dispatchers.IO) {
             try {
-                listeningHistoryDao.insertEvent(
+                val primaryArtist = extractPrimaryArtist(track.artist)
+                val expectedDurationMs = if (track.durationSeconds > 0) track.durationSeconds * 1000L else 0L
+                val eventId = listeningHistoryDao.insertEvent(
                     ListeningEventEntity(
                         songId = track.id,
                         songTitle = track.title,
-                        artistName = track.artist,
+                        artistName = primaryArtist,
                         albumName = track.album,
                         thumbnailUrl = track.thumbnailUrl,
-                        durationPlayedMs = 30000L,
-                        songDurationMs = track.durationSeconds * 1000L
+                        durationPlayedMs = 0L,
+                        songDurationMs = expectedDurationMs
                     )
                 )
+                currentEventId = eventId
             } catch (e: Exception) {
                 e.printStackTrace()
             }
         }
     }
 
-    private fun recordHistoryIfEligible() {
-        val track = _playbackState.value.currentTrack ?: return
-        if (!currentPlayingEventLogged) {
-            currentPlayingEventLogged = true
-            recordTrackStart(track)
+    private fun flushCurrentListeningDuration() {
+        val eventId = currentEventId ?: return
+        val durationMs = currentTrackAccumulatedPlayedMs
+        if (durationMs > 0L) {
+            scope.launch(Dispatchers.IO) {
+                try {
+                    listeningHistoryDao.updateDurationPlayed(eventId, durationMs)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
         }
     }
 
@@ -237,12 +270,30 @@ class PlayerManager @Inject constructor(
 
     private fun startProgressTracking() {
         progressTrackerJob?.cancel()
+        lastTrackingTimestamp = System.currentTimeMillis()
         progressTrackerJob = scope.launch {
             while (isActive) {
+                val isPlaying = mediaController?.isPlaying == true
                 val current = mediaController?.currentPosition ?: 0L
                 val dur = mediaController?.duration?.coerceAtLeast(0L) ?: 0L
                 _playbackState.update { it.copy(currentPositionMs = current, durationMs = dur) }
-                delay(50)
+
+                if (isPlaying) {
+                    val now = System.currentTimeMillis()
+                    val delta = (now - lastTrackingTimestamp).coerceIn(0L, 1000L)
+                    currentTrackAccumulatedPlayedMs += delta
+                    lastTrackingTimestamp = now
+
+                    // Periodic DB sync every 2 seconds
+                    if (now - lastDbFlushTimestamp >= 2000L) {
+                        lastDbFlushTimestamp = now
+                        flushCurrentListeningDuration()
+                    }
+                } else {
+                    lastTrackingTimestamp = System.currentTimeMillis()
+                }
+
+                delay(100)
             }
         }
     }

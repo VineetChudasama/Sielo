@@ -149,13 +149,12 @@ fun QueueScreen(
                     .padding(14.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                AsyncImage(
-                    model = track.thumbnailUrl,
-                    contentDescription = track.title,
-                    modifier = Modifier
-                        .size(52.dp)
-                        .clip(RoundedCornerShape(10.dp)),
-                    contentScale = ContentScale.Crop
+                com.sielo.music.ui.components.SieloSongArtwork(
+                    thumbnailUrl = track.thumbnailUrl,
+                    title = track.title,
+                    artist = track.artist,
+                    modifier = Modifier.size(52.dp),
+                    shape = RoundedCornerShape(10.dp)
                 )
 
                 Spacer(modifier = Modifier.width(14.dp))
@@ -271,13 +270,12 @@ fun QueueScreen(
 
                             Spacer(modifier = Modifier.width(12.dp))
 
-                            AsyncImage(
-                                model = qTrack.thumbnailUrl,
-                                contentDescription = qTrack.title,
-                                modifier = Modifier
-                                    .size(46.dp)
-                                    .clip(RoundedCornerShape(8.dp)),
-                                contentScale = ContentScale.Crop
+                            com.sielo.music.ui.components.SieloSongArtwork(
+                                thumbnailUrl = qTrack.thumbnailUrl,
+                                title = qTrack.title,
+                                artist = qTrack.artist,
+                                modifier = Modifier.size(46.dp),
+                                shape = RoundedCornerShape(8.dp)
                             )
 
                             Spacer(modifier = Modifier.width(14.dp))

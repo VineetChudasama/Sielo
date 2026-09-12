@@ -31,12 +31,59 @@ class InnerTubeClient @Inject constructor() {
 
     private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
 
+    companion object {
+        private val NON_MUSIC_KEYWORDS = listOf(
+            "mashup", "mash-up", "mash up", "mega mashup", "megamashup",
+            "jukebox", "full album", "all songs", "top songs collection",
+            "compilation", "megamix", "mega mix", "non stop", "nonstop",
+            "song collection", "best songs of", "hit songs of", "greatest hits", "greatest hits of",
+            "best romantic songs", "best romantic", "romantic songs by", "best of",
+            "audio jukebox", "video jukebox", "full audio songs", "continuous mix",
+            "1 hour loop", "10 hours loop", "1 hour", "10 hours", "hour loop", "hour mix",
+            "vlog", "reaction", "reacting to", "podcast", "podcasts", "gameplay", "tutorial",
+            "trailer", "official trailer", "teaser", "behind the scenes", "bts of",
+            "making of", "episode", "season", "review", "unboxing", "interview",
+            "livestream", "live stream", "roast", "prank", "shorts", "#shorts",
+            "web series", "full movie", "funny video", "meme", "ko lekar",
+            "dialogues", "dialogue", "scene", "scenes", "status", "bgm", "ringtone",
+            "talk", "speech", "speech video", "audiobook", "audio book"
+        )
+
+        private val FORBIDDEN_SUBTITLES = setOf(
+            "episode", "episodes", "video", "videos", "podcast", "podcasts",
+            "station", "channel", "playlist", "community"
+        )
+
+        fun isPureMusicTrack(title: String, artist: String = "", durationSeconds: Long = 0L): Boolean {
+            val lowerTitle = title.lowercase()
+            val lowerArtist = artist.lowercase()
+
+            for (keyword in NON_MUSIC_KEYWORDS) {
+                if (lowerTitle.contains(keyword)) return false
+            }
+
+            if (lowerArtist.contains("podcast") || lowerArtist.contains("reaction") || lowerArtist.contains("vlog") || lowerArtist.contains("interview")) {
+                return false
+            }
+
+            if (durationSeconds > 660L) return false
+            if (durationSeconds in 1..25) return false
+
+            return true
+        }
+    }
+
     suspend fun search(query: String): List<SieloTrack> = withContext(Dispatchers.IO) {
+        val saavnTracks = searchJioSaavn(query)
         val ytTracks = searchYouTube(query)
-        val candidateTracks = if (ytTracks.isNotEmpty()) ytTracks else searchJioSaavn(query)
-        candidateTracks
+        
+        // Combine results prioritizing official label tracks and unique title+artist
+        val combined = (saavnTracks + ytTracks)
+            .filter { isPureMusicTrack(it.title, it.artist, it.durationSeconds) }
             .distinctBy { it.id }
             .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+
+        if (combined.isNotEmpty()) combined else ytTracks
     }
 
     private fun searchYouTube(query: String): List<SieloTrack> {
@@ -51,7 +98,8 @@ class InnerTubeClient @Inject constructor() {
                             "gl": "US"
                         }
                     },
-                    "query": "${query.replace("\"", "\\\"")}"
+                    "query": "${query.replace("\"", "\\\"")}",
+                    "params": "EgWKAQIIAWoQEAMQBBAJEAoQBRAREBAQFQ%3D%3D"
                 }
             """.trimIndent()
 
@@ -118,7 +166,25 @@ class InnerTubeClient @Inject constructor() {
     }
 
     suspend fun searchArtists(query: String): List<SieloArtist> = withContext(Dispatchers.IO) {
-        try {
+        val saavnArtists = searchArtistsSaavn(query)
+        val ytPhoto = YouTubeArtistImageResolver.resolveArtistImageUrl(query)
+        if (ytPhoto != null && saavnArtists.isNotEmpty()) {
+            saavnArtists.mapIndexed { idx, artist ->
+                if (idx == 0 && (artist.imageUrl.isNullOrBlank() || artist.name.equals(query, ignoreCase = true))) {
+                    artist.copy(imageUrl = ytPhoto)
+                } else artist
+            }
+        } else {
+            saavnArtists
+        }
+    }
+
+    suspend fun getArtistPhotoFromYouTube(artistName: String): String? {
+        return YouTubeArtistImageResolver.resolveArtistImageUrl(artistName)
+    }
+
+    private fun searchArtistsSaavn(query: String): List<SieloArtist> {
+        return try {
             val encodedQuery = URLEncoder.encode(query, "UTF-8")
             val url = "https://www.jiosaavn.com/api.php?__call=search.getArtistResults&_format=json&_marker=0&cc=in&includeMetaTags=1&p=1&n=15&q=$encodedQuery"
             val request = Request.Builder()
@@ -127,9 +193,9 @@ class InnerTubeClient @Inject constructor() {
                 .build()
 
             val response = client.newCall(request).execute()
-            val bodyString = response.body?.string() ?: return@withContext emptyList()
+            val bodyString = response.body?.string() ?: return emptyList()
             val root = json.parseToJsonElement(bodyString).jsonObject
-            val results = root["results"]?.jsonArray ?: return@withContext emptyList()
+            val results = root["results"]?.jsonArray ?: return emptyList()
 
             results.mapNotNull { item ->
                 val obj = item.jsonObject
@@ -155,6 +221,12 @@ class InnerTubeClient @Inject constructor() {
 
     suspend fun getArtistDetails(artistIdOrName: String, artistImageUrl: String? = null): ArtistDetails? = withContext(Dispatchers.IO) {
         try {
+            val ytPhoto = if (artistImageUrl.isNullOrBlank()) {
+                YouTubeArtistImageResolver.resolveArtistImageUrl(artistIdOrName)
+            } else {
+                artistImageUrl
+            }
+
             val artistId = if (artistIdOrName.all { it.isDigit() }) {
                 artistIdOrName
             } else {
@@ -176,7 +248,7 @@ class InnerTubeClient @Inject constructor() {
             val rawImage = root["image"]?.jsonPrimitive?.content
                 ?.replace("50x50", "500x500")
                 ?.replace("150x150", "500x500")
-            val finalImage = if (!artistImageUrl.isNullOrBlank()) artistImageUrl else rawImage
+            val finalImage = ytPhoto ?: rawImage
 
             // Top Songs
             val topSongsObj = root["topSongs"]?.jsonObject
@@ -206,7 +278,8 @@ class InnerTubeClient @Inject constructor() {
                     thumbnailUrl = image,
                     streamUrl = streamUrl
                 )
-            }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+            }.filter { isPureMusicTrack(it.title, it.artist, it.durationSeconds) }
+             .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
              .take(5)
 
             // Top Albums & Latest Album
@@ -441,12 +514,21 @@ class InnerTubeClient @Inject constructor() {
 
             val title = titleRuns?.getOrNull(0)?.jsonObject?.get("text")?.jsonPrimitive?.content ?: return null
 
-            val artistRuns = flexColumns.getOrNull(1)?.jsonObject
+            val secondColRuns = flexColumns.getOrNull(1)?.jsonObject
                 ?.get("musicResponsiveListItemFlexColumnRenderer")?.jsonObject
                 ?.get("text")?.jsonObject
                 ?.get("runs")?.jsonArray
 
-            val artist = artistRuns?.getOrNull(0)?.jsonObject?.get("text")?.jsonPrimitive?.content ?: "Artist"
+            // Check all text runs in subtitle for forbidden content types (Episode, Video, Podcast, etc.)
+            val allSubtitleTexts = secondColRuns?.mapNotNull { it.jsonObject["text"]?.jsonPrimitive?.content?.trim() } ?: emptyList()
+            for (text in allSubtitleTexts) {
+                val lower = text.lowercase()
+                if (FORBIDDEN_SUBTITLES.contains(lower) || lower.startsWith("episode") || lower.startsWith("video")) {
+                    return null
+                }
+            }
+
+            val artist = allSubtitleTexts.firstOrNull { it != "•" && it != "Song" && !it.contains("views") } ?: "Artist"
 
             val videoId = item["playlistItemData"]?.jsonObject?.get("videoId")?.jsonPrimitive?.content
                 ?: item["navigationEndpoint"]?.jsonObject
@@ -459,8 +541,17 @@ class InnerTubeClient @Inject constructor() {
                 ?.get("thumbnail")?.jsonObject
                 ?.get("thumbnails")?.jsonArray
 
-            val thumbUrl = thumbnails?.lastOrNull()?.jsonObject?.get("url")?.jsonPrimitive?.content
-                ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+            val rawThumbUrl = thumbnails?.lastOrNull()?.jsonObject?.get("url")?.jsonPrimitive?.content
+            val thumbUrl = if (rawThumbUrl != null && !rawThumbUrl.contains("i.ytimg.com")) {
+                rawThumbUrl.replace(Regex("=w\\d+-h\\d+.*"), "=w544-h544-l90-rj")
+                    .replace(Regex("=s\\d+.*"), "=s544-c-k-c0x00ffffff-no-rj")
+            } else {
+                null
+            }
+
+            if (!isPureMusicTrack(title, artist)) {
+                return null
+            }
 
             return SieloTrack(
                 id = videoId,

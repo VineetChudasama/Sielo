@@ -74,6 +74,43 @@ interface ListeningHistoryDao {
 
     @Query("SELECT hourOfDay, COUNT(*) as count, SUM(durationPlayedMs) as totalDurationMs FROM listening_history WHERE timestampMs >= :sinceMs GROUP BY hourOfDay")
     fun getHourlyDistribution(sinceMs: Long): Flow<List<HourCount>>
+
+    @Query("""
+        SELECT * FROM listening_history 
+        WHERE timestampMs < :twoDaysAgoMs 
+          AND songId NOT IN (
+              SELECT DISTINCT songId FROM listening_history WHERE timestampMs >= :twoDaysAgoMs
+          )
+        GROUP BY songId 
+        ORDER BY timestampMs DESC 
+        LIMIT :limit
+    """)
+    fun getRediscoveredFavorites(twoDaysAgoMs: Long, limit: Int = 10): Flow<List<ListeningEventEntity>>
+
+    @Query("UPDATE listening_history SET durationPlayedMs = :durationMs WHERE eventId = :eventId")
+    suspend fun updateDurationPlayed(eventId: Long, durationMs: Long)
+
+    @Query("UPDATE listening_history SET durationPlayedMs = durationPlayedMs + :deltaMs WHERE eventId = :eventId")
+    suspend fun incrementDurationPlayed(eventId: Long, deltaMs: Long)
+
+    @Query("SELECT * FROM listening_history WHERE timestampMs >= :sinceMs ORDER BY timestampMs DESC LIMIT :limit")
+    fun getStreamHistory(sinceMs: Long, limit: Int = 100): Flow<List<ListeningEventEntity>>
+
+    @Query("SELECT COUNT(*) FROM listening_history WHERE timestampMs >= :sinceMs")
+    fun getTotalStreamCount(sinceMs: Long): Flow<Int>
+
+    @Query("UPDATE listening_history SET durationPlayedMs = 15000 WHERE durationPlayedMs >= 200000")
+    suspend fun sanitizeLegacyRecords()
+
+    @Query("""
+        SELECT * FROM listening_history 
+        WHERE eventId IN (
+            SELECT MAX(eventId) FROM listening_history GROUP BY songId
+        )
+        ORDER BY timestampMs DESC 
+        LIMIT :limit
+    """)
+    fun getRecentUniquePlayedSongs(limit: Int = 10): Flow<List<ListeningEventEntity>>
 }
 
 data class HourCount(

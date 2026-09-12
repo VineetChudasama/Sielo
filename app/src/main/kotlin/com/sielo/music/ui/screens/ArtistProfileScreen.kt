@@ -139,10 +139,9 @@ fun ArtistProfileScreen(
                                 .padding(4.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            AsyncImage(
-                                model = artist.imageUrl,
-                                contentDescription = artist.name,
-                                contentScale = ContentScale.Crop,
+                            com.sielo.music.ui.components.SieloArtistPhoto(
+                                imageUrl = artist.imageUrl,
+                                name = artist.name,
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .clip(CircleShape)
@@ -248,32 +247,15 @@ fun ArtistProfileScreen(
                                     verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
-                                    if (!album.thumbnailUrl.isNullOrBlank()) {
-                                        AsyncImage(
-                                            model = album.thumbnailUrl,
-                                            contentDescription = album.title,
-                                            contentScale = ContentScale.Crop,
-                                            modifier = Modifier
-                                                .size(76.dp)
-                                                .clip(RoundedCornerShape(12.dp))
-                                                .border(1.dp, BorderSubtle, RoundedCornerShape(12.dp))
-                                        )
-                                    } else {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(76.dp)
-                                                .clip(RoundedCornerShape(12.dp))
-                                                .background(SurfaceElevated),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.Album,
-                                                contentDescription = "Album",
-                                                tint = PaletteSand,
-                                                modifier = Modifier.size(36.dp)
-                                            )
-                                        }
-                                    }
+                                    com.sielo.music.ui.components.SieloSongArtwork(
+                                        thumbnailUrl = album.thumbnailUrl,
+                                        title = album.title,
+                                        artist = artist.name,
+                                        modifier = Modifier
+                                            .size(76.dp)
+                                            .border(1.dp, BorderSubtle, RoundedCornerShape(12.dp)),
+                                        shape = RoundedCornerShape(12.dp)
+                                    )
 
                                     Spacer(modifier = Modifier.width(14.dp))
 
@@ -378,14 +360,12 @@ fun ArtistTopSongRow(
 
                 Spacer(modifier = Modifier.width(6.dp))
 
-                AsyncImage(
-                    model = track.thumbnailUrl,
-                    contentDescription = track.title,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .size(46.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(SurfaceElevated)
+                com.sielo.music.ui.components.SieloSongArtwork(
+                    thumbnailUrl = track.thumbnailUrl,
+                    title = track.title,
+                    artist = track.artist,
+                    modifier = Modifier.size(46.dp),
+                    shape = RoundedCornerShape(10.dp)
                 )
 
                 Spacer(modifier = Modifier.width(12.dp))

@@ -301,15 +301,14 @@ fun PlaylistTrackRow(
                 modifier = Modifier.width(30.dp)
             )
 
-            AsyncImage(
-                model = track.thumbnailUrl,
-                contentDescription = track.title,
-                contentScale = ContentScale.Crop,
+            com.sielo.music.ui.components.SieloSongArtwork(
+                thumbnailUrl = track.thumbnailUrl,
+                title = track.title,
+                artist = track.artist,
                 modifier = Modifier
                     .size(46.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(SurfaceElevated)
-                    .border(1.dp, BorderGlass, RoundedCornerShape(10.dp))
+                    .border(1.dp, BorderGlass, RoundedCornerShape(10.dp)),
+                shape = RoundedCornerShape(10.dp)
             )
 
             Spacer(modifier = Modifier.width(14.dp))

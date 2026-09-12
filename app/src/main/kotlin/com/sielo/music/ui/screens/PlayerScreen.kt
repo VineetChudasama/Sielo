@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.sp
 import com.sielo.music.ui.components.RotatingVinylCard
 import com.sielo.music.ui.components.TactilePlayButton
 import com.sielo.music.ui.components.WaveformProgressBar
+import com.sielo.music.ui.components.resolveAlbumArt
 import com.sielo.music.ui.theme.AccentCoral
 import com.sielo.music.ui.theme.BorderGlass
 import com.sielo.music.ui.theme.ObsidianBlack
@@ -165,6 +166,8 @@ fun PlayerScreen(
                 if (!showLyrics) {
                     RotatingVinylCard(
                         artworkUrl = track.thumbnailUrl,
+                        title = track.title,
+                        artist = track.artist,
                         isPlaying = playbackState.isPlaying
                     )
                 } else {

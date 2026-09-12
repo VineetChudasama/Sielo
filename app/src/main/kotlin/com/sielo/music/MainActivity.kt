@@ -95,7 +95,11 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.fillMaxSize()
                         ) {
                             composable(Screen.Home.route) {
-                                HomeScreen(viewModel = homeViewModel, modifier = Modifier.fillMaxSize())
+                                HomeScreen(
+                                    viewModel = homeViewModel,
+                                    onNavigateToSearch = { navController.navigate(Screen.Search.route) },
+                                    modifier = Modifier.fillMaxSize()
+                                )
                             }
                             composable(Screen.Search.route) {
                                 SearchScreen(viewModel = searchViewModel, modifier = Modifier.fillMaxSize())
@@ -120,7 +124,7 @@ class MainActivity : ComponentActivity() {
                                 onClick = { isPlayerExpanded = true },
                                 modifier = Modifier
                                     .align(Alignment.BottomCenter)
-                                    .padding(bottom = 6.dp)
+                                    .padding(bottom = 12.dp)
                             )
                         }
 
