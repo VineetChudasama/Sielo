@@ -1,5 +1,5 @@
 ﻿<p align="center">
-  <img src="docs/sielo_brand_header.png" alt="Sielo" width="340" />
+  <img src="docs/sielo_brand_header.png" alt="Sielo" width="480" />
 </p>
 
 <p align="center">
