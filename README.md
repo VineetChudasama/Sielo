@@ -1,8 +1,6 @@
-<p align="center">
-  <img src="app/src/main/res/drawable/app_logo.png" alt="Sielo Logo" width="120" height="120" />
+﻿<p align="center">
+  <img src="docs/sielo_brand_header.png" alt="Sielo" width="340" />
 </p>
-
-<h1 align="center">Sielo</h1>
 
 <p align="center">
   <strong>A tactile, lossless music streaming app crafted with Jetpack Compose & AndroidX Media3</strong>
@@ -63,3 +61,48 @@ Sielo
 ├── core-lyrics/          # LRCLIB API & Synced Lyrics Engine
 ├── core-network/         # InnerTube & JioSaavn Lossless Resolvers
 └── core-database/        # Room DB & Listening Analytics
+```
+
+### Tech Stack
+- **Language**: Kotlin (Coroutines, StateFlow, Flow)
+- **UI Framework**: Jetpack Compose + Material 3
+- **Dependency Injection**: Dagger Hilt
+- **Audio Engine**: AndroidX Media3 (ExoPlayer, MediaSession)
+- **Networking**: OkHttp 4, Kotlinx Serialization
+- **Image Loading**: Coil 3
+- **Local Database**: Room (KSP)
+
+---
+
+## 🚀 Getting Started
+
+### Prerequisites
+- Android Studio Ladybug / Meerkat or newer
+- JDK 17 or higher
+- Android SDK 34+ (minSdk 26)
+
+### Clone & Build
+```bash
+# Clone the repository
+git clone https://github.com/VineetChudasama/Sielo.git
+cd Sielo
+
+# Build Debug APK
+./gradlew assembleDebug
+```
+
+The compiled APK will be located at:
+```
+app/build/outputs/apk/debug/app-debug.apk
+```
+
+### Install to Connected Device
+```bash
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
