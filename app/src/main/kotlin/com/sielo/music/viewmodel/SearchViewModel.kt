@@ -287,6 +287,14 @@ class SearchViewModel @Inject constructor(
         playerManager.playTrack(track, queue)
     }
 
+    fun appendToQueue(tracks: List<SieloTrack>) {
+        playerManager.appendToQueue(tracks)
+    }
+
+    fun appendToQueue(track: SieloTrack) {
+        playerManager.appendToQueue(track)
+    }
+
     fun openCategory(category: BrowseCategory) {
         _selectedCategory.value = category
         viewModelScope.launch {

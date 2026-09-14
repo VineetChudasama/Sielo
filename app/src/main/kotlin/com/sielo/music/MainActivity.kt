@@ -5,6 +5,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.layout.Box
@@ -26,6 +30,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.sielo.music.ui.components.MiniPlayerIsland
 import com.sielo.music.ui.components.SieloBottomBar
+import com.sielo.music.ui.components.SieloLaunchReveal
 import com.sielo.music.ui.navigation.Screen
 import com.sielo.music.ui.screens.HomeScreen
 import com.sielo.music.ui.screens.ListenTogetherScreen
@@ -60,18 +65,15 @@ class MainActivity : ComponentActivity() {
                 val currentRoute = navBackStackEntry?.destination?.route
                 val playbackState by playerViewModel.playbackState.collectAsState()
                 var isPlayerExpanded by remember { mutableStateOf(false) }
-
-                // System back press handles closing full-screen player first
-                BackHandler(enabled = isPlayerExpanded) {
-                    isPlayerExpanded = false
-                }
+                var showLaunchReveal by remember { mutableStateOf(true) }
 
                 // If player is not expanded, back press falls back to previous tab/screen sequentially
                 BackHandler(enabled = !isPlayerExpanded && navController.previousBackStackEntry != null) {
                     navController.popBackStack()
                 }
 
-                Scaffold(
+                Box(modifier = Modifier.fillMaxSize()) {
+                    Scaffold(
                     containerColor = ObsidianBlack,
                     bottomBar = {
                         SieloBottomBar(
@@ -117,7 +119,20 @@ class MainActivity : ComponentActivity() {
                         }
 
                         // Floating Persistent Mini-Player Island (Docked above bottom bar)
-                        if (playbackState.currentTrack != null && !isPlayerExpanded) {
+                        AnimatedVisibility(
+                            visible = playbackState.currentTrack != null && !isPlayerExpanded,
+                            enter = slideInVertically(
+                                initialOffsetY = { it },
+                                animationSpec = tween(380, easing = FastOutSlowInEasing)
+                            ) + fadeIn(animationSpec = tween(280)),
+                            exit = slideOutVertically(
+                                targetOffsetY = { it },
+                                animationSpec = tween(280, easing = FastOutSlowInEasing)
+                            ) + fadeOut(animationSpec = tween(200)),
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 12.dp)
+                        ) {
                             MiniPlayerIsland(
                                 playbackState = playbackState,
                                 onTogglePlay = { playerViewModel.togglePlayPause() },
@@ -125,18 +140,22 @@ class MainActivity : ComponentActivity() {
                                 onSkipPrevious = { playerViewModel.skipPrevious() },
                                 onSkipNext = { playerViewModel.skipNext() },
                                 onSeek = { playerViewModel.seekTo(it) },
-                                onClick = { isPlayerExpanded = true },
-                                modifier = Modifier
-                                    .align(Alignment.BottomCenter)
-                                    .padding(bottom = 12.dp)
+                                onShuffle = { playerViewModel.shuffleQueue() },
+                                onClick = { isPlayerExpanded = true }
                             )
                         }
 
                         // Full-Screen Hi-Fi Vinyl & Lyrics Player Modal
                         AnimatedVisibility(
                             visible = isPlayerExpanded,
-                            enter = slideInVertically(initialOffsetY = { it }),
-                            exit = slideOutVertically(targetOffsetY = { it })
+                            enter = slideInVertically(
+                                initialOffsetY = { it },
+                                animationSpec = tween(380, easing = FastOutSlowInEasing)
+                            ) + fadeIn(animationSpec = tween(280)),
+                            exit = slideOutVertically(
+                                targetOffsetY = { it },
+                                animationSpec = tween(380, easing = FastOutSlowInEasing)
+                            ) + fadeOut(animationSpec = tween(250))
                         ) {
                             PlayerScreen(
                                 viewModel = playerViewModel,
@@ -145,7 +164,14 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+
+                if (showLaunchReveal) {
+                    SieloLaunchReveal(
+                        onFinish = { showLaunchReveal = false }
+                    )
+                }
             }
         }
     }
+}
 }

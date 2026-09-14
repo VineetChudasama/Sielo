@@ -28,6 +28,16 @@ data class TimeOfDayStat(
     val count: Int
 )
 
+data class CandidateSongStat(
+    val songId: String,
+    val songTitle: String,
+    val artistName: String,
+    val albumName: String? = null,
+    val thumbnailUrl: String? = null,
+    val playCount: Int,
+    val lastPlayedMs: Long
+)
+
 @Dao
 interface ListeningHistoryDao {
 
@@ -111,6 +121,35 @@ interface ListeningHistoryDao {
         LIMIT :limit
     """)
     fun getRecentUniquePlayedSongs(limit: Int = 10): Flow<List<ListeningEventEntity>>
+
+    @Query("""
+        SELECT songId, songTitle, artistName, albumName, thumbnailUrl, COUNT(*) as playCount, MAX(timestampMs) as lastPlayedMs
+        FROM listening_history
+        WHERE artistName IN (:artistNames)
+        GROUP BY songId
+        ORDER BY playCount DESC
+    """)
+    suspend fun getSongsByArtists(artistNames: List<String>): List<CandidateSongStat>
+
+    @Query("""
+        SELECT songId, songTitle, artistName, albumName, thumbnailUrl, COUNT(*) as playCount, MAX(timestampMs) as lastPlayedMs
+        FROM listening_history
+        WHERE timestampMs >= :sinceMs
+        GROUP BY songId
+        HAVING COUNT(*) >= :minPlays AND COUNT(*) <= :maxPlays
+        ORDER BY lastPlayedMs DESC
+    """)
+    suspend fun getSongsByPlayCountRange(sinceMs: Long, minPlays: Int = 2, maxPlays: Int = 5): List<CandidateSongStat>
+
+    @Query("""
+        SELECT artistName, COUNT(*) as playCount, SUM(durationPlayedMs) as totalDurationMs, MAX(thumbnailUrl) as thumbnailUrl 
+        FROM listening_history 
+        WHERE timestampMs >= :sinceMs 
+        GROUP BY artistName 
+        ORDER BY playCount DESC 
+        LIMIT :limit
+    """)
+    suspend fun getTopArtistsSnapshot(sinceMs: Long, limit: Int = 10): List<ArtistStat>
 }
 
 data class HourCount(

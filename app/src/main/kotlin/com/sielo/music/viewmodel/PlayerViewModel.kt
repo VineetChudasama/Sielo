@@ -87,4 +87,9 @@ class PlayerViewModel @Inject constructor(
     fun skipNext() = playerManager.skipNext()
     fun skipPrevious() = playerManager.skipPrevious()
     fun playTrack(track: SieloTrack, queue: List<SieloTrack>) = playerManager.playTrack(track, queue)
+    fun appendToQueue(tracks: List<SieloTrack>) = playerManager.appendToQueue(tracks)
+    fun appendToQueue(track: SieloTrack) = playerManager.appendToQueue(track)
+    fun triggerAutoplayIfLow(seedTrack: SieloTrack? = null) = playerManager.triggerAutoplayIfLow(seedTrack)
+    fun toggleShuffle() = playerManager.toggleShuffle()
+    fun shuffleQueue() = playerManager.shuffleQueue()
 }

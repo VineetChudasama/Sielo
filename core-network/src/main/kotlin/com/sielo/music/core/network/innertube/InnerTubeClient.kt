@@ -146,6 +146,7 @@ class InnerTubeClient @Inject constructor() {
                     ?.replace("150x150", "500x500")
                 val durStr = obj["duration"]?.jsonPrimitive?.content
                 val durationSec = durStr?.toLongOrNull() ?: 0L
+                val durFormatted = if (durationSec > 0) "${durationSec / 60}:${(durationSec % 60).toString().padStart(2, '0')}" else null
                 val encUrl = obj["encrypted_media_url"]?.jsonPrimitive?.content
                 val streamUrl = if (!encUrl.isNullOrBlank()) decryptDesUrl(encUrl) else null
 
@@ -154,6 +155,7 @@ class InnerTubeClient @Inject constructor() {
                     title = title,
                     artist = artist,
                     album = obj["album"]?.jsonPrimitive?.content?.let { unescapeHtml(it) },
+                    durationText = durFormatted,
                     durationSeconds = durationSec,
                     thumbnailUrl = image,
                     streamUrl = streamUrl
@@ -766,11 +768,18 @@ class InnerTubeClient @Inject constructor() {
                 return null
             }
 
+            val resolvedDurationText = durationText ?: if (durationSeconds > 0) {
+                val mins = durationSeconds / 60
+                val secs = durationSeconds % 60
+                "$mins:${secs.toString().padStart(2, '0')}"
+            } else null
+
             return SieloTrack(
                 id = videoId,
                 title = title,
                 artist = artist,
                 thumbnailUrl = thumbUrl,
+                durationText = resolvedDurationText,
                 durationSeconds = durationSeconds
             )
         } catch (e: Exception) {

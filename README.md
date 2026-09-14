@@ -1,4 +1,4 @@
-﻿<p align="center">
+<p align="center">
   <img src="docs/sielo_brand_header.png" alt="Sielo" width="560" />
 </p>
 
@@ -30,10 +30,25 @@
 - **Acoustic Calibration**: Automatic intro offset calibration for acoustic cuts and live edits.
 - **Interactive Seeking**: Tap any lyric line to jump directly to that timestamp in the audio.
 
+### 🎬 Cinematic Brand Launch Reveal
+- **Macondo Brand Emergence**: Elegant app launch splash featuring the custom "Sielo" logo in **Macondo** typography with a warm ambient radial glow.
+- **Dynamic Glyph Targeting**: Uses Compose layout measurement (`onTextLayout`) to dynamically calculate the center of the letter **"e"** as the focal zoom pivot.
+- **Deep Zoom & Dissolve**: Gracefully dives 4.2× into the center of the name while dissolving the obsidian background to seamlessly reveal the home screen.
+
+### 🔀 Hardware-Accelerated Animated Shuffle
+- **Custom 36-Frame Spritesheet**: High-performance lossless WebP spritesheet rendered directly via Jetpack Compose `Canvas.drawImage` with sub-rectangle clipping.
+- **Dynamic Color Tinting**: Supports real-time theme tinting across rest states and interactive accent flares (`AccentCoral`, `PaletteSand`, `PaletteSlateBlue`).
+- **Repeatable & Duplicate-Free**: Re-randomizes upcoming tracks continuously on every tap with zero duplicate tracks of the active song and no sticky toggle states.
+
+### 🤖 Intelligent Autoplay & Recommendations (`core-recommendations`)
+- **Dual Candidate Pool**: Combines real-time **Last.fm** similarity data with curated artist clusters for seamless infinite music sessions.
+- **Session-Aware Scoring**: Continuous background queue replenishment based on recent listening history and deduplication.
+
 ### 🎨 Modern UI & Tactile Design
 - **Tactile Vinyl Player**: Interactive rotating vinyl disc with realistic vinyl groove textures and album artwork.
+- **Balanced Player Screen Controls**: Ergonomic 5-button bottom tactile row (`[Lyrics]` — `[Previous]` — `[Play/Pause]` — `[Next]` — `[Shuffle]`).
+- **Floating Island Mini-Player**: Dual-row design featuring full-width artist/title marquee on top and aligned playback controls with Mute on the bottom row.
 - **Animated Waveform Progress Bar**: Interactive, scrubbable animated waveform visualizer.
-- **Floating Island Mini-Player**: Smooth floating mini-player with swipe-to-dismiss and persistent playback controls.
 - **Custom Typography**: Tailored static type system featuring **Macondo** (Brand Identity), **Sora** (Headings, Stats, Active Lyrics), and **Urbanist** (Song titles, Metadata, UI elements).
 - **Infinite Genre Marquee**: Smooth infinite looping genre carousels for effortless music discovery.
 
@@ -58,6 +73,7 @@ Sielo
 │   ├── ui/               # Screens, Themes & Tactile Components
 │   └── viewmodel/        # StateFlow ViewModels
 ├── core-audio/           # Media3 ExoPlayer & Background Service
+├── core-recommendations/ # Autoplay Engine & Similar Artist Scoring
 ├── core-lyrics/          # LRCLIB API & Synced Lyrics Engine
 ├── core-network/         # InnerTube & JioSaavn Lossless Resolvers
 └── core-database/        # Room DB & Listening Analytics

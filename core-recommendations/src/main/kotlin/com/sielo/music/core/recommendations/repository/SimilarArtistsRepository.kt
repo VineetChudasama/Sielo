@@ -28,7 +28,7 @@ import javax.inject.Singleton
 class SimilarArtistsException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
 @Singleton
-class SimilarArtistsRepository @Inject constructor(
+open class SimilarArtistsRepository @Inject constructor(
     private val lastFmApiService: LastFmApiService,
     private val musicBrainzApiService: MusicBrainzApiService,
     private val similarArtistCacheDao: SimilarArtistCacheDao,
@@ -111,6 +111,7 @@ class SimilarArtistsRepository @Inject constructor(
                 scoredResults = coroutineScope {
                     rawCandidates
                         .filter { !it.name.equals(trimmedSeed, ignoreCase = true) }
+                        .take(12)
                         .map { candidateDto ->
                             async {
                                 semaphore.withPermit {
@@ -167,6 +168,20 @@ class SimilarArtistsRepository @Inject constructor(
         }
     }
 
+    open suspend fun getArtistTags(artistName: String): List<String> {
+        val apiKey = BuildConfig.LASTFM_API_KEY
+        return fetchArtistTags(artistName, apiKey)
+    }
+
+    fun calculateTagOverlap(tagsA: List<String>, tagsB: List<String>): Double {
+        if (tagsA.isEmpty() || tagsB.isEmpty()) return 0.0
+        val setA = tagsA.map { it.trim().lowercase(Locale.ROOT) }.toSet()
+        val setB = tagsB.map { it.trim().lowercase(Locale.ROOT) }.toSet()
+        val shared = setA.intersect(setB)
+        val union = setA.union(setB)
+        return if (union.isNotEmpty()) shared.size.toDouble() / union.size.toDouble() else 0.0
+    }
+
     private suspend fun fetchArtistTags(artistName: String, apiKey: String): List<String> {
         return try {
             val response = lastFmRateLimiter.acquire {
@@ -197,28 +212,30 @@ class SimilarArtistsRepository @Inject constructor(
         }
 
         return try {
-            val query = "artist:\"${artistName.trim()}\""
-            val response = musicBrainzRateLimiter.acquire {
-                musicBrainzApiService.searchArtist(query = query, limit = 3)
-            }
+            kotlinx.coroutines.withTimeoutOrNull(800L) {
+                val query = "artist:\"${artistName.trim()}\""
+                val response = musicBrainzRateLimiter.acquire {
+                    musicBrainzApiService.searchArtist(query = query, limit = 3)
+                }
 
-            val country = response.artists.firstOrNull()?.let { artist ->
-                artist.country
-                    ?: artist.area?.isoCodes?.firstOrNull()
-                    ?: artist.area?.name
-                    ?: artist.beginArea?.isoCodes?.firstOrNull()
-                    ?: artist.beginArea?.name
-            }
+                val country = response.artists.firstOrNull()?.let { artist ->
+                    artist.country
+                        ?: artist.area?.isoCodes?.firstOrNull()
+                        ?: artist.area?.name
+                        ?: artist.beginArea?.isoCodes?.firstOrNull()
+                        ?: artist.beginArea?.name
+                }
 
-            artistCountryCacheDao.insertCountry(
-                ArtistCountryCacheEntity(
-                    artistName = normalized,
-                    country = country,
-                    cachedAt = System.currentTimeMillis()
+                artistCountryCacheDao.insertCountry(
+                    ArtistCountryCacheEntity(
+                        artistName = normalized,
+                        country = country,
+                        cachedAt = System.currentTimeMillis()
+                    )
                 )
-            )
-            country
-        } catch (_: Exception) {
+                country
+            }
+        } catch (e: Exception) {
             null
         }
     }

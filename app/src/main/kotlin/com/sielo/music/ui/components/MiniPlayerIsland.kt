@@ -1,6 +1,7 @@
 package com.sielo.music.ui.components
 
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -28,6 +29,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.CircularProgressIndicator
@@ -37,11 +39,14 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.graphicsLayer
+import kotlinx.coroutines.launch
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -84,9 +89,13 @@ fun MiniPlayerIsland(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     onSeek: (Long) -> Unit = {},
-    onToggleMute: () -> Unit = {}
+    onToggleMute: () -> Unit = {},
+    onShuffle: () -> Unit = {}
 ) {
     val track = playbackState.currentTrack ?: return
+
+    val coroutineScope = rememberCoroutineScope()
+    val shuffleAnimState = rememberShuffleAnimationState()
 
     val progress = if (playbackState.durationMs > 0) {
         (playbackState.currentPositionMs.toFloat() / playbackState.durationMs.toFloat()).coerceIn(0f, 1f)
@@ -190,48 +199,130 @@ fun MiniPlayerIsland(
                     .fillMaxWidth()
                     .padding(start = contentStartPadding, end = 16.dp, top = 8.dp, bottom = 8.dp)
             ) {
-                // 1. Song Information (Artist & Title with Marquee & Sound Mute Toggle Button)
+                // 1. Song Information (Full Width Artist & Title with Marquee)
+                Column(
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = track.artist,
+                        color = PaletteSageGreen, // #778D7A
+                        fontFamily = com.sielo.music.ui.theme.UrbanistFontFamily,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Normal,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = track.title,
+                        color = PaletteCream, // #F4F1DE
+                        fontFamily = com.sielo.music.ui.theme.UrbanistFontFamily,
+                        fontSize = 13.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .basicMarquee(
+                                iterations = Int.MAX_VALUE,
+                                velocity = 35.dp,
+                                initialDelayMillis = 1200,
+                                repeatDelayMillis = 1200
+                            )
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                // 2. Playback Controls in same line: Shuffle, Previous, Play/Pause, Next, Mute
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(
+                    // Shuffle Button (Plays custom animated shuffle icon frames on tap)
+                    Box(
                         modifier = Modifier
-                            .weight(1f)
-                            .padding(end = 6.dp)
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .clickable {
+                                onShuffle()
+                                shuffleAnimState.playAnimation(durationMs = 1150)
+                            },
+                        contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            text = track.artist,
-                            color = PaletteSageGreen, // #778D7A
-                            fontFamily = com.sielo.music.ui.theme.UrbanistFontFamily,
-                            fontSize = 11.5.sp,
-                            fontWeight = FontWeight.Normal,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                        val activeColor = androidx.compose.ui.graphics.lerp(
+                            PaletteSlateBlue.copy(alpha = 0.55f),
+                            PaletteSand,
+                            shuffleAnimState.highlight.value
                         )
-                        Text(
-                            text = track.title,
-                            color = PaletteCream, // #F4F1DE
-                            fontFamily = com.sielo.music.ui.theme.UrbanistFontFamily,
-                            fontSize = 13.5.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .basicMarquee(
-                                    iterations = Int.MAX_VALUE,
-                                    velocity = 35.dp,
-                                    initialDelayMillis = 1200,
-                                    repeatDelayMillis = 1200
-                                )
+                        AnimatedShuffleIcon(
+                            size = 22.dp,
+                            tint = activeColor,
+                            progress = shuffleAnimState.progress.value
                         )
                     }
 
-                    // Sound / Mute Button
+                    // Previous Track Button
                     Box(
                         modifier = Modifier
-                            .size(28.dp)
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .clickable { onSkipPrevious() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.SkipPrevious,
+                            contentDescription = "Previous",
+                            tint = PaletteCream, // #F4F1DE
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+
+                    // Play / Pause Button (Luminous Cream filled circle with dark icon matching reference)
+                    if (playbackState.isBuffering) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(26.dp),
+                            color = PaletteSand,
+                            strokeWidth = 2.5.dp
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .shadow(elevation = 6.dp, shape = CircleShape, spotColor = PaletteSand.copy(alpha = 0.4f))
+                                .clip(CircleShape)
+                                .background(PaletteCream) // #F4F1DE
+                                .clickable { onTogglePlay() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = if (playbackState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                contentDescription = if (playbackState.isPlaying) "Pause" else "Play",
+                                tint = PaletteDarkNavy, // #0D1B2A
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                    }
+
+                    // Next Track Button
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .clickable { onSkipNext() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.SkipNext,
+                            contentDescription = "Next",
+                            tint = PaletteCream, // #F4F1DE
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+
+                    // Sound / Mute Button (Same line as control buttons)
+                    Box(
+                        modifier = Modifier
+                            .size(30.dp)
                             .clip(CircleShape)
                             .clickable { onToggleMute() },
                         contentAlignment = Alignment.Center
@@ -251,73 +342,6 @@ fun MiniPlayerIsland(
                                 PaletteSlateBlue
                             },
                             modifier = Modifier.size(18.dp)
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(2.dp))
-
-                // 2. Playback Controls (Previous, Play/Pause, Next)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Previous Track Button
-                    Box(
-                        modifier = Modifier
-                            .size(34.dp)
-                            .clip(CircleShape)
-                            .clickable { onSkipPrevious() },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.SkipPrevious,
-                            contentDescription = "Previous",
-                            tint = PaletteCream, // #F4F1DE
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
-
-                    // Play / Pause Button (Luminous Cream filled circle with dark icon matching reference)
-                    if (playbackState.isBuffering) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(26.dp),
-                            color = PaletteSand,
-                            strokeWidth = 2.5.dp
-                        )
-                    } else {
-                        Box(
-                            modifier = Modifier
-                                .size(40.dp)
-                                .shadow(elevation = 6.dp, shape = CircleShape, spotColor = PaletteSand.copy(alpha = 0.4f))
-                                .clip(CircleShape)
-                                .background(PaletteCream) // #F4F1DE
-                                .clickable { onTogglePlay() },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = if (playbackState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                contentDescription = if (playbackState.isPlaying) "Pause" else "Play",
-                                tint = PaletteDarkNavy, // #0D1B2A
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
-                    }
-
-                    // Next Track Button
-                    Box(
-                        modifier = Modifier
-                            .size(34.dp)
-                            .clip(CircleShape)
-                            .clickable { onSkipNext() },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.SkipNext,
-                            contentDescription = "Next",
-                            tint = PaletteCream, // #F4F1DE
-                            modifier = Modifier.size(22.dp)
                         )
                     }
                 }

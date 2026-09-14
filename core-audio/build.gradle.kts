@@ -27,6 +27,7 @@ android {
 dependencies {
     implementation(project(":core-network"))
     implementation(project(":core-database"))
+    implementation(project(":core-recommendations"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.media3.exoplayer)
     implementation(libs.androidx.media3.session)

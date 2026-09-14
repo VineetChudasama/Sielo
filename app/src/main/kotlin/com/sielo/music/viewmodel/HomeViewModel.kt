@@ -302,6 +302,14 @@ class HomeViewModel @Inject constructor(
         playerManager.playTrack(track, queue)
     }
 
+    fun appendToQueue(tracks: List<SieloTrack>) {
+        playerManager.appendToQueue(tracks)
+    }
+
+    fun appendToQueue(track: SieloTrack) {
+        playerManager.appendToQueue(track)
+    }
+
     fun playHistoryEvent(event: ListeningEventEntity) {
         val track = SieloTrack(
             id = event.songId,

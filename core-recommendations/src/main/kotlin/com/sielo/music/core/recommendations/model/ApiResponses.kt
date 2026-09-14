@@ -65,6 +65,34 @@ data class LastFmTagTopArtistsResponse(
     val topartists: LastFmTagTopArtistsContainer? = null
 )
 
+@Serializable
+data class LastFmTopTrackArtistDto(
+    val name: String,
+    val mbid: String? = null,
+    val url: String? = null
+)
+
+@Serializable
+data class LastFmTopTrackDto(
+    val name: String,
+    val playcount: String? = null,
+    val listeners: String? = null,
+    val mbid: String? = null,
+    val url: String? = null,
+    val artist: LastFmTopTrackArtistDto? = null,
+    val image: List<LastFmImage>? = null
+)
+
+@Serializable
+data class LastFmTopTracksContainer(
+    val track: List<LastFmTopTrackDto> = emptyList()
+)
+
+@Serializable
+data class LastFmTopTracksResponse(
+    val toptracks: LastFmTopTracksContainer? = null
+)
+
 // --- MusicBrainz Models ---
 
 @Serializable

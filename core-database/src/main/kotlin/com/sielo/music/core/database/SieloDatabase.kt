@@ -4,14 +4,20 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import com.sielo.music.core.database.dao.ArtistCountryCacheDao
 import com.sielo.music.core.database.dao.FavoriteTrackDao
 import com.sielo.music.core.database.dao.ListeningHistoryDao
+import com.sielo.music.core.database.dao.RecommendationHistoryDao
 import com.sielo.music.core.database.dao.SearchHistoryDao
 import com.sielo.music.core.database.dao.SearchPlayHistoryDao
+import com.sielo.music.core.database.dao.SimilarArtistCacheDao
+import com.sielo.music.core.database.entity.ArtistCountryCacheEntity
 import com.sielo.music.core.database.entity.FavoriteTrackEntity
 import com.sielo.music.core.database.entity.ListeningEventEntity
+import com.sielo.music.core.database.entity.RecommendationHistoryEntity
 import com.sielo.music.core.database.entity.SearchHistoryEntity
 import com.sielo.music.core.database.entity.SearchPlayHistoryEntity
+import com.sielo.music.core.database.entity.SimilarArtistCacheEntity
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -24,9 +30,12 @@ import javax.inject.Singleton
         FavoriteTrackEntity::class,
         ListeningEventEntity::class,
         SearchHistoryEntity::class,
-        SearchPlayHistoryEntity::class
+        SearchPlayHistoryEntity::class,
+        RecommendationHistoryEntity::class,
+        SimilarArtistCacheEntity::class,
+        ArtistCountryCacheEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class SieloDatabase : RoomDatabase() {
@@ -34,6 +43,9 @@ abstract class SieloDatabase : RoomDatabase() {
     abstract fun listeningHistoryDao(): ListeningHistoryDao
     abstract fun searchHistoryDao(): SearchHistoryDao
     abstract fun searchPlayHistoryDao(): SearchPlayHistoryDao
+    abstract fun recommendationHistoryDao(): RecommendationHistoryDao
+    abstract fun similarArtistCacheDao(): SimilarArtistCacheDao
+    abstract fun artistCountryCacheDao(): ArtistCountryCacheDao
 }
 
 @Module
@@ -67,5 +79,20 @@ object DatabaseModule {
     @Provides
     fun provideSearchPlayHistoryDao(db: SieloDatabase): SearchPlayHistoryDao {
         return db.searchPlayHistoryDao()
+    }
+
+    @Provides
+    fun provideRecommendationHistoryDao(db: SieloDatabase): RecommendationHistoryDao {
+        return db.recommendationHistoryDao()
+    }
+
+    @Provides
+    fun provideSimilarArtistCacheDao(db: SieloDatabase): SimilarArtistCacheDao {
+        return db.similarArtistCacheDao()
+    }
+
+    @Provides
+    fun provideArtistCountryCacheDao(db: SieloDatabase): ArtistCountryCacheDao {
+        return db.artistCountryCacheDao()
     }
 }

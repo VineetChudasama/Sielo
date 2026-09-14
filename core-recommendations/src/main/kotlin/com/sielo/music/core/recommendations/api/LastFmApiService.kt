@@ -3,6 +3,7 @@ package com.sielo.music.core.recommendations.api
 import com.sielo.music.core.recommendations.model.LastFmSimilarArtistsResponse
 import com.sielo.music.core.recommendations.model.LastFmTagTopArtistsResponse
 import com.sielo.music.core.recommendations.model.LastFmTopTagsResponse
+import com.sielo.music.core.recommendations.model.LastFmTopTracksResponse
 import retrofit2.http.GET
 import retrofit2.http.Query
 
@@ -29,4 +30,12 @@ interface LastFmApiService {
         @Query("api_key") apiKey: String,
         @Query("limit") limit: Int = 30
     ): LastFmTagTopArtistsResponse
+
+    @GET("2.0/?method=artist.gettoptracks&format=json")
+    suspend fun getTopTracks(
+        @Query("artist") artist: String,
+        @Query("api_key") apiKey: String,
+        @Query("limit") limit: Int = 10,
+        @Query("autocorrect") autocorrect: Int = 1
+    ): LastFmTopTracksResponse
 }

@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -250,11 +251,11 @@ fun RotatingVinylCard(
         label = "tonearmProgress"
     )
 
-    val artworkSize = 130.dp
+    val artworkSize = 120.dp
 
     Box(
         modifier = modifier
-            .size(310.dp),
+            .size(width = 345.dp, height = 310.dp),
         contentAlignment = Alignment.Center
     ) {
         val currentRotation = rotationAngle.value % 360f
@@ -263,7 +264,7 @@ fun RotatingVinylCard(
             val discCenterX = size.width * 0.50f
             val discCenterY = size.height * 0.50f
             val discCenter = Offset(discCenterX, discCenterY)
-            val discRadius = size.minDimension * 0.42f
+            val discRadius = 115.dp.toPx()
             val innerArtworkRadius = (artworkSize / 2).toPx()
 
             // 1. Ambient Atmospheric Glow behind the disc (vibrant artwork color)
@@ -375,7 +376,7 @@ fun RotatingVinylCard(
             )
         }
 
-        // Center Album Artwork Sticker (Rotates smoothly and is concentric with the disc)
+        // Center Album Artwork Sticker (Concentric with disc, perfectly centered, rotated smoothly)
         Box(
             modifier = Modifier
                 .size(artworkSize)
@@ -405,25 +406,51 @@ fun RotatingVinylCard(
         }
 
         // 6. Disc Player Tonearm Line (Needle)
-        // Stays on the vinyl disc when playing; smoothly swings out off the disc when paused.
+        // Stays on the vinyl disc when playing; swings completely off the disc into its resting bay when paused.
         Canvas(modifier = Modifier.fillMaxSize()) {
             val discCenterX = size.width * 0.50f
             val discCenterY = size.height * 0.50f
-            val discRadius = size.minDimension * 0.42f
+            val discRadius = 115.dp.toPx()
 
-            // Pivot Mount at Top Right
-            val pivotX = size.width * 0.92f
-            val pivotY = size.height * 0.05f
+            // Pivot Mount at Top Right - safely inside container with clear margin
+            val pivotX = (size.width - 15.dp.toPx()).coerceAtLeast(discCenterX + discRadius + 36.dp.toPx())
+            val pivotY = discCenterY - discRadius * 0.68f
             val pivot = Offset(pivotX, pivotY)
 
-            // Needle on disc position (active playing groove at ~72% radius on the right)
+            // Needle on disc position (active playing groove at ~65% radius)
             val activeStylus = Offset(
-                x = discCenterX + discRadius * 0.72f,
+                x = discCenterX + discRadius * 0.65f,
                 y = discCenterY + discRadius * 0.16f
             )
 
-            // Rotation angle: 0 degrees when playing (needle on groove), -26 degrees when paused (swung out)
-            val armSwingAngle = -26f * (1f - tonearmProgress)
+            // Arm vector calculation for exact parking geometry
+            val dx = activeStylus.x - pivotX
+            val dy = activeStylus.y - pivotY
+            val armLength = kotlin.math.hypot(dx, dy)
+            val activeAngleRad = kotlin.math.atan2(dy, dx)
+            val swingAngleDeg = -38f
+
+            // Rotation angle: 0 degrees when playing (needle on groove), -38 degrees when paused (parks off disc)
+            val armSwingAngle = swingAngleDeg * (1f - tonearmProgress)
+
+            // Exact resting cradle socket position computed from rotation geometry
+            val parkedAngleRad = activeAngleRad + Math.toRadians(swingAngleDeg.toDouble())
+            val restStylusX = pivotX + (armLength * kotlin.math.cos(parkedAngleRad)).toFloat()
+            val restStylusY = pivotY + (armLength * kotlin.math.sin(parkedAngleRad)).toFloat()
+            val restSocket = Offset(restStylusX, restStylusY)
+
+            // Armrest post on turntable chassis
+            drawCircle(
+                color = Color(0xFF161922),
+                radius = 6.dp.toPx(),
+                center = restSocket
+            )
+            drawCircle(
+                color = Color(0xFF3F465A),
+                radius = 6.dp.toPx(),
+                center = restSocket,
+                style = Stroke(width = 1.5.dp.toPx())
+            )
 
             rotate(degrees = armSwingAngle, pivot = pivot) {
                 // Top Pivot Mount Base (Chassis Socket)
