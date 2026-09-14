@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
@@ -6,13 +8,26 @@ plugins {
     alias(libs.plugins.hilt)
 }
 
+val localProperties = Properties().apply {
+    val localPropertiesFile = rootProject.file("local.properties")
+    if (localPropertiesFile.exists()) {
+        load(localPropertiesFile.inputStream())
+    }
+}
+val lastFmApiKey = localProperties.getProperty("LASTFM_API_KEY") ?: "c299c855aa1626f21c258d4a3b7d1591"
+
 android {
-    namespace = "com.sielo.music.core.audio"
+    namespace = "com.sielo.music.core.recommendations"
     compileSdk = 35
 
     defaultConfig {
         minSdk = 26
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "LASTFM_API_KEY", "\"$lastFmApiKey\"")
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     compileOptions {
@@ -25,15 +40,17 @@ android {
 }
 
 dependencies {
-    implementation(project(":core-network"))
     implementation(project(":core-database"))
+
     implementation(libs.androidx.core.ktx)
-    implementation(libs.androidx.media3.exoplayer)
-    implementation(libs.androidx.media3.session)
-    implementation(libs.androidx.media3.datasource.okhttp)
-    implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.okhttp)
+    implementation(libs.okhttp.logging)
+    implementation(libs.retrofit)
+    implementation(libs.retrofit.converter.kotlinx.serialization)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.kotlinx.coroutines.android)
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
+
     testImplementation(libs.junit)
 }

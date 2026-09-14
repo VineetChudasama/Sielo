@@ -1,6 +1,18 @@
 package com.sielo.music.ui.screens
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -13,6 +25,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -20,6 +33,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -28,6 +42,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.CircularProgressIndicator
@@ -35,15 +50,33 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Velocity
+import com.sielo.music.R
+import kotlinx.coroutines.launch
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -82,6 +115,7 @@ fun HomeScreen(
     val rediscoveredFavorites by viewModel.rediscoveredFavorites.collectAsState()
     val topArtistStat by viewModel.topArtistStat.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
+    val isRefreshing by viewModel.isRefreshing.collectAsState()
     val selectedPlaylist by viewModel.selectedPlaylist.collectAsState()
     val playlistTracks by viewModel.playlistTracks.collectAsState()
     val isPlaylistLoading by viewModel.isPlaylistLoading.collectAsState()
@@ -94,13 +128,95 @@ fun HomeScreen(
     val customPlaylists = viewModel.customPlaylists
     val trendingGenres = viewModel.trendingGenres
 
-    // Dynamic Top Artist
+    val density = LocalDensity.current
+    val coroutineScope = rememberCoroutineScope()
+    val lazyListState = rememberLazyListState()
+
+    var isDragStartedAtTop by remember { androidx.compose.runtime.mutableStateOf(false) }
+    val pullOffsetY = remember { Animatable(0f) }
+    val refreshThresholdPx = with(density) { 85.dp.toPx() }
+    val maxPullPx = with(density) { 140.dp.toPx() }
+
+    val nestedScrollConnection = remember(isRefreshing) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (available.y < 0 && pullOffsetY.value > 0f) {
+                    val consumed = available.y.coerceAtLeast(-pullOffsetY.value)
+                    coroutineScope.launch {
+                        pullOffsetY.snapTo((pullOffsetY.value + consumed).coerceAtLeast(0f))
+                    }
+                    return Offset(0f, consumed)
+                }
+                return Offset.Zero
+            }
+
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                // STRICT: Only allow pull if user touch began while ALREADY at the top of the page.
+                // Swiping/flinging up from below to reach the top will NEVER trigger a pull or refresh.
+                if (available.y > 0 && !isRefreshing && isDragStartedAtTop && source == NestedScrollSource.UserInput && lazyListState.firstVisibleItemIndex == 0 && lazyListState.firstVisibleItemScrollOffset == 0) {
+                    val dampedDelta = available.y * 0.45f
+                    val newOffset = (pullOffsetY.value + dampedDelta).coerceAtMost(maxPullPx)
+                    coroutineScope.launch {
+                        pullOffsetY.snapTo(newOffset)
+                    }
+                    return Offset(0f, available.y)
+                }
+                return Offset.Zero
+            }
+
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                if (!isRefreshing && pullOffsetY.value > 0f) {
+                    if (isDragStartedAtTop && pullOffsetY.value >= refreshThresholdPx) {
+                        coroutineScope.launch {
+                            pullOffsetY.animateTo(refreshThresholdPx, spring(stiffness = Spring.StiffnessMediumLow))
+                        }
+                        viewModel.refreshHome()
+                    } else {
+                        coroutineScope.launch {
+                            pullOffsetY.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow))
+                        }
+                    }
+                }
+                isDragStartedAtTop = false
+                return Velocity.Zero
+            }
+
+            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                if (!isRefreshing && pullOffsetY.value > 0f) {
+                    coroutineScope.launch {
+                        pullOffsetY.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow))
+                    }
+                }
+                isDragStartedAtTop = false
+                return Velocity.Zero
+            }
+        }
+    }
+
+    LaunchedEffect(isRefreshing) {
+        if (!isRefreshing) {
+            pullOffsetY.animateTo(0f, spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow))
+        } else {
+            if (pullOffsetY.value < refreshThresholdPx) {
+                pullOffsetY.animateTo(refreshThresholdPx, spring(stiffness = Spring.StiffnessMediumLow))
+            }
+        }
+    }
+
+    val infiniteTransition = rememberInfiniteTransition(label = "refresh_spin")
+    val spinRotation by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(800, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "spin"
+    )
+
+    // Dynamic Top Artist & Similar Artists (synchronized with HomeViewModel refresh)
     val topArtistName = topArtistStat.firstOrNull()?.artistName ?: "The Weeknd"
     val dynamicSimilarArtists by viewModel.dynamicSimilarArtists.collectAsState()
-
-    androidx.compose.runtime.LaunchedEffect(topArtistName) {
-        viewModel.loadDynamicSimilarArtists(topArtistName)
-    }
 
     // Fallback tracks pool with guaranteed distinct high-quality tracks and official square album art
     val fallbackTracks = listOf(
@@ -172,6 +288,34 @@ fun HomeScreen(
         modifier = modifier
             .fillMaxSize()
             .background(PaletteDarkNavy)
+            .pointerInput(isRefreshing) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        if (event.changes.any { it.pressed }) {
+                            // Touch began: strictly verify if page is ALREADY at the top
+                            if (lazyListState.firstVisibleItemIndex == 0 && lazyListState.firstVisibleItemScrollOffset == 0) {
+                                isDragStartedAtTop = true
+                            }
+                        }
+                        if (event.changes.all { !it.pressed }) {
+                            if (!isRefreshing) {
+                                if (isDragStartedAtTop && pullOffsetY.value >= refreshThresholdPx) {
+                                    coroutineScope.launch {
+                                        pullOffsetY.animateTo(refreshThresholdPx, spring(stiffness = Spring.StiffnessMediumLow))
+                                    }
+                                    viewModel.refreshHome()
+                                } else if (pullOffsetY.value > 0f) {
+                                    coroutineScope.launch {
+                                        pullOffsetY.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow))
+                                    }
+                                }
+                            }
+                            isDragStartedAtTop = false
+                        }
+                    }
+                }
+            }
     ) {
         if (isLoading && activeTracks.isEmpty()) {
             Box(
@@ -223,10 +367,16 @@ fun HomeScreen(
             }
 
             LazyColumn(
-                modifier = Modifier.fillMaxSize(),
+                state = lazyListState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .nestedScroll(nestedScrollConnection)
+                    .graphicsLayer {
+                        translationY = pullOffsetY.value * 0.45f
+                    },
                 contentPadding = PaddingValues(top = 16.dp, bottom = 100.dp)
             ) {
-                // Top App Bar: Brand name with increased font size and functional search button
+                // Top App Bar: Brand name with increased font size and functional search & refresh button
                 item {
                     Row(
                         modifier = Modifier
@@ -489,6 +639,98 @@ fun HomeScreen(
                     }
 
                     Spacer(modifier = Modifier.height(20.dp))
+                }
+            }
+
+            // Sliding Refresh Indicator (slides down from top boundary when swiped down, hides when swiped up)
+            val pullProgress = (pullOffsetY.value / refreshThresholdPx).coerceIn(0f, 1.5f)
+            val indicatorTopOffsetDp = with(density) {
+                (-65.dp.toPx() + (pullOffsetY.value * 0.75f)).toDp()
+            }
+
+            if ((pullOffsetY.value > 2f || isRefreshing) && (indicatorTopOffsetDp > -55.dp || isRefreshing)) {
+                val isTriggerReached = pullProgress >= 1f || isRefreshing
+                val glowAlpha by animateFloatAsState(
+                    targetValue = if (isTriggerReached) 0.9f else 0f,
+                    animationSpec = tween(durationMillis = 200),
+                    label = "glowAlpha"
+                )
+                val glowScale by animateFloatAsState(
+                    targetValue = if (isTriggerReached) 1.25f else 0.85f,
+                    animationSpec = tween(durationMillis = 200),
+                    label = "glowScale"
+                )
+
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .offset(y = indicatorTopOffsetDp)
+                        .size(72.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    // Soft illuminated radial glow halo behind the button (always present, GPU alpha/scale)
+                    Box(
+                        modifier = Modifier
+                            .size(70.dp)
+                            .graphicsLayer {
+                                alpha = glowAlpha
+                                scaleX = glowScale
+                                scaleY = glowScale
+                            }
+                            .background(
+                                brush = Brush.radialGradient(
+                                    colors = listOf(
+                                        PaletteSand.copy(alpha = 0.5f),
+                                        PaletteSand.copy(alpha = 0.15f),
+                                        Color.Transparent
+                                    )
+                                ),
+                                shape = CircleShape
+                            )
+                    )
+
+                    // Core Refresh Button
+                    Box(
+                        modifier = Modifier
+                            .size(52.dp)
+                            .graphicsLayer {
+                                alpha = if (isRefreshing) 1f else (pullProgress * 1.6f).coerceIn(0f, 1f)
+                                scaleX = 0.85f + (pullProgress * 0.15f).coerceAtMost(0.3f)
+                                scaleY = 0.85f + (pullProgress * 0.15f).coerceAtMost(0.3f)
+                            }
+                            .shadow(
+                                elevation = 10.dp,
+                                shape = CircleShape,
+                                ambientColor = if (isTriggerReached) PaletteSand.copy(alpha = 0.6f) else Color.Black,
+                                spotColor = if (isTriggerReached) PaletteSand else Color.Black
+                            )
+                            .clip(CircleShape)
+                            .background(PaletteOxfordBlue.copy(alpha = 0.96f))
+                            .border(
+                                width = 1.5.dp,
+                                color = if (isTriggerReached) PaletteSand else PaletteSand.copy(alpha = 0.55f),
+                                shape = CircleShape
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (isRefreshing) {
+                            CircularProgressIndicator(
+                                color = PaletteSand,
+                                strokeWidth = 2.5.dp,
+                                modifier = Modifier.size(32.dp)
+                            )
+                        }
+                        Image(
+                            painter = painterResource(id = R.drawable.app_logo),
+                            contentDescription = "Sielo Refresh Logo",
+                            modifier = Modifier
+                                .size(24.dp)
+                                .clip(CircleShape)
+                                .graphicsLayer {
+                                    rotationZ = if (isRefreshing) spinRotation else (pullProgress * 360f)
+                                }
+                        )
+                    }
                 }
             }
         }

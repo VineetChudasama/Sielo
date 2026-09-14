@@ -39,6 +39,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.sielo.music.BuildConfig
 import com.sielo.music.ui.theme.AccentCoral
 import com.sielo.music.ui.theme.BorderGlass
 import com.sielo.music.ui.theme.BorderSubtle
@@ -118,12 +119,31 @@ fun ProfileScreen(
                             Spacer(modifier = Modifier.width(16.dp))
 
                             Column {
-                                Text(
-                                    text = "Vineet",
-                                    color = TextPrimary,
-                                    fontSize = 20.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = "Vineet",
+                                        color = TextPrimary,
+                                        fontSize = 20.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(AccentCoral.copy(alpha = 0.15f))
+                                            .border(1.dp, AccentCoral.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                                            .padding(horizontal = 7.dp, vertical = 2.dp)
+                                    ) {
+                                        Text(
+                                            text = "v${BuildConfig.VERSION_NAME}",
+                                            color = AccentCoral,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
                                 Text(
                                     text = "Audiophile Edition",
                                     color = AccentCoral,
@@ -194,7 +214,7 @@ fun ProfileScreen(
                                     .border(1.dp, BorderGlass, RoundedCornerShape(10.dp))
                                     .clickable { viewModel.clearCache() }
                                     .padding(horizontal = 12.dp, vertical = 6.dp)
-                            ) {
+                                ) {
                                 Text(text = "Clear", color = AccentCoral, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                             }
                         }
@@ -215,15 +235,47 @@ fun ProfileScreen(
                             .padding(16.dp)
                     ) {
                         Column {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(imageVector = Icons.Default.Info, contentDescription = "Info", tint = TextSecondary)
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Column {
-                                    Text(text = "Sielo Music v1.0.0", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                                    Text(text = "Built with Kotlin • Jetpack Compose • Media3", color = TextSecondary, fontSize = 12.sp)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(imageVector = Icons.Default.Info, contentDescription = "Info", tint = TextSecondary)
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Column {
+                                        Text(text = "Sielo Music", color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                                        Text(text = "Built with Kotlin • Jetpack Compose • Media3", color = TextSecondary, fontSize = 12.sp)
+                                    }
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(SurfaceElevated)
+                                        .border(1.dp, BorderGlass, RoundedCornerShape(12.dp))
+                                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                                ) {
+                                    Text(
+                                        text = "v${BuildConfig.VERSION_NAME}",
+                                        color = TextPrimary,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
                                 }
                             }
                         }
+                    }
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Box(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "Sielo • Version v${BuildConfig.VERSION_NAME}",
+                            color = TextMuted,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
                     }
                 }
             }

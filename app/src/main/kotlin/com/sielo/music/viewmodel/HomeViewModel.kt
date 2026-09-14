@@ -3,6 +3,7 @@ package com.sielo.music.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.sielo.music.core.audio.PlayerManager
+import com.sielo.music.core.database.dao.ArtistStat
 import com.sielo.music.core.database.dao.FavoriteTrackDao
 import com.sielo.music.core.database.dao.ListeningHistoryDao
 import com.sielo.music.core.database.entity.FavoriteTrackEntity
@@ -15,6 +16,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.Calendar
@@ -40,19 +42,20 @@ class HomeViewModel @Inject constructor(
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
-    // 5 Most Recently Played Unique Tracks (guaranteed exact 5, replay maintains position without dropping others)
-    val recentPlayedSongs: StateFlow<List<ListeningEventEntity>> = listeningHistoryDao.getRecentUniquePlayedSongs(5)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    private val _isRefreshing = MutableStateFlow(false)
+    val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
 
-    // Tracks played before 2 days ago that user hasn't listened to in the last 2 days
-    val rediscoveredFavorites: StateFlow<List<ListeningEventEntity>> = listeningHistoryDao.getRediscoveredFavorites(
-        twoDaysAgoMs = System.currentTimeMillis() - (2L * 24 * 60 * 60 * 1000L),
-        limit = 5
-    ).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    // 5 Most Recently Played Unique Tracks (snapshot loaded on launch & updated ONLY on refresh/relaunch)
+    private val _recentPlayedSongs = MutableStateFlow<List<ListeningEventEntity>>(emptyList())
+    val recentPlayedSongs: StateFlow<List<ListeningEventEntity>> = _recentPlayedSongs.asStateFlow()
 
-    // Most listened artist dynamically computed from listening history
-    val topArtistStat = listeningHistoryDao.getTopArtists(sinceMs = 0L, limit = 1)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    // Tracks played before 2 days ago that user hasn't listened to in the last 2 days (snapshot loaded on launch & updated ONLY on refresh/relaunch)
+    private val _rediscoveredFavorites = MutableStateFlow<List<ListeningEventEntity>>(emptyList())
+    val rediscoveredFavorites: StateFlow<List<ListeningEventEntity>> = _rediscoveredFavorites.asStateFlow()
+
+    // Most listened artist dynamically computed from listening history (snapshot loaded on launch & updated ONLY on refresh/relaunch)
+    private val _topArtistStat = MutableStateFlow<List<ArtistStat>>(emptyList())
+    val topArtistStat: StateFlow<List<ArtistStat>> = _topArtistStat.asStateFlow()
 
     val favorites = favoriteTrackDao.getAllFavorites()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -71,6 +74,106 @@ class HomeViewModel @Inject constructor(
 
     private val _isArtistLoading = MutableStateFlow(false)
     val isArtistLoading: StateFlow<Boolean> = _isArtistLoading.asStateFlow()
+
+    private val _dynamicSimilarArtists = MutableStateFlow<List<ArtistProfile>>(emptyList())
+    val dynamicSimilarArtists: StateFlow<List<ArtistProfile>> = _dynamicSimilarArtists.asStateFlow()
+
+    private var lastResolvedArtist: String? = null
+
+    init {
+        loadInitialFeed()
+    }
+
+    private fun loadInitialFeed() {
+        viewModelScope.launch {
+            _isLoading.value = true
+            try {
+                // Fetch initial history snapshots
+                val recent = listeningHistoryDao.getRecentUniquePlayedSongs(5).firstOrNull() ?: emptyList()
+                val rediscovered = listeningHistoryDao.getRediscoveredFavorites(
+                    twoDaysAgoMs = System.currentTimeMillis() - (2L * 24 * 60 * 60 * 1000L),
+                    limit = 5
+                ).firstOrNull() ?: emptyList()
+                val topArtists = listeningHistoryDao.getTopArtists(sinceMs = 0L, limit = 1).firstOrNull() ?: emptyList()
+
+                _recentPlayedSongs.value = recent
+                _rediscoveredFavorites.value = rediscovered
+                _topArtistStat.value = topArtists
+
+                val cleanedQuery = _selectedMood.value.replace(Regex("[^a-zA-Z0-9 ]"), "").trim()
+                val query = if (cleanedQuery.isNotEmpty()) cleanedQuery else "Top Hits 2026"
+                val tracks = innerTubeClient.search(query)
+                val cleanTracks = if (tracks.isNotEmpty()) {
+                    tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+                } else defaultStarterTracks()
+                _trendingTracks.value = cleanTracks
+
+                val topArtistName = topArtists.firstOrNull()?.artistName ?: "The Weeknd"
+                lastResolvedArtist = topArtistName
+                val similarList = fetchSimilarArtistProfiles(topArtistName)
+                if (similarList.isNotEmpty()) {
+                    _dynamicSimilarArtists.value = similarList
+                }
+            } catch (e: Exception) {
+                _trendingTracks.value = defaultStarterTracks()
+            } finally {
+                _isLoading.value = false
+            }
+        }
+    }
+
+    fun refreshHome() {
+        viewModelScope.launch {
+            _isRefreshing.value = true
+            val startTime = System.currentTimeMillis()
+
+            try {
+                // 1. Compute new greeting in memory
+                val newGreeting = computeGreeting()
+
+                // 2. Query history snapshots in memory
+                val newRecent = listeningHistoryDao.getRecentUniquePlayedSongs(5).firstOrNull() ?: emptyList()
+                val newRediscovered = listeningHistoryDao.getRediscoveredFavorites(
+                    twoDaysAgoMs = System.currentTimeMillis() - (2L * 24 * 60 * 60 * 1000L),
+                    limit = 5
+                ).firstOrNull() ?: emptyList()
+                val newTopArtists = listeningHistoryDao.getTopArtists(sinceMs = 0L, limit = 1).firstOrNull() ?: emptyList()
+
+                // 3. Query feed tracks in memory
+                val cleanedQuery = _selectedMood.value.replace(Regex("[^a-zA-Z0-9 ]"), "").trim()
+                val query = if (cleanedQuery.isNotEmpty()) cleanedQuery else "Top Hits 2026"
+                val tracks = innerTubeClient.search(query)
+                val newTracks = if (tracks.isNotEmpty()) {
+                    tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+                } else defaultStarterTracks().shuffled()
+
+                // 4. Query dynamic similar artists in memory
+                val topArtistName = newTopArtists.firstOrNull()?.artistName ?: "The Weeknd"
+                lastResolvedArtist = topArtistName
+                val newSimilarArtists = fetchSimilarArtistProfiles(topArtistName)
+
+                // 5. Ensure refresh animation runs for a smooth minimum time so user sees the animation
+                val elapsed = System.currentTimeMillis() - startTime
+                if (elapsed < 800) {
+                    kotlinx.coroutines.delay(800 - elapsed)
+                }
+
+                // 6. SYNC ALL REFRESHES TOGETHER ATOMICALLY
+                _greeting.value = newGreeting
+                _recentPlayedSongs.value = newRecent
+                _rediscoveredFavorites.value = newRediscovered
+                _topArtistStat.value = newTopArtists
+                _trendingTracks.value = newTracks
+                if (newSimilarArtists.isNotEmpty()) {
+                    _dynamicSimilarArtists.value = newSimilarArtists
+                }
+            } catch (e: Exception) {
+                // Retain current states on error
+            } finally {
+                _isRefreshing.value = false
+            }
+        }
+    }
 
     // Trending Genres State
     val trendingGenres: List<GenreItem> = listOf(
@@ -106,7 +209,7 @@ class HomeViewModel @Inject constructor(
             val tracks = innerTubeClient.search(genre.seedQuery)
             val clean = if (tracks.isNotEmpty()) {
                 tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
-            } else defaultGenreTracks(genre.name)
+            } else defaultGenreTracks(genre.name).shuffled()
             _genreTracks.value = clean
             _isGenreLoading.value = false
         }
@@ -222,59 +325,209 @@ class HomeViewModel @Inject constructor(
         }
     }
 
-    private val _dynamicSimilarArtists = MutableStateFlow<List<ArtistProfile>>(emptyList())
-    val dynamicSimilarArtists: StateFlow<List<ArtistProfile>> = _dynamicSimilarArtists.asStateFlow()
+    private suspend fun fetchSimilarArtistProfiles(topArtistName: String): List<ArtistProfile> {
+        val names = getSimilarArtistNames(topArtistName)
+        val list = mutableListOf<ArtistProfile>()
+        for (name in names) {
+            try {
+                val searchResult = innerTubeClient.searchArtists(name)
+                val img = searchResult.firstOrNull()?.imageUrl
+                val finalImg = if (!img.isNullOrBlank() && !img.contains("default-music") && !img.contains("default-film")) {
+                    img
+                } else {
+                    "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=500&auto=format&fit=crop&q=80"
+                }
+                list.add(ArtistProfile(name, finalImg))
+            } catch (e: Exception) {
+                list.add(ArtistProfile(name, "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=500&auto=format&fit=crop&q=80"))
+            }
+        }
+        return list
+    }
 
-    private var lastResolvedArtist: String? = null
-
-    fun loadDynamicSimilarArtists(topArtistName: String) {
-        if (topArtistName == lastResolvedArtist && _dynamicSimilarArtists.value.isNotEmpty()) return
+    fun loadDynamicSimilarArtists(topArtistName: String, forceRefresh: Boolean = false) {
+        if (!forceRefresh && topArtistName == lastResolvedArtist && _dynamicSimilarArtists.value.isNotEmpty()) return
         lastResolvedArtist = topArtistName
         viewModelScope.launch {
-            val names = getSimilarArtistNames(topArtistName)
-            val list = mutableListOf<ArtistProfile>()
-            for (name in names) {
-                try {
-                    val searchResult = innerTubeClient.searchArtists(name)
-                    val img = searchResult.firstOrNull()?.imageUrl
-                    val finalImg = if (!img.isNullOrBlank() && !img.contains("default-music") && !img.contains("default-film")) {
-                        img
-                    } else {
-                        "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=500&auto=format&fit=crop&q=80"
-                    }
-                    list.add(ArtistProfile(name, finalImg))
-                } catch (e: Exception) {
-                    list.add(ArtistProfile(name, "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=500&auto=format&fit=crop&q=80"))
-                }
-            }
+            val list = fetchSimilarArtistProfiles(topArtistName)
             if (list.isNotEmpty()) {
                 _dynamicSimilarArtists.value = list
             }
         }
     }
 
-    private fun getSimilarArtistNames(topArtistName: String): List<String> {
-        val lower = topArtistName.lowercase()
-        return when {
-            lower.contains("sza") || lower.contains("summer walker") || lower.contains("jhené") -> listOf(
-                "Summer Walker", "H.E.R.", "Frank Ocean", "Daniel Caesar", "Jhené Aiko"
-            )
-            lower.contains("weeknd") || lower.contains("bruno mars") || lower.contains("dua lipa") -> listOf(
-                "The Weeknd", "Dua Lipa", "Bruno Mars", "Post Malone", "Khalid"
-            )
-            lower.contains("kendrick") || lower.contains("drake") || lower.contains("travis") || lower.contains("metro") -> listOf(
-                "Kendrick Lamar", "Drake", "J. Cole", "Travis Scott", "21 Savage"
-            )
-            lower.contains("arijit") || lower.contains("atif") || lower.contains("shreya") -> listOf(
-                "Arijit Singh", "Atif Aslam", "Shreya Ghoshal", "Jubin Nautiyal", "Armaan Malik"
-            )
-            lower.contains("taylor") || lower.contains("olivia") || lower.contains("billie") -> listOf(
-                "Taylor Swift", "Olivia Rodrigo", "Billie Eilish", "Sabrina Carpenter", "Lorde"
-            )
-            else -> listOf(
-                "The Weeknd", "SZA", "Kendrick Lamar", "Dua Lipa", "Taylor Swift"
-            )
+    private suspend fun getSimilarArtistNames(topArtistName: String): List<String> {
+        val lower = topArtistName.trim().lowercase()
+
+        // 1. Indian Electronic / EDM / Dance Scene (e.g. Lost Stories, Nucleya, Zaeden...)
+        val indianEdmCluster = listOf(
+            "Nucleya", "Zaeden", "Ritviz", "KSHMR", "Sickflip", "Anyasa", "Dualist Inquiry",
+            "DJ Chetas", "Progressive Brothers", "MojoJojo", "Sartek", "DJ Shaan",
+            "Su Real", "Van Moon", "Arjun Vagale", "Siana Catherine", "Zephyrtone", "Anish Sood"
+        )
+
+        // 2. Indian Indie, Folk & Acoustic Pop (e.g. Prateek Kuhad, Anuv Jain...)
+        val indianIndieCluster = listOf(
+            "Prateek Kuhad", "Anuv Jain", "Jasleen Royal", "The Local Train", "When Chai Met Toast",
+            "Taba Chake", "Sanam", "Osho Jain", "Dream Note", "Bharat Chauhan", "Tanmaya Bhatnagar",
+            "Raghav Meattle", "Twin Strings", "Aditya A", "Kasyap", "JalRaj"
+        )
+
+        // 3. Indian Bollywood Romantic & Film Melodies (e.g. Arijit Singh, Atif Aslam...)
+        val bollywoodCluster = listOf(
+            "Arijit Singh", "Atif Aslam", "Mohit Chauhan", "KK", "Shreya Ghoshal",
+            "Jubin Nautiyal", "Armaan Malik", "Vishal Mishra", "Darshan Raval", "Sonu Nigam",
+            "Pritam", "Sachin-Jigar", "Shankar Mahadevan", "Sunidhi Chauhan", "Javed Ali",
+            "Akhil Sachdeva", "B Praak", "A.R. Rahman", "Amit Trivedi", "Neeti Mohan"
+        )
+
+        // 4. Desi Hip Hop & Indian Rap (e.g. DIVINE, Seedhe Maut, KR$NA...)
+        val desiHipHopCluster = listOf(
+            "DIVINE", "Seedhe Maut", "KR\$NA", "King", "MC Stan", "Raftaar", "Badshah",
+            "Emiway Bantai", "Ikka", "Bella", "Paradox", "Fotty Seven", "EPR", "Dino James",
+            "Raga", "Karma", "Talha Anjum", "Talhah Yunus", "Young Stunners"
+        )
+
+        // 5. Punjabi Pop & Regional Hits (e.g. AP Dhillon, Diljit Dosanjh...)
+        val punjabiCluster = listOf(
+            "AP Dhillon", "Diljit Dosanjh", "Karan Aujla", "Sidhu Moose Wala", "Shubh",
+            "Talwiinder", "Gurinder Gill", "Amrit Maan", "B Praak", "Jassie Gill",
+            "Harrdy Sandhu", "Prem Dhillon", "Jordan Sandhu", "Arjan Dhillon", "Tegi Pannu", "PropheC"
+        )
+
+        // 6. South Indian (Tamil, Telugu, Malayalam, Kannada)
+        val southIndianCluster = listOf(
+            "Anirudh Ravichander", "A.R. Rahman", "Sid Sriram", "Yuvan Shankar Raja", "Harris Jayaraj",
+            "Santhosh Narayanan", "Devi Sri Prasad", "Thaman S", "Sushin Shyam", "GV Prakash Kumar",
+            "D. Imman", "Hesham Abdul Wahab", "Anurag Kulkarni"
+        )
+
+        // 7. Global Electronic & Festival EDM (e.g. Martin Garrix, Avicii, Calvin Harris...)
+        val globalEdmCluster = listOf(
+            "Martin Garrix", "Avicii", "Calvin Harris", "David Guetta", "The Chainsmokers",
+            "Alan Walker", "Marshmello", "Kygo", "DJ Snake", "Tiësto", "Skrillex",
+            "Fred again..", "Zedd", "Galantis", "Major Lazer", "Swedish House Mafia", "Alesso", "Hardwell"
+        )
+
+        // 8. Western Hip-Hop & Rap (e.g. Kendrick Lamar, Drake, Travis Scott...)
+        val westernHipHopCluster = listOf(
+            "Kendrick Lamar", "Drake", "J. Cole", "Travis Scott", "21 Savage", "Future",
+            "Metro Boomin", "Gunna", "Lil Baby", "A\$AP Rocky", "Playboi Carti", "Lil Uzi Vert",
+            "Tyler, The Creator", "Kid Cudi", "Kanye West", "Don Toliver", "Central Cee", "Dave"
+        )
+
+        // 9. Global Pop & Mainstream (e.g. The Weeknd, Bruno Mars, Dua Lipa...)
+        val globalPopCluster = listOf(
+            "The Weeknd", "Bruno Mars", "Dua Lipa", "Post Malone", "Harry Styles",
+            "The Kid LAROI", "Charlie Puth", "Shawn Mendes", "Olivia Rodrigo", "Billie Eilish",
+            "Sabrina Carpenter", "Tate McRae", "Conan Gray", "Troye Sivan", "Lorde",
+            "Taylor Swift", "Ariana Grande", "Justin Bieber", "Ed Sheeran", "Sam Smith"
+        )
+
+        // 10. Global R&B & Neo-Soul (e.g. SZA, Frank Ocean, Daniel Caesar...)
+        val globalRnbCluster = listOf(
+            "SZA", "Frank Ocean", "Daniel Caesar", "Summer Walker", "Jhené Aiko",
+            "Brent Faiyaz", "Giveon", "H.E.R.", "Steve Lacy", "Kali Uchis",
+            "Kehlani", "Bryson Tiller", "6LACK", "PartyNextDoor", "Leon Bridges", "Snoh Aalegra", "Jorja Smith"
+        )
+
+        // 11. Global Indie & Alternative Rock (e.g. Arctic Monkeys, The Neighbourhood...)
+        val globalIndieCluster = listOf(
+            "Arctic Monkeys", "The Neighbourhood", "Lana Del Rey", "Lorde", "Cigarettes After Sex",
+            "Hozier", "Mac DeMarco", "Phoebe Bridgers", "Clairo", "Rex Orange County",
+            "Wallows", "Girl in Red", "Dominic Fike", "The 1975", "Cage The Elephant", "Vance Joy"
+        )
+
+        // 12. Global Rock & Stadium Rock (e.g. Imagine Dragons, Linkin Park, Coldplay...)
+        val globalRockCluster = listOf(
+            "Imagine Dragons", "Coldplay", "Linkin Park", "Twenty One Pilots", "Fall Out Boy",
+            "Panic! At The Disco", "Green Day", "Foo Fighters", "Red Hot Chili Peppers", "Radiohead",
+            "Muse", "Bring Me The Horizon", "The Killers", "OneRepublic", "Paramore"
+        )
+
+        // 13. K-Pop (e.g. BTS, BLACKPINK...)
+        val kpopCluster = listOf(
+            "BTS", "BLACKPINK", "Stray Kids", "NewJeans", "TWICE", "SEVENTEEN",
+            "LE SSERAFIM", "ENHYPEN", "TOMORROW X TOGETHER", "Jung Kook", "Jimin", "aespa", "ITZY", "IVE"
+        )
+
+        // 14. Latin & Reggaeton (e.g. Bad Bunny, Rauw Alejandro...)
+        val latinCluster = listOf(
+            "Bad Bunny", "Rauw Alejandro", "J Balvin", "Maluma", "Ozuna", "Daddy Yankee",
+            "Karol G", "Rosalía", "Feid", "Myke Towers", "Anuel AA", "Bizarrap"
+        )
+
+        // First check static matching with full country & scene awareness
+        val matchedPool = when {
+            // Indian Electronic / EDM (Lost Stories, Nucleya, Zaeden, Ritviz, KSHMR, Anyasa...)
+            listOf("lost stories", "nucleya", "zaeden", "ritviz", "kshmr", "sickflip", "anyasa", "dualist", "chetas", "mojojojo", "sartek", "zephyrtone", "anish sood", "progressive brothers").any { lower.contains(it) } -> indianEdmCluster
+
+            // Indian Indie / Pop (Prateek Kuhad, Anuv Jain, Jasleen Royal...)
+            listOf("prateek kuhad", "anuv jain", "anuv", "jasleen royal", "jasleen", "local train", "when chai", "taba chake", "sanam", "osho jain", "dream note", "twin strings", "aditya a").any { lower.contains(it) } -> indianIndieCluster
+
+            // Bollywood / Hindi Film (Arijit Singh, Atif Aslam, Mohit Chauhan...)
+            listOf("arijit", "atif", "mohit", "kk", "shreya", "jubin", "armaan", "vishal mishra", "darshan", "sonu nigam", "pritam", "sachin-jigar", "shankar mahadevan", "sunidhi", "javed ali", "akhil sachdeva", "amit trivedi", "neeti mohan").any { lower.contains(it) } -> bollywoodCluster
+
+            // Desi Hip Hop / Indian Rap (DIVINE, Seedhe Maut, KR$NA...)
+            listOf("divine", "seedhe maut", "seedhe", "kr\$na", "krsna", "mc stan", "stan", "raftaar", "badshah", "emiway", "ikka", "bella", "paradox", "fotty seven", "epr", "dino james", "raga", "karma", "young stunners", "talha anjum").any { lower.contains(it) } -> desiHipHopCluster
+
+            // Punjabi (AP Dhillon, Diljit Dosanjh, Karan Aujla...)
+            listOf("dhillon", "diljit", "karan aujla", "aujla", "sidhu moose", "moose", "shubh", "talwiinder", "gurinder gill", "amrit maan", "jassie gill", "harrdy sandhu", "prem dhillon", "prophec").any { lower.contains(it) } -> punjabiCluster
+
+            // South Indian
+            listOf("anirudh", "sid sriram", "yuvan", "harris jayaraj", "santhosh narayanan", "devi sri", "thaman", "sushin", "gv prakash", "hesham").any { lower.contains(it) } -> southIndianCluster
+
+            // K-Pop
+            listOf("bts", "blackpink", "stray kids", "newjeans", "twice", "seventeen", "le sserafim", "enhypen", "txt", "jung kook", "jimin", "aespa", "itzy", "ive").any { lower.contains(it) } -> kpopCluster
+
+            // Latin
+            listOf("bad bunny", "rauw", "j balvin", "maluma", "ozuna", "daddy yankee", "karol g", "rosalia", "feid", "myke towers").any { lower.contains(it) } -> latinCluster
+
+            // Western Hip-Hop / Rap
+            listOf("kendrick", "drake", "j. cole", "cole", "travis", "21 savage", "savage", "future", "metro", "gunna", "baby", "rocky", "carti", "uzi", "tyler", "cudi", "kanye", "don toliver", "central cee", "dave").any { lower.contains(it) } -> westernHipHopCluster
+
+            // Global R&B / Soul
+            listOf("sza", "frank ocean", "caesar", "summer walker", "jhené", "jhene", "faiyaz", "giveon", "h.e.r.", "steve lacy", "lacy", "kali uchis", "uchis", "kehlani", "bryson", "6lack", "partynextdoor", "snoh", "jorja").any { lower.contains(it) } -> globalRnbCluster
+
+            // Global Indie
+            listOf("arctic", "neighbourhood", "lana", "cigarettes", "hozier", "demarco", "phoebe", "clairo", "rex orange", "wallows", "girl in red", "1975").any { lower.contains(it) } -> globalIndieCluster
+
+            // Global EDM
+            listOf("garrix", "avicii", "calvin harris", "guetta", "chainsmokers", "alan walker", "marshmello", "kygo", "dj snake", "snake", "tiesto", "skrillex", "fred again", "zedd", "galantis", "alesso", "hardwell").any { lower.contains(it) } -> globalEdmCluster
+
+            // Global Rock
+            listOf("imagine dragons", "linkin", "coldplay", "twenty one", "green day", "foo fighters", "chili peppers", "radiohead", "muse", "killers", "onerepublic", "paramore").any { lower.contains(it) } -> globalRockCluster
+
+            // Global Pop
+            listOf("weeknd", "bruno", "dua lipa", "post malone", "styles", "laroi", "puth", "mendes", "olivia", "billie", "sabrina", "taylor", "ariana", "bieber", "sheeran").any { lower.contains(it) } -> globalPopCluster
+
+            else -> null
         }
+
+        // Also fetch live similar artists from metadata API
+        val liveSimilar = try {
+            innerTubeClient.getSimilarArtistNames(topArtistName)
+        } catch (_: Exception) {
+            emptyList()
+        }
+
+        val combinedPool = mutableListOf<String>()
+        if (matchedPool != null) {
+            combinedPool.addAll(matchedPool)
+        }
+        if (liveSimilar.isNotEmpty()) {
+            combinedPool.addAll(liveSimilar)
+        }
+        if (combinedPool.isEmpty()) {
+            // Default to Indian Indie / EDM or Global Pop based on origin check
+            combinedPool.addAll(if (lower.contains(" ") || lower.length > 5) indianEdmCluster else globalPopCluster)
+        }
+
+        // Clean, deduplicate and remove the source artist
+        val candidatePool = combinedPool.distinctBy { it.trim().lowercase() }
+            .filterNot { it.equals(topArtistName, ignoreCase = true) || lower.contains(it.lowercase()) }
+
+        return candidatePool.shuffled().take(6)
     }
 
     val customPlaylists: List<PlaylistCardItem> = listOf(

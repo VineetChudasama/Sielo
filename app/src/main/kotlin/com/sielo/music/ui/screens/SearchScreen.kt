@@ -76,13 +76,6 @@ import com.sielo.music.ui.theme.SoraFontFamily
 import com.sielo.music.ui.theme.UrbanistFontFamily
 import com.sielo.music.viewmodel.SearchViewModel
 
-data class GenreCard(
-    val title: String,
-    val query: String,
-    val imageUrl: String,
-    val gradientColors: List<Color>
-)
-
 @Composable
 fun SearchScreen(
     viewModel: SearchViewModel,
@@ -95,10 +88,25 @@ fun SearchScreen(
     val isSearching by viewModel.isSearching.collectAsState()
     val selectedArtist by viewModel.selectedArtist.collectAsState()
     val isArtistLoading by viewModel.isArtistLoading.collectAsState()
+    val selectedCategory by viewModel.selectedCategory.collectAsState()
+    val categoryTracks by viewModel.categoryTracks.collectAsState()
+    val isCategoryLoading by viewModel.isCategoryLoading.collectAsState()
     val recentSearches by viewModel.recentSearches.collectAsState()
     val previousPlayedSongs by viewModel.previousPlayedSongs.collectAsState()
 
     var isDedicatedSearchOpen by remember { mutableStateOf(false) }
+
+    // System Back Press Handler
+    BackHandler(enabled = selectedArtist != null || selectedCategory != null || isDedicatedSearchOpen) {
+        when {
+            selectedArtist != null -> viewModel.closeArtist()
+            selectedCategory != null -> viewModel.closeCategory()
+            isDedicatedSearchOpen -> {
+                isDedicatedSearchOpen = false
+                viewModel.clearSearch()
+            }
+        }
+    }
 
     // Render Artist Profile Screen if an artist is selected
     if (selectedArtist != null) {
@@ -113,58 +121,22 @@ fun SearchScreen(
         return
     }
 
-    val categories = listOf("All", "Songs", "Artists")
-
-    val genres = listOf(
-        GenreCard(
-            title = "Pop & Hits",
-            query = "Pop Hits 2026",
-            imageUrl = "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?q=80&w=600&auto=format&fit=crop",
-            gradientColors = listOf(Color(0xFF8338EC).copy(alpha = 0.55f), Color(0xFF0F172A).copy(alpha = 0.95f))
-        ),
-        GenreCard(
-            title = "Hip-Hop & R&B",
-            query = "Hip Hop R&B Hits",
-            imageUrl = "https://images.unsplash.com/photo-1509198397868-475647b2a1e5?q=80&w=600&auto=format&fit=crop",
-            gradientColors = listOf(Color(0xFFD4A373).copy(alpha = 0.55f), Color(0xFF1A120B).copy(alpha = 0.95f))
-        ),
-        GenreCard(
-            title = "Chill & Lo-Fi",
-            query = "Chill Lo-Fi Study Beats",
-            imageUrl = "https://images.unsplash.com/photo-1518609878373-06d740f60d8b?q=80&w=600&auto=format&fit=crop",
-            gradientColors = listOf(Color(0xFF2A9D8F).copy(alpha = 0.55f), Color(0xFF0D2522).copy(alpha = 0.95f))
-        ),
-        GenreCard(
-            title = "Indie & Alt",
-            query = "Indie Alternative Hits",
-            imageUrl = "https://images.unsplash.com/photo-1465847899084-d164df4dedc6?q=80&w=600&auto=format&fit=crop",
-            gradientColors = listOf(Color(0xFFE76F51).copy(alpha = 0.55f), Color(0xFF22110D).copy(alpha = 0.95f))
-        ),
-        GenreCard(
-            title = "Electronic & Dance",
-            query = "Electronic Dance EDM",
-            imageUrl = "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?q=80&w=600&auto=format&fit=crop",
-            gradientColors = listOf(Color(0xFF00B4D8).copy(alpha = 0.55f), Color(0xFF081B29).copy(alpha = 0.95f))
-        ),
-        GenreCard(
-            title = "Bollywood & Sufi",
-            query = "Arijit Singh Bollywood Hits",
-            imageUrl = "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?q=80&w=600&auto=format&fit=crop",
-            gradientColors = listOf(Color(0xFFE63946).copy(alpha = 0.55f), Color(0xFF1E0A0D).copy(alpha = 0.95f))
-        ),
-        GenreCard(
-            title = "Rock & Classic",
-            query = "Classic Modern Rock Hits",
-            imageUrl = "https://images.unsplash.com/photo-1498038432885-c6f3f1b912ee?q=80&w=600&auto=format&fit=crop",
-            gradientColors = listOf(Color(0xFF6C1D45).copy(alpha = 0.55f), Color(0xFF14070E).copy(alpha = 0.95f))
-        ),
-        GenreCard(
-            title = "Workout & Energy",
-            query = "Workout Energy Motivation Beats",
-            imageUrl = "https://images.unsplash.com/photo-1534438327276-14e5300c3a48?q=80&w=600&auto=format&fit=crop",
-            gradientColors = listOf(Color(0xFFF77F00).copy(alpha = 0.55f), Color(0xFF220C00).copy(alpha = 0.95f))
+    // Render Category Detail Screen if a category is selected
+    if (selectedCategory != null) {
+        CategoryDetailScreen(
+            category = selectedCategory!!,
+            tracks = categoryTracks,
+            isLoading = isCategoryLoading,
+            onBack = { viewModel.closeCategory() },
+            onPlayTrack = { track, q -> viewModel.playTrack(track, q) },
+            onFavorite = { viewModel.toggleFavorite(it) },
+            modifier = modifier
         )
-    )
+        return
+    }
+
+    val categories = listOf("All", "Songs", "Artists")
+    val genres = viewModel.categoriesList
 
     Box(
         modifier = modifier
@@ -665,8 +637,7 @@ fun SearchScreen(
                                                 .clip(RoundedCornerShape(16.dp))
                                                 .border(1.dp, BorderGlass, RoundedCornerShape(16.dp))
                                                 .clickable {
-                                                    isDedicatedSearchOpen = true
-                                                    viewModel.submitSearch(genre.query)
+                                                    viewModel.openCategory(genre)
                                                 }
                                         ) {
                                             // Thematic Image
@@ -683,7 +654,10 @@ fun SearchScreen(
                                                     .fillMaxSize()
                                                     .background(
                                                         Brush.linearGradient(
-                                                            colors = genre.gradientColors,
+                                                            colors = listOf(
+                                                                Color(genre.accentColor).copy(alpha = 0.55f),
+                                                                PaletteOxfordBlue.copy(alpha = 0.85f)
+                                                            ),
                                                             start = Offset(0f, 0f),
                                                             end = Offset(300f, 300f)
                                                         )
@@ -722,6 +696,177 @@ fun SearchScreen(
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun CategoryDetailScreen(
+    category: com.sielo.music.viewmodel.BrowseCategory,
+    tracks: List<SieloTrack>,
+    isLoading: Boolean,
+    onBack: () -> Unit,
+    onPlayTrack: (SieloTrack, List<SieloTrack>) -> Unit,
+    onFavorite: (SieloTrack) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(PaletteDarkNavy)
+    ) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 120.dp)
+        ) {
+            // Header Banner
+            item {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(240.dp)
+                ) {
+                    AsyncImage(
+                        model = category.imageUrl,
+                        contentDescription = category.title,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(
+                                        Color(category.accentColor).copy(alpha = 0.45f),
+                                        PaletteOxfordBlue.copy(alpha = 0.85f),
+                                        PaletteDarkNavy
+                                    )
+                                )
+                            )
+                    )
+
+                    IconButton(
+                        onClick = onBack,
+                        modifier = Modifier
+                            .padding(top = 20.dp, start = 16.dp)
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(PaletteDarkNavy.copy(alpha = 0.75f))
+                            .border(1.dp, BorderGlass, CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back",
+                            tint = PaletteCream
+                        )
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(20.dp)
+                    ) {
+                        Text(
+                            text = "CATEGORY • POPULAR TRACKS",
+                            color = PaletteSageGreen,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp
+                        )
+                        Text(
+                            text = category.title,
+                            color = PaletteCream,
+                            fontSize = 28.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = category.subtitle,
+                            color = TextSecondary,
+                            fontSize = 13.sp
+                        )
+                    }
+                }
+            }
+
+            // Play All Action Button
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(24.dp))
+                            .background(PaletteSand)
+                            .clickable {
+                                if (tracks.isNotEmpty()) {
+                                    onPlayTrack(tracks.first(), tracks)
+                                }
+                            }
+                            .padding(horizontal = 22.dp, vertical = 10.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PlayArrow,
+                                contentDescription = "Play All",
+                                tint = PaletteDarkNavy,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Text(
+                                text = "PLAY TOP SONGS",
+                                color = PaletteDarkNavy,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 0.5.sp
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Category Tracks List
+            if (isLoading) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(180.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(color = PaletteSand)
+                    }
+                }
+            } else if (tracks.isEmpty()) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(30.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "Loading popular songs for ${category.title}...",
+                            color = TextMuted,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+            } else {
+                items(tracks) { track ->
+                    SearchResultTrackRow(
+                        track = track,
+                        onPlay = { onPlayTrack(track, tracks) },
+                        onFavorite = { onFavorite(track) }
+                    )
                 }
             }
         }

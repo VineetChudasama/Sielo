@@ -34,6 +34,8 @@ import javax.inject.Singleton
 
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 @OptIn(UnstableApi::class)
 @Singleton
@@ -42,6 +44,7 @@ class PlayerManager @Inject constructor(
     private val innerTubeClient: InnerTubeClient,
     private val listeningHistoryDao: ListeningHistoryDao
 ) {
+    private val json = Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true }
     private val _playbackState = MutableStateFlow(PlaybackState())
     val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
 
@@ -53,7 +56,17 @@ class PlayerManager @Inject constructor(
     private var lastTrackingTimestamp: Long = 0L
     private var lastDbFlushTimestamp: Long = 0L
 
+    companion object {
+        private const val PREFS_NAME = "sielo_player_state"
+        private const val KEY_TRACK = "last_track"
+        private const val KEY_QUEUE = "last_queue"
+        private const val KEY_QUEUE_INDEX = "last_queue_index"
+        private const val KEY_POSITION_MS = "last_position_ms"
+        private const val KEY_DURATION_MS = "last_duration_ms"
+    }
+
     init {
+        restorePlaybackState()
         scope.launch {
             getController()
             withContext(Dispatchers.IO) {
@@ -62,6 +75,78 @@ class PlayerManager @Inject constructor(
                 } catch (_: Exception) {}
             }
         }
+    }
+
+    private fun restorePlaybackState() {
+        try {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val trackJson = prefs.getString(KEY_TRACK, null)
+            val queueJson = prefs.getString(KEY_QUEUE, null)
+            val queueIndex = prefs.getInt(KEY_QUEUE_INDEX, 0)
+            val positionMs = prefs.getLong(KEY_POSITION_MS, 0L)
+            val durationMs = prefs.getLong(KEY_DURATION_MS, 0L)
+
+            if (!trackJson.isNullOrBlank()) {
+                val track = json.decodeFromString<SieloTrack>(trackJson)
+                val queue = if (!queueJson.isNullOrBlank()) {
+                    try {
+                        json.decodeFromString<List<SieloTrack>>(queueJson)
+                    } catch (_: Exception) {
+                        listOf(track)
+                    }
+                } else {
+                    listOf(track)
+                }
+
+                _playbackState.update {
+                    it.copy(
+                        currentTrack = track,
+                        queue = queue,
+                        queueIndex = queueIndex.coerceIn(0, (queue.size - 1).coerceAtLeast(0)),
+                        currentPositionMs = positionMs,
+                        durationMs = if (durationMs > 0L) durationMs else (track.durationSeconds * 1000L),
+                        isPlaying = false,
+                        isBuffering = false
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("SieloAudio", "Error restoring playback state: ${e.message}", e)
+        }
+    }
+
+    private fun savePlaybackState(
+        track: SieloTrack?,
+        queue: List<SieloTrack>,
+        queueIndex: Int,
+        positionMs: Long,
+        durationMs: Long
+    ) {
+        try {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().apply {
+                if (track != null) {
+                    putString(KEY_TRACK, json.encodeToString(track))
+                    putString(KEY_QUEUE, json.encodeToString(queue))
+                    putInt(KEY_QUEUE_INDEX, queueIndex)
+                    putLong(KEY_POSITION_MS, positionMs)
+                    putLong(KEY_DURATION_MS, durationMs)
+                }
+                apply()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("SieloAudio", "Error saving playback state: ${e.message}", e)
+        }
+    }
+
+    private fun savePositionOnly(positionMs: Long, durationMs: Long) {
+        try {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit()
+                .putLong(KEY_POSITION_MS, positionMs)
+                .putLong(KEY_DURATION_MS, durationMs)
+                .apply()
+        } catch (_: Exception) {}
     }
 
     private suspend fun getController(): MediaController? = suspendCancellableCoroutine { cont ->
@@ -98,6 +183,9 @@ class PlayerManager @Inject constructor(
                 } else {
                     stopProgressTracking()
                     flushCurrentListeningDuration()
+                    mediaController?.let {
+                        savePositionOnly(it.currentPosition, it.duration.coerceAtLeast(0L))
+                    }
                 }
             }
 
@@ -125,7 +213,7 @@ class PlayerManager @Inject constructor(
         })
     }
 
-    fun playTrack(track: SieloTrack, queue: List<SieloTrack> = listOf(track)) {
+    fun playTrack(track: SieloTrack, queue: List<SieloTrack> = listOf(track), seekToMs: Long = 0L) {
         scope.launch {
             // Flush any previously tracked duration
             flushCurrentListeningDuration()
@@ -134,14 +222,21 @@ class PlayerManager @Inject constructor(
             lastTrackingTimestamp = System.currentTimeMillis()
             lastDbFlushTimestamp = System.currentTimeMillis()
 
+            val index = queue.indexOf(track).coerceAtLeast(0)
+            val expectedDurationMs = if (track.durationSeconds > 0) track.durationSeconds * 1000L else 0L
+
             _playbackState.update { 
                 it.copy(
                     currentTrack = track,
                     queue = queue,
-                    queueIndex = queue.indexOf(track).coerceAtLeast(0),
+                    queueIndex = index,
+                    currentPositionMs = seekToMs,
+                    durationMs = expectedDurationMs,
                     isBuffering = true
                 )
             }
+
+            savePlaybackState(track, queue, index, seekToMs, expectedDurationMs)
 
             // Immediately record start of history entry with 0ms played
             recordTrackStart(track)
@@ -170,6 +265,9 @@ class PlayerManager @Inject constructor(
                     if (controller != null) {
                         controller.run {
                             setMediaItem(mediaItem, true)
+                            if (seekToMs > 0L) {
+                                seekTo(seekToMs)
+                            }
                             prepare()
                             play()
                         }
@@ -233,8 +331,17 @@ class PlayerManager @Inject constructor(
     }
 
     fun togglePlayPause() {
-        mediaController?.let {
-            if (it.isPlaying) it.pause() else it.play()
+        val ctrl = mediaController
+        val currentTrack = _playbackState.value.currentTrack
+        if (ctrl != null && ctrl.currentMediaItem != null) {
+            if (ctrl.isPlaying) {
+                ctrl.pause()
+                savePositionOnly(ctrl.currentPosition, ctrl.duration.coerceAtLeast(0L))
+            } else {
+                ctrl.play()
+            }
+        } else if (currentTrack != null) {
+            playTrack(currentTrack, _playbackState.value.queue, seekToMs = _playbackState.value.currentPositionMs)
         }
     }
 
@@ -250,6 +357,7 @@ class PlayerManager @Inject constructor(
     fun seekTo(positionMs: Long) {
         mediaController?.seekTo(positionMs)
         _playbackState.update { it.copy(currentPositionMs = positionMs) }
+        savePositionOnly(positionMs, _playbackState.value.durationMs)
     }
 
     fun skipNext() {
@@ -284,10 +392,11 @@ class PlayerManager @Inject constructor(
                     currentTrackAccumulatedPlayedMs += delta
                     lastTrackingTimestamp = now
 
-                    // Periodic DB sync every 2 seconds
+                    // Periodic DB & Prefs sync every 2 seconds
                     if (now - lastDbFlushTimestamp >= 2000L) {
                         lastDbFlushTimestamp = now
                         flushCurrentListeningDuration()
+                        savePositionOnly(current, dur)
                     }
                 } else {
                     lastTrackingTimestamp = System.currentTimeMillis()

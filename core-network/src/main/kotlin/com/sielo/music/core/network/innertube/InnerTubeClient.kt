@@ -351,6 +351,39 @@ class InnerTubeClient @Inject constructor() {
         return YouTubeArtistImageResolver.resolveArtistImageUrl(artistName)
     }
 
+    suspend fun getSimilarArtistNames(artistName: String): List<String> = withContext(Dispatchers.IO) {
+        try {
+            val encodedQuery = URLEncoder.encode(artistName, "UTF-8")
+            val url = "https://www.jiosaavn.com/api.php?__call=search.getArtistResults&_format=json&_marker=0&cc=in&includeMetaTags=1&p=1&n=5&q=$encodedQuery"
+            val request = Request.Builder()
+                .url(url)
+                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
+                .build()
+
+            val response = client.newCall(request).execute()
+            val bodyString = response.body?.string() ?: return@withContext emptyList()
+            val root = json.parseToJsonElement(bodyString).jsonObject
+            val results = root["results"]?.jsonArray ?: return@withContext emptyList()
+            val firstArtistId = results.firstOrNull()?.jsonObject?.get("id")?.jsonPrimitive?.content ?: return@withContext emptyList()
+
+            val pageUrl = "https://www.jiosaavn.com/api.php?__call=artist.getArtistPageDetails&_format=json&_marker=0&artistId=$firstArtistId&n_song=5&n_album=5"
+            val pageReq = Request.Builder()
+                .url(pageUrl)
+                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
+                .build()
+
+            val pageResp = client.newCall(pageReq).execute()
+            val pageBody = pageResp.body?.string() ?: return@withContext emptyList()
+            val pageRoot = json.parseToJsonElement(pageBody).jsonObject
+            val similar = pageRoot["similarArtists"]?.jsonArray ?: return@withContext emptyList()
+            similar.mapNotNull {
+                it.jsonObject["name"]?.jsonPrimitive?.content?.let { n -> unescapeHtml(n) }
+            }.filter { it.isNotBlank() }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
     private fun searchArtistsSaavn(query: String): List<SieloArtist> {
         return try {
             val encodedQuery = URLEncoder.encode(query, "UTF-8")

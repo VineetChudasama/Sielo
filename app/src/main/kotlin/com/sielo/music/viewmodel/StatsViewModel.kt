@@ -19,9 +19,10 @@ import kotlinx.coroutines.flow.stateIn
 import javax.inject.Inject
 
 enum class StatsTimeframe(val label: String, val days: Int) {
-    WEEK_7D("7 Days", 7),
-    MONTH_30D("1 Month", 30),
-    ALL_TIME("All Time", 3650)
+    WEEK_1("1 Week", 7),
+    MONTH_1("1 Month", 30),
+    YEAR_1("1 Year", 365),
+    ALL_TIME("All Time", 36500)
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -31,7 +32,7 @@ class StatsViewModel @Inject constructor(
     private val playerManager: PlayerManager
 ) : ViewModel() {
 
-    private val _selectedTimeframe = MutableStateFlow(StatsTimeframe.MONTH_30D)
+    private val _selectedTimeframe = MutableStateFlow(StatsTimeframe.MONTH_1)
     val selectedTimeframe: StateFlow<StatsTimeframe> = _selectedTimeframe.asStateFlow()
 
     fun selectTimeframe(timeframe: StatsTimeframe) {
