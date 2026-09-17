@@ -124,6 +124,7 @@ fun HomeScreen(
     val selectedGenre by viewModel.selectedGenre.collectAsState()
     val genreTracks by viewModel.genreTracks.collectAsState()
     val isGenreLoading by viewModel.isGenreLoading.collectAsState()
+    val songsForYouTracks by viewModel.songsForYouTracks.collectAsState()
 
     val customPlaylists = viewModel.customPlaylists
     val trendingGenres = viewModel.trendingGenres
@@ -215,7 +216,7 @@ fun HomeScreen(
     )
 
     // Dynamic Top Artist & Similar Artists (synchronized with HomeViewModel refresh)
-    val topArtistName = topArtistStat.firstOrNull()?.artistName ?: "The Weeknd"
+    val topArtistName by viewModel.currentSimilarToArtist.collectAsState()
     val dynamicSimilarArtists by viewModel.dynamicSimilarArtists.collectAsState()
 
     // Fallback tracks pool with guaranteed distinct high-quality tracks and official square album art
@@ -325,9 +326,9 @@ fun HomeScreen(
                 CircularProgressIndicator(color = PaletteSand)
             }
         } else {
-            // Keep Listening list: exactly last 5 played unique songs (replaying keeps the other 4 tracks intact)
-            val keepListeningList = remember(recentPlayedSongs, activeTracks) {
-                val historyList = recentPlayedSongs.map { event ->
+            // Keep Listening list: strictly user-played tracks, never backfilled with random tracks
+            val keepListeningList = remember(recentPlayedSongs) {
+                recentPlayedSongs.map { event ->
                     SieloTrack(
                         id = event.songId,
                         title = event.songTitle,
@@ -336,19 +337,7 @@ fun HomeScreen(
                         durationText = "3:24",
                         thumbnailUrl = event.thumbnailUrl
                     )
-                }.distinctBy { it.id }
-
-                val result = historyList.toMutableList()
-                if (result.size < 5) {
-                    val pool = (fallbackTracks + activeTracks).distinctBy { it.id }
-                    for (t in pool) {
-                        if (result.none { it.id == t.id }) {
-                            result.add(t)
-                        }
-                        if (result.size >= 5) break
-                    }
-                }
-                result.take(5)
+                }.distinctBy { it.id }.take(5)
             }
 
             // Rediscover Your Favorites: strictly tracks played > 48h ago that haven't been played in the last 48 hours
@@ -416,34 +405,79 @@ fun HomeScreen(
                     Spacer(modifier = Modifier.height(10.dp))
                 }
 
-                // Section 1: Keep listening (Exact 5 Played Songs Carousel)
-                item {
-                    Text(
-                        text = "Keep listening",
-                        color = PaletteSand,
-                        fontFamily = SoraFontFamily,
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
-                    )
+                // Section 1: Keep listening (Shown strictly ONLY if user has listened to at least one song)
+                if (recentPlayedSongs.isNotEmpty() && keepListeningList.isNotEmpty()) {
+                    item {
+                        Text(
+                            text = "Keep listening",
+                            color = PaletteSand,
+                            fontFamily = SoraFontFamily,
+                            fontSize = 22.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
+                        )
 
-                    LazyRow(
-                        contentPadding = PaddingValues(horizontal = 20.dp),
-                        horizontalArrangement = Arrangement.spacedBy(14.dp),
-                        modifier = Modifier.padding(top = 8.dp)
-                    ) {
-                        items(keepListeningList) { track ->
-                            KeepListeningCard(
-                                track = track,
-                                onPlay = { viewModel.playTrack(track, keepListeningList) }
-                            )
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = 20.dp),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            modifier = Modifier.padding(top = 8.dp)
+                        ) {
+                            items(keepListeningList) { track ->
+                                KeepListeningCard(
+                                    track = track,
+                                    onPlay = { viewModel.playTrack(track, keepListeningList) }
+                                )
+                            }
                         }
-                    }
 
-                    Spacer(modifier = Modifier.height(28.dp))
+                        Spacer(modifier = Modifier.height(28.dp))
+                    }
                 }
 
-                // Section 2: Similar to [Most Listened Artist] (Dynamic Artist Name & Similar Artists Carousel)
+                // Section: "Songs for you" (Top songs from the user's selected artists)
+                if (songsForYouTracks.isNotEmpty()) {
+                    item {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 20.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = "CURATED FOR YOU",
+                                color = PaletteSageGreen,
+                                fontFamily = UrbanistFontFamily,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp
+                            )
+                            Spacer(modifier = Modifier.height(3.dp))
+                            Text(
+                                text = "Songs for you",
+                                color = PaletteSand,
+                                fontFamily = SoraFontFamily,
+                                fontSize = 22.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = 20.dp),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            modifier = Modifier.padding(top = 10.dp)
+                        ) {
+                            items(songsForYouTracks) { track ->
+                                KeepListeningCard(
+                                    track = track,
+                                    onPlay = { viewModel.playTrack(track, songsForYouTracks) }
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(28.dp))
+                    }
+                }
+
+                // Section 2: Similar to [Artist] (Dynamic Artist Name & Similar Artists Carousel)
                 item {
                     Column(
                         modifier = Modifier
@@ -705,12 +739,7 @@ fun HomeScreen(
                                 spotColor = if (isTriggerReached) PaletteSand else Color.Black
                             )
                             .clip(CircleShape)
-                            .background(PaletteOxfordBlue.copy(alpha = 0.96f))
-                            .border(
-                                width = 1.5.dp,
-                                color = if (isTriggerReached) PaletteSand else PaletteSand.copy(alpha = 0.55f),
-                                shape = CircleShape
-                            ),
+                            .background(PaletteOxfordBlue.copy(alpha = 0.96f)),
                         contentAlignment = Alignment.Center
                     ) {
                         if (isRefreshing) {

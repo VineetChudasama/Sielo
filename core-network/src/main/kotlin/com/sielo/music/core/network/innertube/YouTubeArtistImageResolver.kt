@@ -105,7 +105,7 @@ object YouTubeArtistImageResolver {
                     val sub = subRuns?.mapNotNull { it.jsonObject["text"]?.jsonPrimitive?.content }
                         ?.joinToString("")?.trim()?.lowercase() ?: ""
 
-                    if (sub.contains("artist") || title.contains(cleanTarget) || cleanTarget.contains(title)) {
+                    if ((sub.contains("artist") || sub.isBlank()) && isStrictArtistMatch(title, cleanTarget)) {
                         val thumbs = cardShelf["thumbnail"]?.jsonObject
                             ?.get("musicThumbnailRenderer")?.jsonObject
                             ?.get("thumbnail")?.jsonObject
@@ -139,7 +139,7 @@ object YouTubeArtistImageResolver {
                         val sub = subRuns?.mapNotNull { it.jsonObject["text"]?.jsonPrimitive?.content }
                             ?.joinToString("")?.trim()?.lowercase() ?: ""
 
-                        if (sub.contains("artist") && (name.contains(cleanTarget) || cleanTarget.contains(name))) {
+                        if (sub.contains("artist") && isStrictArtistMatch(name, cleanTarget)) {
                             val thumbs = responsiveItem["thumbnail"]?.jsonObject
                                 ?.get("musicThumbnailRenderer")?.jsonObject
                                 ?.get("thumbnail")?.jsonObject
@@ -161,5 +161,37 @@ object YouTubeArtistImageResolver {
     fun upgradeImageUrl(url: String): String {
         return url.replace(Regex("=w\\d+-h\\d+.*"), "=w600-h600-p-l90-rj")
             .replace(Regex("=s\\d+.*"), "=s600-c-k-c0x00ffffff-no-rj")
+    }
+
+    private fun isStrictArtistMatch(candidate: String, target: String): Boolean {
+        val c = candidate.trim().lowercase().replace(Regex("[^a-z0-9 ]"), "")
+        val t = target.trim().lowercase().replace(Regex("[^a-z0-9 ]"), "")
+        if (c == t) return true
+        val cWords = c.split(Regex("\\s+")).filter { it.isNotBlank() }
+        val tWords = t.split(Regex("\\s+")).filter { it.isNotBlank() }
+        if (cWords == tWords) return true
+        if (cWords.size == tWords.size && cWords.isNotEmpty()) {
+            return cWords.zip(tWords).all { (w1, w2) ->
+                w1 == w2 || (w1.length > 4 && w2.length > 4 && levenshteinDistance(w1, w2) <= 1)
+            }
+        }
+        return false
+    }
+
+    private fun levenshteinDistance(s1: String, s2: String): Int {
+        val dp = Array(s1.length + 1) { IntArray(s2.length + 1) }
+        for (i in 0..s1.length) dp[i][0] = i
+        for (j in 0..s2.length) dp[0][j] = j
+        for (i in 1..s1.length) {
+            for (j in 1..s2.length) {
+                val cost = if (s1[i - 1] == s2[j - 1]) 0 else 1
+                dp[i][j] = minOf(
+                    dp[i - 1][j] + 1,
+                    dp[i][j - 1] + 1,
+                    dp[i - 1][j - 1] + cost
+                )
+            }
+        }
+        return dp[s1.length][s2.length]
     }
 }

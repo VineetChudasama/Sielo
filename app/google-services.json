@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "61989343599",
+    "project_id": "sielo-94459",
+    "storage_bucket": "sielo-94459.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:61989343599:android:c073cb36d05bfe492d589a",
+        "android_client_info": {
+          "package_name": "com.sielo.music"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "61989343599-0gic12n2mqi83m8vqmijrd3038k6mrab.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.sielo.music",
+            "certificate_hash": "b210424ae918d4a4cbb9b4285206f9d0743f2035"
+          }
+        },
+        {
+          "client_id": "61989343599-737bujb5d1dvp3t3tr93ibfroc1v3ht0.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAb91mTVyDM3eCVqYwvyjcHy2sniPqy0AI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "61989343599-737bujb5d1dvp3t3tr93ibfroc1v3ht0.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

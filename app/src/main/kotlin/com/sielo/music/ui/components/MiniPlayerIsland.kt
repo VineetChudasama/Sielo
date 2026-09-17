@@ -199,25 +199,16 @@ fun MiniPlayerIsland(
                     .fillMaxWidth()
                     .padding(start = contentStartPadding, end = 16.dp, top = 8.dp, bottom = 8.dp)
             ) {
-                // 1. Song Information (Full Width Artist & Title with Marquee)
+                // 1. Song Information (Song Title on top, Artist below)
                 Column(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = track.artist,
-                        color = PaletteSageGreen, // #778D7A
-                        fontFamily = com.sielo.music.ui.theme.UrbanistFontFamily,
-                        fontSize = 11.5.sp,
-                        fontWeight = FontWeight.Normal,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
                         text = track.title,
                         color = PaletteCream, // #F4F1DE
                         fontFamily = com.sielo.music.ui.theme.UrbanistFontFamily,
-                        fontSize = 13.5.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
                         maxLines = 1,
                         modifier = Modifier
                             .fillMaxWidth()
@@ -227,6 +218,15 @@ fun MiniPlayerIsland(
                                 initialDelayMillis = 1200,
                                 repeatDelayMillis = 1200
                             )
+                    )
+                    Text(
+                        text = track.artist,
+                        color = PaletteSageGreen, // #778D7A
+                        fontFamily = com.sielo.music.ui.theme.UrbanistFontFamily,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 

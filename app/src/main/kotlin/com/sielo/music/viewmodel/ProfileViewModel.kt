@@ -16,8 +16,23 @@ import javax.inject.Inject
 @HiltViewModel
 class ProfileViewModel @Inject constructor(
     private val favoriteTrackDao: FavoriteTrackDao,
-    private val listeningHistoryDao: ListeningHistoryDao
+    private val listeningHistoryDao: ListeningHistoryDao,
+    val userManager: com.sielo.music.core.auth.UserManager
 ) : ViewModel() {
+
+    val currentUser = userManager.currentUser
+
+    fun signOut() {
+        userManager.signOut()
+    }
+
+    fun openAuthDialog() {
+        userManager.openAuthDialog()
+    }
+
+    fun openOnboarding() {
+        userManager.openOnboarding()
+    }
 
     val favoritesCount = favoriteTrackDao.getAllFavorites()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())

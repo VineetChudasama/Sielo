@@ -13,6 +13,7 @@ import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.MoreExecutors
 import com.sielo.music.core.audio.model.PlaybackState
 import com.sielo.music.core.audio.service.MusicPlaybackService
+import com.sielo.music.core.database.dao.FavoriteTrackDao
 import com.sielo.music.core.database.dao.ListeningHistoryDao
 import com.sielo.music.core.database.entity.ListeningEventEntity
 import com.sielo.music.core.network.innertube.InnerTubeClient
@@ -47,6 +48,7 @@ class PlayerManager @Inject constructor(
     @ApplicationContext private val context: Context,
     private val innerTubeClient: InnerTubeClient,
     private val listeningHistoryDao: ListeningHistoryDao,
+    private val favoriteTrackDao: FavoriteTrackDao,
     private val autoplayQueueEngine: AutoplayQueueEngine,
     private val autoplaySession: AutoplaySession
 ) {
@@ -65,6 +67,15 @@ class PlayerManager @Inject constructor(
     private val autoplayMutex = Mutex()
     private var originalQueue: List<SieloTrack>? = null
 
+    // Behavioral recommendation tracking on songs in real-time
+    private val penalizedSongIds = mutableSetOf<String>()
+    private val favoredSongIds = mutableSetOf<String>()
+    private val favoredArtists = mutableMapOf<String, Int>()
+    private val repeatPlayCount = mutableMapOf<String, Int>()
+
+    var onTrackPlayedTasteListener: ((artist: String, albumOrGenre: String?) -> Unit)? = null
+    var userTasteSeedsProvider: (() -> List<String>)? = null
+
     companion object {
         private const val PREFS_NAME = "sielo_player_state"
         private const val KEY_TRACK = "last_track"
@@ -76,6 +87,8 @@ class PlayerManager @Inject constructor(
     }
 
     init {
+        MusicPlaybackService.skipNextListener = { skipNext() }
+        MusicPlaybackService.skipPreviousListener = { skipPrevious() }
         restorePlaybackState()
         scope.launch {
             getController()
@@ -217,6 +230,10 @@ class PlayerManager @Inject constructor(
 
                 if (playbackState == Player.STATE_ENDED) {
                     flushCurrentListeningDuration()
+                    val cur = _playbackState.value.currentTrack
+                    if (cur != null) {
+                        recordTrackCompleted(cur)
+                    }
                     skipNext()
                 }
             }
@@ -360,13 +377,32 @@ class PlayerManager @Inject constructor(
                                 val currentTrack = state.currentTrack ?: seedTrack
                                 val currentTitle = currentTrack.title.trim()
                                 val currentArtist = currentTrack.artist.trim()
+                                val seedTitle = seedTrack.title.trim()
                                 val newTracks = batch.filter { bTrack ->
                                     bTrack.id !in existingIds &&
                                     bTrack.id != currentTrack.id &&
+                                    bTrack.id !in penalizedSongIds &&
                                     !(bTrack.title.trim().equals(currentTitle, ignoreCase = true) &&
-                                      bTrack.artist.trim().equals(currentArtist, ignoreCase = true))
+                                      bTrack.artist.trim().equals(currentArtist, ignoreCase = true)) &&
+                                    !isTitleSimilar(bTrack.title, currentTitle) &&
+                                    !isTitleSimilar(bTrack.title, seedTitle)
                                 }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
-                                val finalNewTracks = if (state.isShuffle) newTracks.shuffled() else newTracks
+
+                                // Boost tracks based on user behavior on songs (favored songs, repeated plays, favored artists, and onboarding/evolving taste choices)
+                                val userTasteSeeds = userTasteSeedsProvider?.invoke()?.map { it.trim().lowercase() } ?: emptyList()
+                                val affinitySorted = newTracks.sortedByDescending { bTrack ->
+                                    var boost = 0
+                                    if (bTrack.id in favoredSongIds) boost += 30
+                                    boost += repeatPlayCount.getOrDefault(bTrack.id, 0) * 20
+                                    val aKey = extractPrimaryArtist(bTrack.artist).lowercase()
+                                    boost += favoredArtists.getOrDefault(aKey, 0) * 5
+                                    if (userTasteSeeds.any { aKey.contains(it) || it.contains(aKey) }) {
+                                        boost += 40
+                                    }
+                                    boost
+                                }
+
+                                val finalNewTracks = if (state.isShuffle) affinitySorted.shuffled() else affinitySorted
                                 val updatedQueue = if (state.queue.isEmpty()) listOf(seedTrack) + finalNewTracks else state.queue + finalNewTracks
                                 newQueueSnapshot = updatedQueue
                                 if (autoPlayFirst && finalNewTracks.isNotEmpty()) {
@@ -404,6 +440,7 @@ class PlayerManager @Inject constructor(
         scope.launch(Dispatchers.IO) {
             try {
                 val primaryArtist = extractPrimaryArtist(track.artist)
+                onTrackPlayedTasteListener?.invoke(primaryArtist, track.album)
                 val expectedDurationMs = if (track.durationSeconds > 0) track.durationSeconds * 1000L else 0L
                 val eventId = listeningHistoryDao.insertEvent(
                     ListeningEventEntity(
@@ -423,9 +460,31 @@ class PlayerManager @Inject constructor(
         }
     }
 
+    private fun recordTrackCompleted(track: SieloTrack) {
+        favoredSongIds.add(track.id)
+        val primaryArtist = extractPrimaryArtist(track.artist)
+        if (primaryArtist.isNotBlank()) {
+            val currentFav = favoredArtists.getOrDefault(primaryArtist.lowercase(), 0)
+            favoredArtists[primaryArtist.lowercase()] = currentFav + 1
+        }
+        val count = repeatPlayCount.getOrDefault(track.id, 0)
+        repeatPlayCount[track.id] = count + 1
+    }
+
     private fun flushCurrentListeningDuration() {
         val eventId = currentEventId ?: return
         val durationMs = currentTrackAccumulatedPlayedMs
+        if (durationMs >= 35_000L) {
+            val cur = _playbackState.value.currentTrack
+            if (cur != null) {
+                favoredSongIds.add(cur.id)
+                val primaryArtist = extractPrimaryArtist(cur.artist)
+                if (primaryArtist.isNotBlank()) {
+                    val currentFav = favoredArtists.getOrDefault(primaryArtist.lowercase(), 0)
+                    favoredArtists[primaryArtist.lowercase()] = currentFav + 1
+                }
+            }
+        }
         if (durationMs > 0L) {
             scope.launch(Dispatchers.IO) {
                 try {
@@ -469,25 +528,56 @@ class PlayerManager @Inject constructor(
 
     fun skipNext() {
         val currentState = _playbackState.value
-        var nextIndex = currentState.queueIndex + 1
         val current = currentState.currentTrack
-        while (nextIndex in currentState.queue.indices && current != null) {
-            val candidate = currentState.queue[nextIndex]
-            val isSame = candidate.id == current.id ||
-                (candidate.title.trim().equals(current.title.trim(), ignoreCase = true) &&
-                 candidate.artist.trim().equals(current.artist.trim(), ignoreCase = true))
+        val playedMs = currentTrackAccumulatedPlayedMs
+
+        // Behavioral analysis on the song: Did user quickly skip this song?
+        if (current != null && playedMs < 25_000L) {
+            // Track skipped in less than 25 seconds -> penalize this specific song only (never the artist)
+            penalizedSongIds.add(current.id)
+            // Real-time dynamic queue adaptation: prune only this song from upcoming queue, preserving other songs by the artist
+            pruneUpcomingQueue()
+        }
+
+        val updatedState = _playbackState.value
+        var nextIndex = updatedState.queueIndex + 1
+        val curTrack = updatedState.currentTrack
+        while (nextIndex in updatedState.queue.indices && curTrack != null) {
+            val candidate = updatedState.queue[nextIndex]
+            val isSame = candidate.id == curTrack.id ||
+                (candidate.title.trim().equals(curTrack.title.trim(), ignoreCase = true) &&
+                 candidate.artist.trim().equals(curTrack.artist.trim(), ignoreCase = true)) ||
+                candidate.id in penalizedSongIds
             if (isSame) {
                 nextIndex++
             } else {
                 break
             }
         }
-        if (nextIndex in currentState.queue.indices) {
-            playTrack(currentState.queue[nextIndex], currentState.queue)
+        if (nextIndex in updatedState.queue.indices) {
+            playTrack(updatedState.queue[nextIndex], updatedState.queue)
         } else {
-            if (current != null) {
-                triggerAutoplayGeneration(current, isReseed = false, autoPlayFirst = true)
+            if (curTrack != null) {
+                triggerAutoplayGeneration(curTrack, isReseed = false, autoPlayFirst = true)
             }
+        }
+    }
+
+    private fun pruneUpcomingQueue() {
+        _playbackState.update { state ->
+            val currentIndex = state.queueIndex
+            if (currentIndex !in state.queue.indices) return@update state
+
+            val pastAndCurrent = state.queue.take(currentIndex + 1)
+            val upcoming = state.queue.drop(currentIndex + 1)
+
+            // Prune only the penalized song itself, preserving other songs by the same artist
+            val filteredUpcoming = upcoming.filterNot { candidate ->
+                candidate.id in penalizedSongIds
+            }
+
+            val newQueue = pastAndCurrent + filteredUpcoming
+            state.copy(queue = newQueue)
         }
     }
 
@@ -515,7 +605,8 @@ class PlayerManager @Inject constructor(
                     (currentTrack == null || bTrack.id != currentTrack.id) &&
                     !(currentTitle != null && currentArtist != null &&
                       bTrack.title.trim().equals(currentTitle, ignoreCase = true) &&
-                      bTrack.artist.trim().equals(currentArtist, ignoreCase = true))
+                      bTrack.artist.trim().equals(currentArtist, ignoreCase = true)) &&
+                    (currentTitle == null || !isTitleSimilar(bTrack.title, currentTitle))
                 }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
                 if (newTracks.isEmpty()) return@launch
                 val updatedQueue = currentState.queue + newTracks
@@ -533,6 +624,72 @@ class PlayerManager @Inject constructor(
 
     fun appendToQueue(track: SieloTrack) {
         appendToQueue(listOf(track))
+    }
+
+    fun removeTrackFromQueue(track: SieloTrack) {
+        scope.launch {
+            val currentState = _playbackState.value
+            val currentQueue = currentState.queue
+            val currentIdx = currentState.queueIndex
+
+            // Prioritize finding in upcoming tracks first, else anywhere except currentTrack
+            val removeIdx = currentQueue.indices.firstOrNull { it > currentIdx && currentQueue[it].id == track.id }
+                ?: currentQueue.indices.firstOrNull { it != currentIdx && currentQueue[it].id == track.id }
+                ?: return@launch
+
+            val newQueue = currentQueue.toMutableList().apply { removeAt(removeIdx) }
+            val newIndex = if (removeIdx < currentIdx) (currentIdx - 1).coerceAtLeast(0) else currentIdx
+            _playbackState.update { it.copy(queue = newQueue, queueIndex = newIndex) }
+            savePlaybackState(
+                currentState.currentTrack,
+                newQueue,
+                newIndex,
+                currentState.currentPositionMs,
+                currentState.durationMs
+            )
+        }
+    }
+
+    fun moveUpcomingTrack(fromUpcomingIndex: Int, toUpcomingIndex: Int) {
+        scope.launch {
+            val currentState = _playbackState.value
+            val currentQueue = currentState.queue.toMutableList()
+            val currentIdx = currentState.queueIndex
+            val fromQueueIdx = currentIdx + 1 + fromUpcomingIndex
+            val toQueueIdx = currentIdx + 1 + toUpcomingIndex
+
+            if (fromQueueIdx in (currentIdx + 1)..currentQueue.lastIndex &&
+                toQueueIdx in (currentIdx + 1)..currentQueue.lastIndex &&
+                fromQueueIdx != toQueueIdx
+            ) {
+                val movedItem = currentQueue.removeAt(fromQueueIdx)
+                currentQueue.add(toQueueIdx, movedItem)
+                _playbackState.update { it.copy(queue = currentQueue) }
+                savePlaybackState(
+                    currentState.currentTrack,
+                    currentQueue,
+                    currentState.queueIndex,
+                    currentState.currentPositionMs,
+                    currentState.durationMs
+                )
+            }
+        }
+    }
+
+    private fun isTitleSimilar(cand: String, base: String): Boolean {
+        val cClean = cand.lowercase()
+            .replace(Regex("""[\(\[\{].*?[\)\]\}]"""), "")
+            .replace(Regex("""[^\w\s]"""), " ")
+            .trim()
+        val bClean = base.lowercase()
+            .replace(Regex("""[\(\[\{].*?[\)\]\}]"""), "")
+            .replace(Regex("""[^\w\s]"""), " ")
+            .trim()
+        if (cClean.isBlank() || bClean.isBlank()) return false
+        if (cClean == bClean) return true
+        if (bClean.length >= 3 && cClean.contains(bClean)) return true
+        if (cClean.length >= 3 && bClean.contains(cClean)) return true
+        return false
     }
 
     fun triggerAutoplayIfLow(seedTrack: SieloTrack? = _playbackState.value.currentTrack) {
@@ -630,5 +787,25 @@ class PlayerManager @Inject constructor(
 
     private fun stopProgressTracking() {
         progressTrackerJob?.cancel()
+    }
+
+    fun resetPlayer() {
+        stopProgressTracking()
+        try {
+            mediaController?.stop()
+            mediaController?.clearMediaItems()
+        } catch (_: Exception) {}
+        _playbackState.value = PlaybackState()
+        penalizedSongIds.clear()
+        favoredSongIds.clear()
+        favoredArtists.clear()
+        repeatPlayCount.clear()
+        originalQueue = null
+        currentEventId = null
+        currentTrackAccumulatedPlayedMs = 0L
+        try {
+            val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            prefs.edit().clear().apply()
+        } catch (_: Exception) {}
     }
 }

@@ -37,6 +37,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sielo.music.BuildConfig
@@ -44,6 +45,7 @@ import com.sielo.music.ui.theme.AccentCoral
 import com.sielo.music.ui.theme.BorderGlass
 import com.sielo.music.ui.theme.BorderSubtle
 import com.sielo.music.ui.theme.ObsidianBlack
+import com.sielo.music.ui.theme.PaletteSand
 import com.sielo.music.ui.theme.SurfaceDark
 import com.sielo.music.ui.theme.SurfaceElevated
 import com.sielo.music.ui.theme.TextMuted
@@ -60,6 +62,7 @@ fun ProfileScreen(
     val equalizerEnabled by viewModel.equalizerEnabled.collectAsState()
     val gaplessPlayback by viewModel.gaplessPlayback.collectAsState()
     val cacheSize by viewModel.cacheSize.collectAsState()
+    val userProfile by viewModel.currentUser.collectAsState()
 
     Box(
         modifier = modifier
@@ -88,6 +91,7 @@ fun ProfileScreen(
             ) {
                 // User Profile Identity Card
                 item {
+                    val profile = userProfile
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -97,65 +101,141 @@ fun ProfileScreen(
                             .border(1.dp, BorderGlass, RoundedCornerShape(20.dp))
                             .padding(18.dp)
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(60.dp)
-                                    .clip(CircleShape)
-                                    .background(SurfaceElevated)
-                                    .border(1.dp, BorderSubtle, CircleShape),
-                                contentAlignment = Alignment.Center
+                        Column {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Person,
-                                    contentDescription = "User Avatar",
-                                    tint = AccentCoral,
-                                    modifier = Modifier.size(32.dp)
-                                )
-                            }
-
-                            Spacer(modifier = Modifier.width(16.dp))
-
-                            Column {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                Box(
+                                    modifier = Modifier
+                                        .size(60.dp)
+                                        .clip(CircleShape)
+                                        .background(SurfaceElevated)
+                                        .border(1.dp, BorderSubtle, CircleShape),
+                                    contentAlignment = Alignment.Center
                                 ) {
-                                    Text(
-                                        text = "Vineet",
-                                        color = TextPrimary,
-                                        fontSize = 20.sp,
-                                        fontWeight = FontWeight.Bold
+                                    Icon(
+                                        imageVector = Icons.Default.Person,
+                                        contentDescription = "User Avatar",
+                                        tint = AccentCoral,
+                                        modifier = Modifier.size(32.dp)
                                     )
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(AccentCoral.copy(alpha = 0.15f))
-                                            .border(1.dp, AccentCoral.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
-                                            .padding(horizontal = 7.dp, vertical = 2.dp)
+                                }
+
+                                Spacer(modifier = Modifier.width(16.dp))
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
                                         Text(
-                                            text = "v${BuildConfig.VERSION_NAME}",
+                                            text = profile?.name ?: "Guest Listener",
+                                            color = TextPrimary,
+                                            fontSize = 20.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(AccentCoral.copy(alpha = 0.15f))
+                                                .border(1.dp, AccentCoral.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                                                .padding(horizontal = 7.dp, vertical = 2.dp)
+                                        ) {
+                                            Text(
+                                                text = "v${BuildConfig.VERSION_NAME}",
+                                                color = AccentCoral,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    }
+
+                                    Text(
+                                        text = if (profile != null) "${if (profile.provider == com.sielo.music.core.auth.model.AuthProvider.GOOGLE) "Google Account" else "Sielo Account"} • ${profile.email}" else "Sign in to save taste & recommendations",
+                                        color = AccentCoral,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+
+                                    Spacer(modifier = Modifier.height(2.dp))
+
+                                    Text(
+                                        text = if (profile != null && profile.favoriteArtists.isNotEmpty()) {
+                                            "${profile.favoriteArtists.size} favorite artists • ${profile.favoriteGenres.size} vibes"
+                                        } else {
+                                            "${favorites.size} saved favorites in vault"
+                                        },
+                                        color = TextSecondary,
+                                        fontSize = 12.sp
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(14.dp))
+
+                            // Account Action Buttons
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                if (profile == null) {
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(AccentCoral)
+                                            .clickable { viewModel.openAuthDialog() }
+                                            .padding(vertical = 10.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "SIGN IN / REGISTER",
+                                            color = ObsidianBlack,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(SurfaceElevated)
+                                            .border(1.dp, BorderSubtle, RoundedCornerShape(12.dp))
+                                            .clickable { viewModel.openOnboarding() }
+                                            .padding(vertical = 10.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "EDIT TASTE (${profile.favoriteArtists.size})",
+                                            color = PaletteSand,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(SurfaceElevated)
+                                            .border(1.dp, BorderSubtle, RoundedCornerShape(12.dp))
+                                            .clickable { viewModel.signOut() }
+                                            .padding(vertical = 10.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "SWITCH / SIGN OUT",
                                             color = AccentCoral,
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp
                                         )
                                     }
                                 }
-                                Text(
-                                    text = "Audiophile Edition",
-                                    color = AccentCoral,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = "${favorites.size} saved favorites in vault",
-                                    color = TextSecondary,
-                                    fontSize = 12.sp
-                                )
                             }
                         }
                     }

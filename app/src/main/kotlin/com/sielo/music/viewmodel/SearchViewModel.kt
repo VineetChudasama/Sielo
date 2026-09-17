@@ -12,6 +12,7 @@ import com.sielo.music.core.database.entity.ListeningEventEntity
 import com.sielo.music.core.database.entity.SearchHistoryEntity
 import com.sielo.music.core.database.entity.SearchPlayHistoryEntity
 import com.sielo.music.core.network.innertube.InnerTubeClient
+import com.sielo.music.core.network.innertube.TrackMatchValidator
 import com.sielo.music.core.network.models.ArtistDetails
 import com.sielo.music.core.network.models.SieloArtist
 import com.sielo.music.core.network.models.SieloTrack
@@ -88,6 +89,29 @@ class SearchViewModel @Inject constructor(
     val favorites = favoriteTrackDao.getAllFavorites()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    init {
+        // Automatically prune prefix-redundant keystrokes from previous app launches
+        viewModelScope.launch {
+            try {
+                val allQueries = searchHistoryDao.getAllSearchQueries()
+                val redundant = mutableListOf<String>()
+                for (item in allQueries) {
+                    val q = item.query.trim().lowercase()
+                    val hasLonger = allQueries.any { other ->
+                        val otherQ = other.query.trim().lowercase()
+                        otherQ != q && otherQ.startsWith(q)
+                    }
+                    if (hasLonger) {
+                        redundant.add(item.query)
+                    }
+                }
+                if (redundant.isNotEmpty()) {
+                    searchHistoryDao.deleteSearchQueries(redundant)
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
     private var searchJob: Job? = null
 
     fun onSearchQueryChanged(query: String) {
@@ -101,7 +125,7 @@ class SearchViewModel @Inject constructor(
         }
 
         searchJob = viewModelScope.launch {
-            // Ultra-responsive debounce for instant single-alphabet feedback
+            // Ultra-responsive debounce for typing feedback
             delay(120)
             executeSearch(query, _filterCategory.value)
         }
@@ -120,8 +144,19 @@ class SearchViewModel @Inject constructor(
 
     fun saveSearchQuery(query: String) {
         val trimmed = query.trim()
-        if (trimmed.isNotBlank() && trimmed.length >= 1) {
+        if (trimmed.length >= 2) {
             viewModelScope.launch {
+                try {
+                    // Remove any existing sub-queries that are prefixes of this query to keep history clean
+                    val all = searchHistoryDao.getAllSearchQueries()
+                    val toRemove = all.filter {
+                        val existing = it.query.trim().lowercase()
+                        (trimmed.lowercase().startsWith(existing) || existing.startsWith(trimmed.lowercase())) && existing != trimmed.lowercase()
+                    }.map { it.query }
+                    if (toRemove.isNotEmpty()) {
+                        searchHistoryDao.deleteSearchQueries(toRemove)
+                    }
+                } catch (_: Exception) {}
                 searchHistoryDao.insertSearchQuery(SearchHistoryEntity(query = trimmed, timestampMs = System.currentTimeMillis()))
             }
         }
@@ -157,11 +192,14 @@ class SearchViewModel @Inject constructor(
         searchJob?.cancel()
     }
 
+    private fun normalizeSearchQuery(raw: String): String {
+        return raw.trim()
+            .replace(Regex("(?i)\\bhe\\b"), "hi")
+    }
+
     private fun executeSearch(query: String, category: String) {
         val trimmed = query.trim()
-        if (trimmed.length >= 2) {
-            saveSearchQuery(trimmed)
-        }
+        val normalized = normalizeSearchQuery(trimmed)
         viewModelScope.launch {
             _isSearching.value = true
             when (category) {
@@ -171,15 +209,19 @@ class SearchViewModel @Inject constructor(
                     _searchResults.value = emptyList()
                 }
                 "Songs" -> {
-                    val tracks = innerTubeClient.search(trimmed)
-                    val deduplicated = tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+                    val primaryTracks = innerTubeClient.search(trimmed)
+                    val additionalTracks = if (normalized != trimmed) innerTubeClient.search(normalized) else emptyList()
+                    val allTracks = (primaryTracks + additionalTracks)
+                    val deduplicated = TrackMatchValidator.deduplicateTracks(allTracks).distinctBy { it.id }
                     _searchResults.value = rankTracks(deduplicated, trimmed)
                     _artistResults.value = emptyList()
                 }
                 else -> { // "All" or other
-                    val tracks = innerTubeClient.search(trimmed)
+                    val primaryTracks = innerTubeClient.search(trimmed)
+                    val additionalTracks = if (normalized != trimmed) innerTubeClient.search(normalized) else emptyList()
+                    val allTracks = (primaryTracks + additionalTracks)
                     val artists = innerTubeClient.searchArtists(trimmed)
-                    val deduplicated = tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+                    val deduplicated = TrackMatchValidator.deduplicateTracks(allTracks).distinctBy { it.id }
                     _searchResults.value = rankTracks(deduplicated, trimmed)
                     _artistResults.value = rankArtists(artists, trimmed)
                 }
@@ -193,7 +235,7 @@ class SearchViewModel @Inject constructor(
         if (q.isBlank()) return tracks
         val words = q.split(Regex("\\s+")).filter { it.isNotBlank() }
 
-        return tracks.sortedByDescending { track ->
+        val scoredTracks = tracks.map { track ->
             val title = track.title.trim().lowercase()
             val artist = track.artist.trim().lowercase()
             var score = 0
@@ -212,35 +254,72 @@ class SearchViewModel @Inject constructor(
             else if (artist.contains(q)) score += 150
 
             // Multi-word / token matching
+            var matchingWords = 0
             for (w in words) {
-                if (title.startsWith(w)) score += 60
-                else if (title.contains(w)) score += 30
-                if (artist.startsWith(w)) score += 40
-                else if (artist.contains(w)) score += 20
+                if (title.startsWith(w)) {
+                    score += 60
+                    matchingWords++
+                } else if (title.contains(w)) {
+                    score += 30
+                    matchingWords++
+                }
+                if (artist.startsWith(w)) {
+                    score += 40
+                    matchingWords++
+                } else if (artist.contains(w)) {
+                    score += 20
+                    matchingWords++
+                }
             }
-            score
+            track to Pair(score, matchingWords)
         }
+
+        // Filter out completely irrelevant / low scoring tracks (e.g. "Yo Ho Ho" matching single word "ho" when query was "Tum he ho")
+        val filtered = if (words.size >= 2) {
+            scoredTracks.filter { (_, meta) ->
+                val (score, matchingWords) = meta
+                score >= 80 || matchingWords >= (words.size / 2).coerceAtLeast(1)
+            }
+        } else {
+            scoredTracks.filter { (_, meta) -> meta.first > 0 }
+        }
+
+        val finalSelection = if (filtered.isNotEmpty()) filtered else scoredTracks
+        return finalSelection.sortedByDescending { it.second.first }.map { it.first }
     }
 
     private fun rankArtists(artists: List<SieloArtist>, query: String): List<SieloArtist> {
         val q = query.trim().lowercase()
-        if (q.isBlank()) return artists
-        val words = q.split(Regex("\\s+")).filter { it.isNotBlank() }
+        val sorted = if (q.isBlank()) artists else {
+            val words = q.split(Regex("\\s+")).filter { it.isNotBlank() }
+            artists.sortedByDescending { artist ->
+                val name = artist.name.trim().lowercase()
+                var score = 0
 
-        return artists.sortedByDescending { artist ->
-            val name = artist.name.trim().lowercase()
-            var score = 0
+                if (name == q) score += 1000
+                else if (name.startsWith(q)) score += 700
+                else if (name.contains(" $q")) score += 500
+                else if (name.contains(q)) score += 300
 
-            if (name == q) score += 1000
-            else if (name.startsWith(q)) score += 700
-            else if (name.contains(" $q")) score += 500
-            else if (name.contains(q)) score += 300
-
-            for (w in words) {
-                if (name.startsWith(w)) score += 80
-                else if (name.contains(w)) score += 40
+                for (w in words) {
+                    if (name.startsWith(w)) score += 80
+                    else if (name.contains(w)) score += 40
+                }
+                score
             }
-            score
+        }
+
+        // Ensure no two artists share the same profile picture
+        val seenImages = mutableSetOf<String>()
+        return sorted.map { artist ->
+            if (!artist.imageUrl.isNullOrBlank() && !seenImages.contains(artist.imageUrl)) {
+                seenImages.add(artist.imageUrl!!)
+                artist
+            } else if (!artist.imageUrl.isNullOrBlank()) {
+                artist.copy(imageUrl = null)
+            } else {
+                artist
+            }
         }
     }
 
@@ -302,7 +381,7 @@ class SearchViewModel @Inject constructor(
             val query = category.seedQueries.shuffled().firstOrNull() ?: category.seedQueries.first()
             val tracks = innerTubeClient.search(query)
             val clean = if (tracks.isNotEmpty()) {
-                tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+                TrackMatchValidator.deduplicateTracks(tracks).distinctBy { it.id }
             } else {
                 defaultCategoryTracks(category.id).shuffled()
             }
@@ -328,43 +407,43 @@ class SearchViewModel @Inject constructor(
             SieloTrack("9q41tYDn", "Die For You", "The Weeknd", durationText = "4:20", thumbnailUrl = "https://c.saavncdn.com/133/Die-For-You-English-2023-20230227063244-500x500.jpg")
         )
         "hiphop" -> listOf(
-            SieloTrack("tvxo4Jm0", "HUMBLE.", "Kendrick Lamar", durationText = "2:57", thumbnailUrl = "https://c.saavncdn.com/396/The-Highlights-English-2021-20240207045714-500x500.jpg"),
-            SieloTrack("EWoDxjbu", "God's Plan", "Drake", durationText = "3:18", thumbnailUrl = "https://c.saavncdn.com/343/New-Rules-English-2017-20250327204128-500x500.jpg"),
-            SieloTrack("wLxoOff5", "SICKO MODE", "Travis Scott", durationText = "5:12", thumbnailUrl = "https://c.saavncdn.com/049/Uptown-Funk-English-2014-500x500.jpg"),
-            SieloTrack("rockstar", "Rockstar", "Post Malone ft. 21 Savage", durationText = "3:38", thumbnailUrl = "https://c.saavncdn.com/077/After-Hours-English-2020-20260804045014-500x500.jpg"),
-            SieloTrack("goosebumps", "Goosebumps", "Travis Scott", durationText = "4:03", thumbnailUrl = "https://c.saavncdn.com/396/The-Highlights-English-2021-20240207045714-500x500.jpg")
+            SieloTrack("tvTRZJ-4EyI", "HUMBLE.", "Kendrick Lamar", durationText = "2:57", thumbnailUrl = "https://i.ytimg.com/vi/tvTRZJ-4EyI/hqdefault.jpg"),
+            SieloTrack("xpVfcZ0ZcFM", "God's Plan", "Drake", durationText = "3:18", thumbnailUrl = "https://i.ytimg.com/vi/xpVfcZ0ZcFM/hqdefault.jpg"),
+            SieloTrack("6ONRf7h3Mdk", "SICKO MODE", "Travis Scott", durationText = "5:12", thumbnailUrl = "https://i.ytimg.com/vi/6ONRf7h3Mdk/hqdefault.jpg"),
+            SieloTrack("UceaB4D0jpo", "Rockstar", "Post Malone ft. 21 Savage", durationText = "3:38", thumbnailUrl = "https://i.ytimg.com/vi/UceaB4D0jpo/hqdefault.jpg"),
+            SieloTrack("Dst9gZkq1a8", "Goosebumps", "Travis Scott", durationText = "4:03", thumbnailUrl = "https://i.ytimg.com/vi/Dst9gZkq1a8/hqdefault.jpg")
         )
         "bollywood" -> listOf(
-            SieloTrack("kesariya", "Kesariya", "Arijit Singh", durationText = "4:28", thumbnailUrl = "https://c.saavncdn.com/191/Kesariya-From-Brahmastra-Hindi-2022-20220717092820-500x500.jpg"),
-            SieloTrack("tumhiho", "Tum Hi Ho", "Arijit Singh", durationText = "4:22", thumbnailUrl = "https://c.saavncdn.com/459/Aashiqui-2-Hindi-2013-500x500.jpg"),
-            SieloTrack("channa", "Channa Mereya", "Arijit Singh", durationText = "4:49", thumbnailUrl = "https://c.saavncdn.com/604/Ae-Dil-Hai-Mushkil-Hindi-2016-500x500.jpg"),
-            SieloTrack("raataan", "Raataan Lambiyan", "Jubin Nautiyal & Asees Kaur", durationText = "3:50", thumbnailUrl = "https://c.saavncdn.com/643/Shershaah-Original-Motion-Picture-Soundtrack-Hindi-2021-20210815181610-500x500.jpg"),
-            SieloTrack("apnabana", "Apna Bana Le", "Arijit Singh & Sachin-Jigar", durationText = "4:21", thumbnailUrl = "https://c.saavncdn.com/803/Bhediya-Hindi-2022-20221124151008-500x500.jpg")
+            SieloTrack("BddP6PYo2gs", "Kesariya", "Arijit Singh", durationText = "4:28", thumbnailUrl = "https://i.ytimg.com/vi/BddP6PYo2gs/hqdefault.jpg"),
+            SieloTrack("Umqb9KENgmk", "Tum Hi Ho", "Arijit Singh", durationText = "4:22", thumbnailUrl = "https://i.ytimg.com/vi/Umqb9KENgmk/hqdefault.jpg"),
+            SieloTrack("bzSThTQv67A", "Channa Mereya", "Arijit Singh", durationText = "4:49", thumbnailUrl = "https://i.ytimg.com/vi/bzSThTQv67A/hqdefault.jpg"),
+            SieloTrack("gvyUuxdRdR4", "Raataan Lambiyan", "Jubin Nautiyal & Asees Kaur", durationText = "3:50", thumbnailUrl = "https://i.ytimg.com/vi/gvyUuxdRdR4/hqdefault.jpg"),
+            SieloTrack("ElZfdU54Cp8", "Apna Bana Le", "Arijit Singh & Sachin-Jigar", durationText = "4:21", thumbnailUrl = "https://i.ytimg.com/vi/ElZfdU54Cp8/hqdefault.jpg")
         )
         "lofi" -> listOf(
-            SieloTrack("lofi1", "Midnight Study Beats", "Lofi Fruits Music", durationText = "2:45", thumbnailUrl = "https://images.unsplash.com/photo-1518609878373-06d740f60d8b?w=600&auto=format&fit=crop&q=80"),
-            SieloTrack("lofi2", "Coffee Shop Rain", "Chillhop Music", durationText = "2:30", thumbnailUrl = "https://images.unsplash.com/photo-1459749411175-04bf5292ceea?w=600&auto=format&fit=crop&q=80"),
-            SieloTrack("lofi3", "Tokyo Night Drive", "Kudasaibeats", durationText = "3:10", thumbnailUrl = "https://images.unsplash.com/photo-1508700115892-45ecd05ae2ad?w=600&auto=format&fit=crop&q=80")
+            SieloTrack("5qap5aO4i9A", "Lofi Hip Hop Radio - Beats to Relax/Study to", "Lofi Girl", durationText = "3:00", thumbnailUrl = "https://i.ytimg.com/vi/5qap5aO4i9A/hqdefault.jpg"),
+            SieloTrack("DWcJFNfaw9c", "Coffee Shop Rain", "Chillhop Music", durationText = "2:30", thumbnailUrl = "https://i.ytimg.com/vi/DWcJFNfaw9c/hqdefault.jpg"),
+            SieloTrack("MCkTebktHVc", "Tokyo Night Drive", "Kudasaibeats", durationText = "3:10", thumbnailUrl = "https://i.ytimg.com/vi/MCkTebktHVc/hqdefault.jpg")
         )
         "indie" -> listOf(
-            SieloTrack("indie1", "Do I Wanna Know?", "Arctic Monkeys", durationText = "4:32", thumbnailUrl = "https://images.unsplash.com/photo-1465847899084-d164df4dedc6?w=600&auto=format&fit=crop&q=80"),
-            SieloTrack("indie2", "Sweater Weather", "The Neighbourhood", durationText = "4:00", thumbnailUrl = "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=600&auto=format&fit=crop&q=80"),
-            SieloTrack("indie3", "505", "Arctic Monkeys", durationText = "4:13", thumbnailUrl = "https://images.unsplash.com/photo-1465847899084-d164df4dedc6?w=600&auto=format&fit=crop&q=80")
+            SieloTrack("bpOSxM0rNPM", "Do I Wanna Know?", "Arctic Monkeys", durationText = "4:32", thumbnailUrl = "https://i.ytimg.com/vi/bpOSxM0rNPM/hqdefault.jpg"),
+            SieloTrack("GCdwKhTtNNw", "Sweater Weather", "The Neighbourhood", durationText = "4:00", thumbnailUrl = "https://i.ytimg.com/vi/GCdwKhTtNNw/hqdefault.jpg"),
+            SieloTrack("qU9mHegkTc4", "505", "Arctic Monkeys", durationText = "4:13", thumbnailUrl = "https://i.ytimg.com/vi/qU9mHegkTc4/hqdefault.jpg")
         )
         "edm" -> listOf(
-            SieloTrack("edm1", "Animals", "Martin Garrix", durationText = "3:12", thumbnailUrl = "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=600&auto=format&fit=crop&q=80"),
-            SieloTrack("edm2", "Wake Me Up", "Avicii", durationText = "4:07", thumbnailUrl = "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=600&auto=format&fit=crop&q=80"),
-            SieloTrack("edm3", "Titanium", "David Guetta ft. Sia", durationText = "4:05", thumbnailUrl = "https://images.unsplash.com/photo-1508700115892-45ecd05ae2ad?w=600&auto=format&fit=crop&q=80")
+            SieloTrack("gCYcTST8s4o", "Animals", "Martin Garrix", durationText = "3:12", thumbnailUrl = "https://i.ytimg.com/vi/gCYcTST8s4o/hqdefault.jpg"),
+            SieloTrack("IcrbM1l_BoI", "Wake Me Up", "Avicii", durationText = "4:07", thumbnailUrl = "https://i.ytimg.com/vi/IcrbM1l_BoI/hqdefault.jpg"),
+            SieloTrack("JRfuAukYTKg", "Titanium", "David Guetta ft. Sia", durationText = "4:05", thumbnailUrl = "https://i.ytimg.com/vi/JRfuAukYTKg/hqdefault.jpg")
         )
         "rock" -> listOf(
-            SieloTrack("rock1", "Believer", "Imagine Dragons", durationText = "3:24", thumbnailUrl = "https://images.unsplash.com/photo-1498038432885-c6f3f1b912ee?w=600&auto=format&fit=crop&q=80"),
-            SieloTrack("rock2", "In the End", "Linkin Park", durationText = "3:36", thumbnailUrl = "https://images.unsplash.com/photo-1498038432885-c6f3f1b912ee?w=600&auto=format&fit=crop&q=80"),
-            SieloTrack("rock3", "Numb", "Linkin Park", durationText = "3:07", thumbnailUrl = "https://images.unsplash.com/photo-1498038432885-c6f3f1b912ee?w=600&auto=format&fit=crop&q=80")
+            SieloTrack("7wtfhZwyrcc", "Believer", "Imagine Dragons", durationText = "3:24", thumbnailUrl = "https://i.ytimg.com/vi/7wtfhZwyrcc/hqdefault.jpg"),
+            SieloTrack("eVTXPUF4Oz4", "In the End", "Linkin Park", durationText = "3:36", thumbnailUrl = "https://i.ytimg.com/vi/eVTXPUF4Oz4/hqdefault.jpg"),
+            SieloTrack("kXYiU_JCYtU", "Numb", "Linkin Park", durationText = "3:07", thumbnailUrl = "https://i.ytimg.com/vi/kXYiU_JCYtU/hqdefault.jpg")
         )
         "workout" -> listOf(
-            SieloTrack("work1", "'Till I Collapse", "Eminem", durationText = "4:57", thumbnailUrl = "https://images.unsplash.com/photo-1534438327276-14e5300c3a48?w=600&auto=format&fit=crop&q=80"),
-            SieloTrack("work2", "Stronger", "Kanye West", durationText = "5:11", thumbnailUrl = "https://images.unsplash.com/photo-1534438327276-14e5300c3a48?w=600&auto=format&fit=crop&q=80"),
-            SieloTrack("work3", "Can't Hold Us", "Macklemore & Ryan Lewis", durationText = "4:18", thumbnailUrl = "https://images.unsplash.com/photo-1534438327276-14e5300c3a48?w=600&auto=format&fit=crop&q=80")
+            SieloTrack("Y1wRGuCg4ek", "'Till I Collapse", "Eminem", durationText = "4:57", thumbnailUrl = "https://i.ytimg.com/vi/Y1wRGuCg4ek/hqdefault.jpg"),
+            SieloTrack("PsO6Zn4V07g", "Stronger", "Kanye West", durationText = "5:11", thumbnailUrl = "https://i.ytimg.com/vi/PsO6Zn4V07g/hqdefault.jpg"),
+            SieloTrack("2zNSgSzhBfM", "Can't Hold Us", "Macklemore & Ryan Lewis", durationText = "4:18", thumbnailUrl = "https://i.ytimg.com/vi/2zNSgSzhBfM/hqdefault.jpg")
         )
         else -> defaultCategoryTracks("pop")
     }

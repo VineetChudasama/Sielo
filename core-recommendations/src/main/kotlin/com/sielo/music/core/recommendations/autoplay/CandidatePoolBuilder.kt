@@ -70,6 +70,26 @@ open class CandidatePoolBuilder @Inject constructor(
             }
             return true
         }
+
+        fun isTitleTooSimilar(candidateTitle: String, seedTitle: String): Boolean {
+            val cleanCandidate = candidateTitle.lowercase()
+                .replace(Regex("""[\(\[\{].*?[\)\]\}]"""), "")
+                .replace(Regex("""[^\w\s]"""), " ")
+                .trim()
+            val cleanSeed = seedTitle.lowercase()
+                .replace(Regex("""[\(\[\{].*?[\)\]\}]"""), "")
+                .replace(Regex("""[^\w\s]"""), " ")
+                .trim()
+
+            if (cleanCandidate.isBlank() || cleanSeed.isBlank()) return false
+            if (cleanCandidate == cleanSeed) return true
+
+            // If seed or candidate title has meaningful length (>= 3 chars), prevent overlap
+            if (cleanSeed.length >= 3 && cleanCandidate.contains(cleanSeed)) return true
+            if (cleanCandidate.length >= 3 && cleanSeed.contains(cleanCandidate)) return true
+
+            return false
+        }
     }
 
     open suspend fun buildCandidatePools(
@@ -116,6 +136,7 @@ open class CandidatePoolBuilder @Inject constructor(
                 val rawSongs = listeningHistoryDao.getSongsByArtists(artistList)
                     .filter { it.songId != seedSong.id }
                     .filter { isCleanStudioTrack(it.songTitle, it.artistName) }
+                    .filterNot { isTitleTooSimilar(it.songTitle, seedSong.title) }
 
                 val ineligibleIds = recommendationHistoryDao.getIneligibleSongIds(rawSongs.map { it.songId }, today).toSet()
 
@@ -155,6 +176,7 @@ open class CandidatePoolBuilder @Inject constructor(
             innerTubeClient.search(query)
                 .filter { it.id != seedSong.id }
                 .filter { isCleanStudioTrack(it.title, it.artist) }
+                .filterNot { isTitleTooSimilar(it.title, seedSong.title) }
                 .take(10)
         } catch (_: Exception) {
             emptyList()
@@ -163,6 +185,7 @@ open class CandidatePoolBuilder @Inject constructor(
         val combined = (historyTracks + networkTracks + CuratedArtistClusters.defaultFallbackTracks())
             .filter { it.id != seedSong.id }
             .filter { isCleanStudioTrack(it.title, it.artist) }
+            .filterNot { isTitleTooSimilar(it.title, seedSong.title) }
             .distinctBy { it.id }
             .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
 
@@ -234,6 +257,7 @@ open class CandidatePoolBuilder @Inject constructor(
             val resolvedTracks = tracksDeferred.awaitAll().flatten()
                 .filter { it.id != seedSong.id }
                 .filter { isCleanStudioTrack(it.title, it.artist) }
+                .filterNot { isTitleTooSimilar(it.title, seedSong.title) }
                 .distinctBy { it.id }
                 .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
 
@@ -263,6 +287,7 @@ open class CandidatePoolBuilder @Inject constructor(
             val moderateStats = listeningHistoryDao.getSongsByPlayCountRange(sinceMs = sinceMs, minPlays = 2, maxPlays = 5)
                 .filter { it.songId != seedSong.id }
                 .filter { isCleanStudioTrack(it.songTitle, it.artistName) }
+                .filterNot { isTitleTooSimilar(it.songTitle, seedSong.title) }
 
             if (moderateStats.isEmpty()) {
                 emptyList()
@@ -297,6 +322,7 @@ open class CandidatePoolBuilder @Inject constructor(
             innerTubeClient.search(query)
                 .filter { it.id != seedSong.id }
                 .filter { isCleanStudioTrack(it.title, it.artist) }
+                .filterNot { isTitleTooSimilar(it.title, seedSong.title) }
                 .take(6)
         } catch (_: Exception) {
             emptyList()
@@ -305,6 +331,7 @@ open class CandidatePoolBuilder @Inject constructor(
         val combined = (moderateSongs + fallbackSongs)
             .filter { it.id != seedSong.id }
             .filter { isCleanStudioTrack(it.title, it.artist) }
+            .filterNot { isTitleTooSimilar(it.title, seedSong.title) }
             .distinctBy { it.id }
             .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
 

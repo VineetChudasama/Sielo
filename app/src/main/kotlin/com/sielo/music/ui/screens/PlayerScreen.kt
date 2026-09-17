@@ -41,6 +41,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Pause
@@ -643,19 +644,44 @@ private fun LyricsPageView(
                         .padding(horizontal = 10.dp, vertical = 4.dp)
                 )
 
-                Spacer(modifier = Modifier.width(10.dp))
+                val isLyricOffsetSaved by viewModel.isLyricOffsetSaved.collectAsState()
 
-                Text(
-                    text = if (lyricOffsetMs == 0L) "Sync: 0.0s" else "Sync: ${if (lyricOffsetMs > 0) "+" else ""}${lyricOffsetMs / 1000.0}s",
-                    color = if (lyricOffsetMs != 0L) AccentCoral else TextSecondary,
-                    fontFamily = SoraFontFamily,
-                    fontWeight = FontWeight.Medium,
-                    fontSize = 11.sp,
+                Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(12.dp))
-                        .clickable { viewModel.resetLyricOffset() }
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                )
+                        .background(if (isLyricOffsetSaved && lyricOffsetMs != 0L) AccentCoral.copy(alpha = 0.15f) else SurfaceDark)
+                        .border(
+                            1.dp,
+                            if (isLyricOffsetSaved && lyricOffsetMs != 0L) AccentCoral.copy(alpha = 0.6f) else BorderGlass,
+                            RoundedCornerShape(12.dp)
+                        )
+                        .clickable { viewModel.saveCurrentLyricOffset() }
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (isLyricOffsetSaved && lyricOffsetMs != 0L) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "Saved",
+                            tint = AccentCoral,
+                            modifier = Modifier
+                                .size(13.dp)
+                                .padding(end = 2.dp)
+                        )
+                    }
+                    Text(
+                        text = if (lyricOffsetMs == 0L) {
+                            if (isLyricOffsetSaved) "Sync: 0.0s" else "Save: 0.0s"
+                        } else {
+                            val sign = if (lyricOffsetMs > 0) "+" else ""
+                            if (isLyricOffsetSaved) "Synced: ${sign}${lyricOffsetMs / 1000.0}s" else "Save: ${sign}${lyricOffsetMs / 1000.0}s"
+                        },
+                        color = if (lyricOffsetMs != 0L) AccentCoral else TextSecondary,
+                        fontFamily = SoraFontFamily,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 11.sp
+                    )
+                }
 
                 Spacer(modifier = Modifier.width(10.dp))
 

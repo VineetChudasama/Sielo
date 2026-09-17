@@ -60,28 +60,45 @@ import com.sielo.music.ui.theme.SoraFontFamily
 import com.sielo.music.ui.theme.UrbanistFontFamily
 import com.sielo.music.viewmodel.PlayerViewModel
 
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DragHandle
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Velocity
+import androidx.compose.ui.zIndex
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun QueueScreen(
     viewModel: PlayerViewModel,
@@ -94,6 +111,10 @@ fun QueueScreen(
     onDismissPlayer: ((velocity: Float) -> Unit)? = null,
     onSnapBack: (() -> Unit)? = null
 ) {
+    BackHandler {
+        onBack()
+    }
+
     val playbackState by viewModel.playbackState.collectAsState()
     val track = playbackState.currentTrack ?: return
     val queue = playbackState.queue
@@ -105,7 +126,7 @@ fun QueueScreen(
             qTrack.id != track.id &&
             !(qTrack.title.trim().equals(currentTitleClean, ignoreCase = true) &&
               qTrack.artist.trim().equals(currentArtistClean, ignoreCase = true))
-        }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+        }.distinctBy { it.id }
     } else {
         emptyList()
     }
@@ -114,6 +135,12 @@ fun QueueScreen(
     val coroutineScope = rememberCoroutineScope()
     val shuffleAnimState = rememberShuffleAnimationState()
     var listScrolledInCurrentGesture by remember { mutableStateOf(false) }
+
+    var draggingIndex by remember { mutableStateOf<Int?>(null) }
+    var dragOffsetY by remember { mutableFloatStateOf(0f) }
+    val density = LocalDensity.current
+    var measuredItemHeightPx by remember { mutableFloatStateOf(0f) }
+    val itemHeightPx = if (measuredItemHeightPx > 0f) measuredItemHeightPx else with(density) { 72.dp.toPx() }
 
     // Connect nested scroll to sheetOffsetY:
     // 1. Fast flings in the list NEVER dismiss the player.
@@ -358,7 +385,7 @@ fun QueueScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "UP NEXT (${upcomingTracks.size} SONGS)",
+                        text = "UP NEXT • TUNED TO YOUR TASTE (${upcomingTracks.size})",
                         color = TextSecondary,
                         fontFamily = SoraFontFamily,
                         fontSize = 11.sp,
@@ -475,77 +502,207 @@ fun QueueScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     contentPadding = PaddingValues(bottom = 20.dp)
                 ) {
-                    itemsIndexed(upcomingTracks) { offsetIndex, qTrack ->
+                    itemsIndexed(
+                        items = upcomingTracks,
+                        key = { _, qTrack -> qTrack.id }
+                    ) { offsetIndex, qTrack ->
                         val queuePosition = offsetIndex + 1
-                        Row(
+                        val isDragging = draggingIndex == offsetIndex
+                        val elevation by animateDpAsState(if (isDragging) 10.dp else 0.dp, label = "elevation")
+                        val scale by animateFloatAsState(if (isDragging) 1.03f else 1.0f, label = "scale")
+                        val currentIdxState = rememberUpdatedState(offsetIndex)
+                        val maxIndexState = rememberUpdatedState(upcomingTracks.lastIndex)
+
+                        val dismissState = rememberSwipeToDismissBoxState(
+                            confirmValueChange = { value ->
+                                if (value == SwipeToDismissBoxValue.StartToEnd) {
+                                    viewModel.removeUpcomingTrack(qTrack)
+                                    true
+                                } else {
+                                    false
+                                }
+                            },
+                            positionalThreshold = { distance -> distance * 0.35f }
+                        )
+
+                        SwipeToDismissBox(
+                            state = dismissState,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(SurfaceDark.copy(alpha = 0.6f))
-                                .border(1.dp, BorderGlass, RoundedCornerShape(12.dp))
-                                .clickable {
-                                    viewModel.playTrack(qTrack, queue)
+                                .animateItem()
+                                .zIndex(if (isDragging) 10f else 1f)
+                                .graphicsLayer {
+                                    translationY = if (isDragging) dragOffsetY else 0f
+                                    scaleX = scale
+                                    scaleY = scale
+                                    shadowElevation = elevation.toPx()
                                 }
-                                .padding(horizontal = 14.dp, vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            // Queue Index Badge
-                            Box(
-                                modifier = Modifier
-                                    .size(26.dp)
-                                    .clip(CircleShape)
-                                    .background(PaletteOxfordBlue),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "$queuePosition",
-                                    color = PaletteCream,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
+                                .onGloballyPositioned { coordinates ->
+                                    if (measuredItemHeightPx == 0f && coordinates.size.height > 0) {
+                                        measuredItemHeightPx = coordinates.size.height.toFloat() + with(density) { 10.dp.toPx() }
+                                    }
+                                },
+                            enableDismissFromStartToEnd = true,
+                            enableDismissFromEndToStart = false,
+                            gesturesEnabled = (draggingIndex == null),
+                            backgroundContent = {
+                                val color by animateColorAsState(
+                                    when (dismissState.targetValue) {
+                                        SwipeToDismissBoxValue.StartToEnd -> Color(0xFFE53935)
+                                        else -> Color.Transparent
+                                    },
+                                    label = "dismissBgColor"
                                 )
+                                val iconScale by animateFloatAsState(
+                                    if (dismissState.targetValue == SwipeToDismissBoxValue.StartToEnd) 1.2f else 0.8f,
+                                    label = "dismissIconScale"
+                                )
+
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(color)
+                                        .padding(horizontal = 20.dp),
+                                    contentAlignment = Alignment.CenterStart
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = Icons.Default.Delete,
+                                            contentDescription = "Remove",
+                                            tint = PaletteCream,
+                                            modifier = Modifier
+                                                .size(22.dp)
+                                                .scale(iconScale)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "Remove",
+                                            color = PaletteCream,
+                                            fontFamily = SoraFontFamily,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 13.sp
+                                        )
+                                    }
+                                }
                             }
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (isDragging) PaletteOxfordBlue else SurfaceDark.copy(alpha = 0.6f))
+                                    .border(
+                                        1.dp,
+                                        if (isDragging) AccentCoral else BorderGlass,
+                                        RoundedCornerShape(12.dp)
+                                    )
+                                    .pointerInput(Unit) {
+                                        detectDragGesturesAfterLongPress(
+                                            onDragStart = {
+                                                draggingIndex = currentIdxState.value
+                                                dragOffsetY = 0f
+                                            },
+                                            onDrag = { change, dragAmount ->
+                                                change.consume()
+                                                dragOffsetY += dragAmount.y
+                                                val current = draggingIndex ?: return@detectDragGesturesAfterLongPress
+                                                val maxIdx = maxIndexState.value
+                                                val threshold = itemHeightPx * 0.65f
 
-                            Spacer(modifier = Modifier.width(12.dp))
+                                                if (dragOffsetY > threshold && current < maxIdx) {
+                                                    viewModel.moveUpcomingTrack(current, current + 1)
+                                                    draggingIndex = current + 1
+                                                    dragOffsetY -= itemHeightPx
+                                                } else if (dragOffsetY < -threshold && current > 0) {
+                                                    viewModel.moveUpcomingTrack(current, current - 1)
+                                                    draggingIndex = current - 1
+                                                    dragOffsetY += itemHeightPx
+                                                }
+                                            },
+                                            onDragEnd = {
+                                                draggingIndex = null
+                                                dragOffsetY = 0f
+                                            },
+                                            onDragCancel = {
+                                                draggingIndex = null
+                                                dragOffsetY = 0f
+                                            }
+                                        )
+                                    }
+                                    .clickable {
+                                        viewModel.playTrack(qTrack, queue)
+                                    }
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // Queue Index Badge
+                                Box(
+                                    modifier = Modifier
+                                        .size(26.dp)
+                                        .clip(CircleShape)
+                                        .background(if (isDragging) AccentCoral else PaletteOxfordBlue),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "$queuePosition",
+                                        color = PaletteCream,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
 
-                            com.sielo.music.ui.components.SieloSongArtwork(
-                                thumbnailUrl = qTrack.thumbnailUrl,
-                                title = qTrack.title,
-                                artist = qTrack.artist,
-                                modifier = Modifier.size(46.dp),
-                                shape = RoundedCornerShape(8.dp)
-                            )
+                                Spacer(modifier = Modifier.width(12.dp))
 
-                            Spacer(modifier = Modifier.width(14.dp))
-
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = qTrack.title,
-                                    color = TextPrimary,
-                                    fontFamily = UrbanistFontFamily,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                com.sielo.music.ui.components.SieloSongArtwork(
+                                    thumbnailUrl = qTrack.thumbnailUrl,
+                                    title = qTrack.title,
+                                    artist = qTrack.artist,
+                                    modifier = Modifier.size(46.dp),
+                                    shape = RoundedCornerShape(8.dp)
                                 )
-                                Spacer(modifier = Modifier.height(2.dp))
+
+                                Spacer(modifier = Modifier.width(14.dp))
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = qTrack.title,
+                                        color = TextPrimary,
+                                        fontFamily = UrbanistFontFamily,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = qTrack.artist,
+                                        color = TextSecondary,
+                                        fontFamily = UrbanistFontFamily,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Normal,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+
                                 Text(
-                                    text = qTrack.artist,
-                                    color = TextSecondary,
+                                    text = qTrack.formattedDuration,
+                                    color = TextMuted,
                                     fontFamily = UrbanistFontFamily,
                                     fontSize = 12.sp,
-                                    fontWeight = FontWeight.Normal,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                    fontWeight = FontWeight.Normal
+                                )
+
+                                Spacer(modifier = Modifier.width(8.dp))
+
+                                Icon(
+                                    imageVector = Icons.Default.DragHandle,
+                                    contentDescription = "Drag to reorder",
+                                    tint = if (isDragging) AccentCoral else TextMuted.copy(alpha = 0.5f),
+                                    modifier = Modifier.size(18.dp)
                                 )
                             }
-
-                            Text(
-                                text = qTrack.formattedDuration,
-                                color = TextMuted,
-                                fontFamily = UrbanistFontFamily,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Normal
-                            )
                         }
                     }
                 }

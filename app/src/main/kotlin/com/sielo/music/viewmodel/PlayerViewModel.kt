@@ -1,5 +1,6 @@
 package com.sielo.music.viewmodel
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.sielo.music.core.audio.PlayerManager
@@ -8,20 +9,19 @@ import com.sielo.music.core.lyrics.lrclib.LrcLibClient
 import com.sielo.music.core.lyrics.model.SieloLyrics
 import com.sielo.music.core.network.models.SieloTrack
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 @HiltViewModel
 class PlayerViewModel @Inject constructor(
     private val playerManager: PlayerManager,
-    private val lrcLibClient: LrcLibClient
+    private val lrcLibClient: LrcLibClient,
+    @ApplicationContext private val context: Context
 ) : ViewModel() {
 
     val playbackState: StateFlow<PlaybackState> = playerManager.playbackState
@@ -35,6 +35,13 @@ class PlayerViewModel @Inject constructor(
     private val _lyricOffsetMs = MutableStateFlow(0L)
     val lyricOffsetMs: StateFlow<Long> = _lyricOffsetMs.asStateFlow()
 
+    private val _isLyricOffsetSaved = MutableStateFlow(true)
+    val isLyricOffsetSaved: StateFlow<Boolean> = _isLyricOffsetSaved.asStateFlow()
+
+    private val lyricPrefs by lazy {
+        context.getSharedPreferences("sielo_user_lyric_offsets", Context.MODE_PRIVATE)
+    }
+
     private var currentLoadedTrackId: String? = null
     private var lyricsJob: Job? = null
 
@@ -46,7 +53,9 @@ class PlayerViewModel @Inject constructor(
                     val durationSec = if (track.durationSeconds > 0) track.durationSeconds else (state.durationMs / 1000)
                     if (currentLoadedTrackId != track.id) {
                         currentLoadedTrackId = track.id
-                        _lyricOffsetMs.value = 0L
+                        val savedOffset = getSavedLyricOffset(track.id, track.title, track.artist)
+                        _lyricOffsetMs.value = savedOffset
+                        _isLyricOffsetSaved.value = true
                         fetchLyrics(track.id, track.title, track.artist, durationSec)
                     } else if (durationSec > 0 && (_lyrics.value == null || _lyrics.value?.lines.isNullOrEmpty()) && !_isLyricsLoading.value) {
                         fetchLyrics(track.id, track.title, track.artist, durationSec)
@@ -55,18 +64,54 @@ class PlayerViewModel @Inject constructor(
                     currentLoadedTrackId = null
                     _lyrics.value = null
                     _lyricOffsetMs.value = 0L
+                    _isLyricOffsetSaved.value = true
                     _isLyricsLoading.value = false
                 }
             }
         }
     }
 
+    private fun getLyricKey(trackId: String): String = "offset_id_$trackId"
+    private fun getLyricFallbackKey(title: String, artist: String): String =
+        "offset_norm_${title.trim().lowercase()}_${artist.trim().lowercase()}"
+
+    fun getSavedLyricOffset(trackId: String, title: String, artist: String): Long {
+        val key = getLyricKey(trackId)
+        if (lyricPrefs.contains(key)) {
+            return lyricPrefs.getLong(key, 0L)
+        }
+        val fallbackKey = getLyricFallbackKey(title, artist)
+        return lyricPrefs.getLong(fallbackKey, 0L)
+    }
+
+    fun saveCurrentLyricOffset() {
+        val track = playbackState.value.currentTrack ?: return
+        val offset = _lyricOffsetMs.value
+        lyricPrefs.edit()
+            .putLong(getLyricKey(track.id), offset)
+            .putLong(getLyricFallbackKey(track.title, track.artist), offset)
+            .apply()
+        _isLyricOffsetSaved.value = true
+    }
+
     fun adjustLyricOffset(deltaMs: Long) {
         _lyricOffsetMs.value += deltaMs
+        val track = playbackState.value.currentTrack
+        if (track != null) {
+            val saved = getSavedLyricOffset(track.id, track.title, track.artist)
+            _isLyricOffsetSaved.value = (_lyricOffsetMs.value == saved)
+        } else {
+            _isLyricOffsetSaved.value = false
+        }
     }
 
     fun resetLyricOffset() {
         _lyricOffsetMs.value = 0L
+        val track = playbackState.value.currentTrack
+        if (track != null) {
+            val saved = getSavedLyricOffset(track.id, track.title, track.artist)
+            _isLyricOffsetSaved.value = (0L == saved)
+        }
     }
 
     private fun fetchLyrics(trackId: String, track: String, artist: String, durationSec: Long) {
@@ -79,6 +124,14 @@ class PlayerViewModel @Inject constructor(
                 _isLyricsLoading.value = false
             }
         }
+    }
+
+    fun removeUpcomingTrack(track: SieloTrack) {
+        playerManager.removeTrackFromQueue(track)
+    }
+
+    fun moveUpcomingTrack(fromUpcomingIndex: Int, toUpcomingIndex: Int) {
+        playerManager.moveUpcomingTrack(fromUpcomingIndex, toUpcomingIndex)
     }
 
     fun togglePlayPause() = playerManager.togglePlayPause()

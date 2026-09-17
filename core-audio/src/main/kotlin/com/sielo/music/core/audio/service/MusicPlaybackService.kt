@@ -1,10 +1,14 @@
 package com.sielo.music.core.audio.service
 
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.os.Bundle
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.ForwardingPlayer
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DefaultDataSource
@@ -24,21 +28,28 @@ import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import com.sielo.music.core.audio.PlayerManager
 import dagger.hilt.android.AndroidEntryPoint
 import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import java.io.File
 import java.util.concurrent.TimeUnit
+import javax.inject.Inject
 
 @OptIn(UnstableApi::class)
 @AndroidEntryPoint
 class MusicPlaybackService : MediaSessionService() {
 
+    @Inject
+    lateinit var playerManager: dagger.Lazy<PlayerManager>
+
     private var mediaSession: MediaSession? = null
     lateinit var player: ExoPlayer
 
     companion object {
+        var skipNextListener: (() -> Unit)? = null
+        var skipPreviousListener: (() -> Unit)? = null
         private var simpleCache: SimpleCache? = null
 
         @Synchronized
@@ -140,9 +151,80 @@ class MusicPlaybackService : MediaSessionService() {
                 })
             }
 
-        mediaSession = MediaSession.Builder(this, player)
+        val forwardingPlayer = object : ForwardingPlayer(player) {
+            override fun getAvailableCommands(): Player.Commands {
+                return super.getAvailableCommands().buildUpon()
+                    .add(Player.COMMAND_SEEK_TO_NEXT)
+                    .add(Player.COMMAND_SEEK_TO_PREVIOUS)
+                    .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                    .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+                    .build()
+            }
+
+            override fun isCommandAvailable(command: Int): Boolean {
+                return command == Player.COMMAND_SEEK_TO_NEXT ||
+                       command == Player.COMMAND_SEEK_TO_PREVIOUS ||
+                       command == Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM ||
+                       command == Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM ||
+                       super.isCommandAvailable(command)
+            }
+
+            override fun hasNextMediaItem(): Boolean = true
+            override fun hasPreviousMediaItem(): Boolean = true
+
+            override fun seekToNext() {
+                triggerSkipNext()
+            }
+
+            override fun seekToNextMediaItem() {
+                triggerSkipNext()
+            }
+
+            override fun seekToPrevious() {
+                triggerSkipPrevious()
+            }
+
+            override fun seekToPreviousMediaItem() {
+                triggerSkipPrevious()
+            }
+        }
+
+        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val sessionActivityPendingIntent = if (launchIntent != null) {
+            PendingIntent.getActivity(
+                this,
+                0,
+                launchIntent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+        } else null
+
+        val sessionBuilder = MediaSession.Builder(this, forwardingPlayer)
             .setCallback(MediaSessionCallback())
-            .build()
+
+        if (sessionActivityPendingIntent != null) {
+            sessionBuilder.setSessionActivity(sessionActivityPendingIntent)
+        }
+
+        mediaSession = sessionBuilder.build()
+    }
+
+    private fun triggerSkipNext() {
+        try {
+            skipNextListener?.invoke() ?: playerManager.get().skipNext()
+        } catch (_: Exception) {
+            skipNextListener?.invoke()
+        }
+    }
+
+    private fun triggerSkipPrevious() {
+        try {
+            skipPreviousListener?.invoke() ?: playerManager.get().skipPrevious()
+        } catch (_: Exception) {
+            skipPreviousListener?.invoke()
+        }
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? {
@@ -158,7 +240,46 @@ class MusicPlaybackService : MediaSessionService() {
         super.onDestroy()
     }
 
+    @Suppress("DEPRECATION")
     private inner class MediaSessionCallback : MediaSession.Callback {
+        override fun onConnect(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo
+        ): MediaSession.ConnectionResult {
+            val connectionResult = super.onConnect(session, controller)
+            val availableSessionCommands = connectionResult.availableSessionCommands.buildUpon()
+            val availablePlayerCommands = connectionResult.availablePlayerCommands.buildUpon()
+                .add(Player.COMMAND_SEEK_TO_NEXT)
+                .add(Player.COMMAND_SEEK_TO_PREVIOUS)
+                .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+                .build()
+            return MediaSession.ConnectionResult.accept(
+                availableSessionCommands.build(),
+                availablePlayerCommands
+            )
+        }
+
+        override fun onPlayerCommandRequest(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            playerCommand: Int
+        ): Int {
+            when (playerCommand) {
+                Player.COMMAND_SEEK_TO_NEXT,
+                Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> {
+                    triggerSkipNext()
+                    return SessionResult.RESULT_SUCCESS
+                }
+                Player.COMMAND_SEEK_TO_PREVIOUS,
+                Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> {
+                    triggerSkipPrevious()
+                    return SessionResult.RESULT_SUCCESS
+                }
+            }
+            return super.onPlayerCommandRequest(session, controller, playerCommand)
+        }
+
         override fun onCustomCommand(
             session: MediaSession,
             controller: MediaSession.ControllerInfo,

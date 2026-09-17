@@ -150,6 +150,9 @@ interface ListeningHistoryDao {
         LIMIT :limit
     """)
     suspend fun getTopArtistsSnapshot(sinceMs: Long, limit: Int = 10): List<ArtistStat>
+
+    @Query("DELETE FROM listening_history")
+    suspend fun clearAll()
 }
 
 data class HourCount(

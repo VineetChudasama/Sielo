@@ -42,7 +42,9 @@ data class SieloAlbum(
     val title: String,
     val artist: String,
     val year: String? = null,
-    val thumbnailUrl: String? = null
+    val thumbnailUrl: String? = null,
+    val tracks: List<SieloTrack> = emptyList(),
+    val songCount: Int = 0
 )
 
 @Serializable
@@ -60,5 +62,6 @@ data class ArtistDetails(
     val imageUrl: String? = null,
     val bio: String? = null,
     val latestAlbum: SieloAlbum? = null,
-    val topSongs: List<SieloTrack> = emptyList()
+    val topSongs: List<SieloTrack> = emptyList(),
+    val pastAlbums: List<SieloAlbum> = emptyList()
 )

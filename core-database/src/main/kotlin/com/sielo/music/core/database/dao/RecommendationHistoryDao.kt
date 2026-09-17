@@ -27,4 +27,7 @@ interface RecommendationHistoryDao {
         val entities = songIds.distinct().map { RecommendationHistoryEntity(songId = it, lastRecommendedDate = today) }
         upsertAll(entities)
     }
+
+    @Query("DELETE FROM recommendation_history")
+    suspend fun clearAll()
 }

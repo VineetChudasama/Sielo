@@ -1,4 +1,4 @@
-﻿package com.sielo.music.core.database.dao
+package com.sielo.music.core.database.dao
 
 import androidx.room.Dao
 import androidx.room.Insert
@@ -16,8 +16,14 @@ interface SearchHistoryDao {
     @Query("SELECT * FROM search_history ORDER BY timestampMs DESC LIMIT :limit")
     fun getRecentSearchQueries(limit: Int = 10): Flow<List<SearchHistoryEntity>>
 
+    @Query("SELECT * FROM search_history")
+    suspend fun getAllSearchQueries(): List<SearchHistoryEntity>
+
     @Query("DELETE FROM search_history WHERE query = :query")
     suspend fun deleteSearchQuery(query: String)
+
+    @Query("DELETE FROM search_history WHERE query IN (:queries)")
+    suspend fun deleteSearchQueries(queries: List<String>)
 
     @Query("DELETE FROM search_history")
     suspend fun clearAllSearchHistory()

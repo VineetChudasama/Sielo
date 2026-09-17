@@ -67,6 +67,7 @@ class AutoplayQueueEngine @Inject constructor(
         // 4. Allocate slots: 60% Pool A, 25% Pool B, 15% Pool C (rounding / backfilling as needed)
         val selectedCandidates = allocatePoolSlots(poolA, poolB, poolC, batchSize)
             .filter { CandidatePoolBuilder.isCleanStudioTrack(it.title, it.artist) }
+            .filterNot { CandidatePoolBuilder.isTitleTooSimilar(it.title, seedSong.title) }
 
         // 5. Interleave results so consecutive songs aren't from the same artist (within 3 positions)
         val interleavedQueue = interleaveWithArtistSpacing(selectedCandidates, ARTIST_SEPARATION_DISTANCE)

@@ -416,7 +416,7 @@ fun SearchScreen(
                             items(searchResults) { track ->
                                 SearchResultTrackRow(
                                     track = track,
-                                    onPlay = { viewModel.playTrack(track, searchResults) },
+                                    onPlay = { viewModel.playTrack(track, listOf(track)) },
                                     onFavorite = { viewModel.toggleFavorite(track) }
                                 )
                             }

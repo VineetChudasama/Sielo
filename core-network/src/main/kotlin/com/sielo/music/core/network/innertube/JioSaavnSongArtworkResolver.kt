@@ -63,17 +63,24 @@ object JioSaavnSongArtworkResolver {
             ?.replace(Regex("\\(.*?\\)|\\[.*?\\]"), "")
             ?.trim() ?: ""
 
-        val query1 = "$filteredTitle $cleanArtist".trim()
-        val query2 = filteredTitle.trim()
+        val query = if (cleanArtist.isNotBlank()) "$filteredTitle $cleanArtist".trim() else filteredTitle.trim()
 
-        val resolved = fetchArtworkForQuery(query1) ?: if (query1 != query2) fetchArtworkForQuery(query2) else null
+        val resolved = fetchArtworkForQuery(
+            query = query,
+            expectedTitle = filteredTitle,
+            expectedArtist = cleanArtist.ifBlank { null }
+        )
         if (!resolved.isNullOrBlank()) {
             memoryCache[key] = resolved
         }
         resolved
     }
 
-    private fun fetchArtworkForQuery(query: String): String? {
+    private fun fetchArtworkForQuery(
+        query: String,
+        expectedTitle: String,
+        expectedArtist: String?
+    ): String? {
         if (query.isBlank()) return null
         try {
             val encodedQuery = URLEncoder.encode(query, "UTF-8")
@@ -91,8 +98,13 @@ object JioSaavnSongArtworkResolver {
 
             if (results.isEmpty()) return null
 
-            val firstSong = results.first().jsonObject
-            val rawImage = firstSong["image"]?.jsonPrimitive?.content ?: return null
+            val matchingSong = results.mapNotNull { it.jsonObject }.firstOrNull { obj ->
+                val songTitle = obj["song"]?.jsonPrimitive?.content ?: obj["title"]?.jsonPrimitive?.content ?: ""
+                val songArtist = obj["primary_artists"]?.jsonPrimitive?.content ?: obj["singers"]?.jsonPrimitive?.content ?: ""
+                TrackMatchValidator.isFuzzyMatch(expectedTitle, songTitle, expectedArtist, songArtist)
+            } ?: return null
+
+            val rawImage = matchingSong["image"]?.jsonPrimitive?.content ?: return null
 
             val highResImage = rawImage
                 .replace("50x50", "500x500")

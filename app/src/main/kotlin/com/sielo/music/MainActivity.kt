@@ -50,26 +50,70 @@ import dagger.hilt.android.AndroidEntryPoint
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
+    @javax.inject.Inject lateinit var userManager: com.sielo.music.core.auth.UserManager
+    @javax.inject.Inject lateinit var playerManager: com.sielo.music.core.audio.PlayerManager
+
     private val homeViewModel: HomeViewModel by viewModels()
     private val searchViewModel: SearchViewModel by viewModels()
     private val statsViewModel: StatsViewModel by viewModels()
     private val profileViewModel: ProfileViewModel by viewModels()
     private val playerViewModel: PlayerViewModel by viewModels()
+    private val listenTogetherViewModel: com.sielo.music.viewmodel.ListenTogetherViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Connect player recommendation engine with dynamic user taste learning
+        playerManager.onTrackPlayedTasteListener = { artist, genre ->
+            userManager.recordSongPlayed(artist, genre)
+        }
+        playerManager.userTasteSeedsProvider = {
+            userManager.getTopTasteArtists() + userManager.getFavoriteArtists()
+        }
+
         setContent {
             SieloTheme {
                 val navController = rememberNavController()
                 val navBackStackEntry by navController.currentBackStackEntryAsState()
                 val currentRoute = navBackStackEntry?.destination?.route
                 val playbackState by playerViewModel.playbackState.collectAsState()
+                val activeRoomState by listenTogetherViewModel.roomState.collectAsState()
+                val pendingRejoinSession by listenTogetherViewModel.pendingRejoinSession.collectAsState()
+                val isInsideRoomScreen = currentRoute == Screen.ListenTogether.route && activeRoomState != null
                 var isPlayerExpanded by remember { mutableStateOf(false) }
                 var showLaunchReveal by remember { mutableStateOf(true) }
 
-                // If player is not expanded, back press falls back to previous tab/screen sequentially
-                BackHandler(enabled = !isPlayerExpanded && navController.previousBackStackEntry != null) {
-                    navController.popBackStack()
+                val currentUser by userManager.currentUser.collectAsState()
+                val isAuthDialogOpen by userManager.isAuthDialogOpen.collectAsState()
+                val isOnboardingOpen by userManager.isOnboardingOpen.collectAsState()
+
+                // If player is not expanded, back press falls back to previous tab/screen, or returns to Home tab
+                BackHandler(enabled = !isPlayerExpanded && currentRoute != Screen.Home.route) {
+                    if (navController.previousBackStackEntry != null) {
+                        navController.popBackStack()
+                    } else {
+                        navController.navigate(Screen.Home.route) {
+                            popUpTo(Screen.Home.route) { inclusive = true }
+                            launchSingleTop = true
+                        }
+                    }
+                }
+
+                val intentData = intent?.data
+                androidx.compose.runtime.LaunchedEffect(intentData) {
+                    if (intentData != null) {
+                        val uriStr = intentData.toString()
+                        if (uriStr.contains("sielo://room") || uriStr.contains("sielo://join")) {
+                            listenTogetherViewModel.joinRoom(uriStr, "", listenTogetherViewModel.getSavedUserName())
+                            navController.navigate(Screen.ListenTogether.route)
+                        }
+                    }
+                }
+
+                androidx.compose.runtime.LaunchedEffect(currentUser, isOnboardingOpen) {
+                    if (currentUser == null && !isOnboardingOpen) {
+                        userManager.openAuthDialog()
+                    }
                 }
 
                 Box(modifier = Modifier.fillMaxSize()) {
@@ -108,7 +152,10 @@ class MainActivity : ComponentActivity() {
                                 SearchScreen(viewModel = searchViewModel, modifier = Modifier.fillMaxSize())
                             }
                             composable(Screen.ListenTogether.route) {
-                                ListenTogetherScreen(modifier = Modifier.fillMaxSize())
+                                ListenTogetherScreen(
+                                    modifier = Modifier.fillMaxSize(),
+                                    viewModel = listenTogetherViewModel
+                                )
                             }
                             composable(Screen.Stats.route) {
                                 StatsScreen(viewModel = statsViewModel, modifier = Modifier.fillMaxSize())
@@ -120,7 +167,7 @@ class MainActivity : ComponentActivity() {
 
                         // Floating Persistent Mini-Player Island (Docked above bottom bar)
                         AnimatedVisibility(
-                            visible = playbackState.currentTrack != null && !isPlayerExpanded,
+                            visible = playbackState.currentTrack != null && !isPlayerExpanded && !isInsideRoomScreen,
                             enter = slideInVertically(
                                 initialOffsetY = { it },
                                 animationSpec = tween(380, easing = FastOutSlowInEasing)
@@ -170,8 +217,46 @@ class MainActivity : ComponentActivity() {
                         onFinish = { showLaunchReveal = false }
                     )
                 }
+
+                if (isAuthDialogOpen) {
+                    com.sielo.music.ui.screens.AuthDialog(
+                        userManager = userManager,
+                        onDismiss = { userManager.closeAuthDialog() }
+                    )
+                }
+
+                if (isOnboardingOpen) {
+                    com.sielo.music.ui.screens.NewUserOnboardingScreen(
+                        userManager = userManager,
+                        onFinished = {
+                            userManager.closeOnboarding()
+                            homeViewModel.refreshHome()
+                        }
+                    )
+                }
+
+                // Popup to directly rejoin room if user left abruptly
+                if (pendingRejoinSession != null && activeRoomState == null && !isAuthDialogOpen && !isOnboardingOpen) {
+                    com.sielo.music.ui.screens.RejoinRoomDialog(
+                        session = pendingRejoinSession!!,
+                        onRejoin = {
+                            listenTogetherViewModel.rejoinPreviousRoom()
+                            navController.navigate(Screen.ListenTogether.route) {
+                                launchSingleTop = true
+                            }
+                        },
+                        onDismiss = {
+                            listenTogetherViewModel.dismissRejoinPrompt()
+                        }
+                    )
+                }
             }
         }
     }
 }
+
+    override fun onResume() {
+        super.onResume()
+        listenTogetherViewModel.checkPendingRejoinSession()
+    }
 }

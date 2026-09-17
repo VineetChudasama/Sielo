@@ -1,5 +1,6 @@
 package com.sielo.music.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -25,6 +26,8 @@ import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Verified
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -32,8 +35,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import com.sielo.music.core.network.models.SieloAlbum
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -67,6 +75,10 @@ fun ArtistProfileScreen(
     onToggleFavorite: (SieloTrack) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    BackHandler {
+        onBack()
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -318,6 +330,34 @@ fun ArtistProfileScreen(
                         )
                     }
                 }
+
+                // Section: Past Albums & Discography (with full album songs)
+                if (artist.pastAlbums.isNotEmpty()) {
+                    item {
+                        Spacer(modifier = Modifier.height(24.dp))
+                        Text(
+                            text = "PAST ALBUMS & DISCOGRAPHY",
+                            color = PaletteSageGreen,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp,
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
+                        )
+                    }
+
+                    itemsIndexed(artist.pastAlbums) { _, albumItem ->
+                        ArtistAlbumCard(
+                            album = albumItem,
+                            artistName = artist.name,
+                            onPlayTrack = onPlayTrack,
+                            onPlayAlbum = {
+                                if (albumItem.tracks.isNotEmpty()) {
+                                    onPlayTrack(albumItem.tracks.first(), albumItem.tracks)
+                                }
+                            }
+                        )
+                    }
+                }
             }
         }
     }
@@ -401,3 +441,182 @@ fun ArtistTopSongRow(
         }
     }
 }
+
+@Composable
+fun ArtistAlbumCard(
+    album: SieloAlbum,
+    artistName: String,
+    onPlayTrack: (SieloTrack, List<SieloTrack>) -> Unit,
+    onPlayAlbum: () -> Unit
+) {
+    var isExpanded by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(PaletteOxfordBlue)
+            .border(1.dp, BorderGlass, RoundedCornerShape(16.dp))
+            .padding(14.dp)
+    ) {
+        // Album Header Row
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            com.sielo.music.ui.components.SieloSongArtwork(
+                thumbnailUrl = album.thumbnailUrl,
+                title = album.title,
+                artist = artistName,
+                modifier = Modifier
+                    .size(68.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .border(1.dp, BorderSubtle, RoundedCornerShape(10.dp)),
+                shape = RoundedCornerShape(10.dp)
+            )
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = album.title,
+                    color = PaletteCream,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "${album.year ?: "Studio"} • ${if (album.tracks.isNotEmpty()) "${album.tracks.size} tracks" else "${album.songCount} tracks"}",
+                    color = PaletteSand,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "$artistName • Album",
+                    color = TextSecondary,
+                    fontSize = 11.5.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            // Play Album Button
+            IconButton(
+                onClick = onPlayAlbum,
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(PaletteSand)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PlayArrow,
+                    contentDescription = "Play Album",
+                    tint = PaletteDarkNavy,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            if (album.tracks.isNotEmpty()) {
+                IconButton(
+                    onClick = { isExpanded = !isExpanded },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = if (isExpanded) "Collapse" else "Expand",
+                        tint = PaletteCream
+                    )
+                }
+            }
+        }
+
+        // Expanded Tracklist
+        if (isExpanded && album.tracks.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(12.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(BorderGlass)
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                album.tracks.forEachIndexed { idx, track ->
+                    ArtistAlbumTrackRow(
+                        trackNumber = idx + 1,
+                        track = track,
+                        onPlay = { onPlayTrack(track, album.tracks) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ArtistAlbumTrackRow(
+    trackNumber: Int,
+    track: SieloTrack,
+    onPlay: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .clickable { onPlay() }
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "$trackNumber",
+            color = PaletteSlateBlue,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.width(24.dp)
+        )
+
+        Spacer(modifier = Modifier.width(4.dp))
+
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = track.title,
+                color = PaletteCream,
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = track.artist,
+                color = TextSecondary,
+                fontSize = 11.5.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        Text(
+            text = track.formattedDuration,
+            color = TextMuted,
+            fontSize = 12.sp
+        )
+
+        Spacer(modifier = Modifier.width(8.dp))
+
+        Icon(
+            imageVector = Icons.Default.PlayArrow,
+            contentDescription = "Play Track",
+            tint = PaletteSageGreen,
+            modifier = Modifier.size(16.dp)
+        )
+    }
+}
+

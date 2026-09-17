@@ -6,6 +6,7 @@ import com.sielo.music.core.audio.PlayerManager
 import com.sielo.music.core.database.dao.ArtistStat
 import com.sielo.music.core.database.dao.FavoriteTrackDao
 import com.sielo.music.core.database.dao.ListeningHistoryDao
+import com.sielo.music.core.database.dao.SongStat
 import com.sielo.music.core.database.entity.FavoriteTrackEntity
 import com.sielo.music.core.database.entity.ListeningEventEntity
 import com.sielo.music.core.network.innertube.InnerTubeClient
@@ -27,8 +28,21 @@ class HomeViewModel @Inject constructor(
     private val innerTubeClient: InnerTubeClient,
     private val playerManager: PlayerManager,
     private val favoriteTrackDao: FavoriteTrackDao,
-    private val listeningHistoryDao: ListeningHistoryDao
+    private val listeningHistoryDao: ListeningHistoryDao,
+    private val userManager: com.sielo.music.core.auth.UserManager
 ) : ViewModel() {
+
+    private val _sinceYouLikeTitle = MutableStateFlow("Since you like The Weeknd, here are similar songs you might like :")
+    val sinceYouLikeTitle: StateFlow<String> = _sinceYouLikeTitle.asStateFlow()
+
+    private val _sinceYouLikeTracks = MutableStateFlow<List<SieloTrack>>(emptyList())
+    val sinceYouLikeTracks: StateFlow<List<SieloTrack>> = _sinceYouLikeTracks.asStateFlow()
+
+    private val _songsForYouTracks = MutableStateFlow<List<SieloTrack>>(emptyList())
+    val songsForYouTracks: StateFlow<List<SieloTrack>> = _songsForYouTracks.asStateFlow()
+
+    private val _currentSimilarToArtist = MutableStateFlow("The Weeknd")
+    val currentSimilarToArtist: StateFlow<String> = _currentSimilarToArtist.asStateFlow()
 
     private val _greeting = MutableStateFlow(computeGreeting())
     val greeting: StateFlow<String> = _greeting.asStateFlow()
@@ -82,6 +96,63 @@ class HomeViewModel @Inject constructor(
 
     init {
         loadInitialFeed()
+        viewModelScope.launch {
+            userManager.currentUser.collect { user ->
+                if (user == null) {
+                    _recentPlayedSongs.value = emptyList()
+                    _rediscoveredFavorites.value = emptyList()
+                    _topArtistStat.value = emptyList()
+                    _dynamicSimilarArtists.value = emptyList()
+                    _songsForYouTracks.value = emptyList()
+                    _sinceYouLikeTracks.value = emptyList()
+                    _currentSimilarToArtist.value = "The Weeknd"
+                } else if (user.hasCompletedOnboarding) {
+                    refreshHome()
+                }
+            }
+        }
+    }
+
+    private suspend fun resolveSongsForYou(): List<SieloTrack> {
+        val userArtists = (userManager.getFavoriteArtists() + userManager.getTopTasteArtists(5))
+            .filter { it.isNotBlank() }
+            .distinct()
+
+        val artistsToQuery = if (userArtists.isNotEmpty()) userArtists.shuffled().take(4) else listOf("Arijit Singh", "The Weeknd", "Diljit Dosanjh", "Taylor Swift")
+        val gatheredTracks = mutableListOf<SieloTrack>()
+
+        for (artist in artistsToQuery) {
+            try {
+                val details = innerTubeClient.getArtistDetails(artist)
+                val topSongs = details?.topSongs?.take(4) ?: innerTubeClient.search("$artist top hits").take(4)
+                gatheredTracks.addAll(topSongs)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        val clean = gatheredTracks
+            .distinctBy { it.id }
+            .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+
+        return if (clean.isNotEmpty()) clean.shuffled().take(12) else defaultStarterTracks().shuffled().take(8)
+    }
+
+    private suspend fun pickDynamicSimilarArtist(): String {
+        val topFromHistory = listeningHistoryDao.getTopArtists(sinceMs = 0L, limit = 5).firstOrNull() ?: emptyList()
+        val tasteArtists = userManager.getTopTasteArtists(10)
+        val favArtists = userManager.getFavoriteArtists()
+
+        val candidatePool = (tasteArtists + favArtists + topFromHistory.map { it.artistName })
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+
+        return if (candidatePool.isNotEmpty()) {
+            candidatePool.shuffled().first()
+        } else {
+            topFromHistory.firstOrNull()?.artistName ?: "The Weeknd"
+        }
     }
 
     private fun loadInitialFeed() {
@@ -108,12 +179,17 @@ class HomeViewModel @Inject constructor(
                 } else defaultStarterTracks()
                 _trendingTracks.value = cleanTracks
 
-                val topArtistName = topArtists.firstOrNull()?.artistName ?: "The Weeknd"
+                val topArtistName = pickDynamicSimilarArtist()
+                _currentSimilarToArtist.value = topArtistName
                 lastResolvedArtist = topArtistName
                 val similarList = fetchSimilarArtistProfiles(topArtistName)
                 if (similarList.isNotEmpty()) {
                     _dynamicSimilarArtists.value = similarList
                 }
+
+                // Curate personalized "Songs for you" based on previously selected artists
+                val songsForYou = resolveSongsForYou()
+                _songsForYouTracks.value = songsForYou
             } catch (e: Exception) {
                 _trendingTracks.value = defaultStarterTracks()
             } finally {
@@ -147,23 +223,28 @@ class HomeViewModel @Inject constructor(
                     tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
                 } else defaultStarterTracks().shuffled()
 
-                // 4. Query dynamic similar artists in memory
-                val topArtistName = newTopArtists.firstOrNull()?.artistName ?: "The Weeknd"
+                // 4. Query dynamic similar artists dynamically shuffled among user choices
+                val topArtistName = pickDynamicSimilarArtist()
+                _currentSimilarToArtist.value = topArtistName
                 lastResolvedArtist = topArtistName
                 val newSimilarArtists = fetchSimilarArtistProfiles(topArtistName)
 
-                // 5. Ensure refresh animation runs for a smooth minimum time so user sees the animation
+                // 5. Query personalized "Songs for you"
+                val songsForYou = resolveSongsForYou()
+
+                // 6. Ensure refresh animation runs for a smooth minimum time so user sees the animation
                 val elapsed = System.currentTimeMillis() - startTime
                 if (elapsed < 800) {
                     kotlinx.coroutines.delay(800 - elapsed)
                 }
 
-                // 6. SYNC ALL REFRESHES TOGETHER ATOMICALLY
+                // 7. SYNC ALL REFRESHES TOGETHER ATOMICALLY
                 _greeting.value = newGreeting
                 _recentPlayedSongs.value = newRecent
                 _rediscoveredFavorites.value = newRediscovered
                 _topArtistStat.value = newTopArtists
                 _trendingTracks.value = newTracks
+                _songsForYouTracks.value = songsForYou
                 if (newSimilarArtists.isNotEmpty()) {
                     _dynamicSimilarArtists.value = newSimilarArtists
                 }
@@ -172,6 +253,44 @@ class HomeViewModel @Inject constructor(
             } finally {
                 _isRefreshing.value = false
             }
+        }
+    }
+
+    private suspend fun resolveSinceYouLikeSection(topPlayedSongs: List<SongStat>) {
+        try {
+            if (topPlayedSongs.isNotEmpty()) {
+                // User has played songs: pick random song from top 10 played songs
+                val randomSeed = topPlayedSongs.shuffled().first()
+                val title = "Since you like ${randomSeed.songTitle}, here are similar songs you might like :"
+                _sinceYouLikeTitle.value = title
+
+                val query = "${randomSeed.artistName} ${randomSeed.songTitle} similar"
+                val tracks = innerTubeClient.search(query).filter { it.id != randomSeed.songId }
+                val clean = if (tracks.isNotEmpty()) {
+                    tracks.distinctBy { it.id }.take(8)
+                } else {
+                    innerTubeClient.search("${randomSeed.artistName} hits").filter { it.id != randomSeed.songId }.take(8)
+                }
+                if (clean.isNotEmpty()) {
+                    _sinceYouLikeTracks.value = clean
+                }
+            } else {
+                // New user who just created account / no songs played yet: pick one of selected artists
+                val favoriteArtists = userManager.getFavoriteArtists()
+                val selectedArtist = if (favoriteArtists.isNotEmpty()) favoriteArtists.shuffled().first() else "The Weeknd"
+                val title = "Since you like $selectedArtist, here are similar songs you might like :"
+                _sinceYouLikeTitle.value = title
+
+                val details = innerTubeClient.getArtistDetails(selectedArtist)
+                val topSongs = details?.topSongs ?: innerTubeClient.search("$selectedArtist top hits")
+                if (topSongs.isNotEmpty()) {
+                    _sinceYouLikeTracks.value = topSongs.distinctBy { it.id }.take(8)
+                } else {
+                    _sinceYouLikeTracks.value = defaultStarterTracks().shuffled().take(6)
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 
