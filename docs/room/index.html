@@ -1,0 +1,186 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sielo Listen Together</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background-color: #0D1321;
+            color: #F8FAFC;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 24px;
+        }
+        .card {
+            background: #172033;
+            border: 1px solid rgba(250, 240, 202, 0.15);
+            border-radius: 24px;
+            padding: 32px 24px;
+            max-width: 420px;
+            width: 100%;
+            text-align: center;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+        }
+        .icon-circle {
+            width: 72px;
+            height: 72px;
+            background: rgba(250, 240, 202, 0.12);
+            border: 2px solid #FAF0CA;
+            border-radius: 50%;
+            margin: 0 auto 20px auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 32px;
+        }
+        h1 {
+            color: #FAF0CA;
+            font-size: 24px;
+            font-weight: 800;
+            margin-bottom: 8px;
+            letter-spacing: -0.5px;
+        }
+        p.subtitle {
+            color: #94A3B8;
+            font-size: 14px;
+            margin-bottom: 24px;
+            line-height: 1.5;
+        }
+        .room-box {
+            background: #0D1321;
+            border: 1.5px dashed rgba(250, 240, 202, 0.4);
+            border-radius: 16px;
+            padding: 16px;
+            margin-bottom: 24px;
+        }
+        .room-label {
+            font-size: 11px;
+            color: #94A3B8;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 4px;
+        }
+        .room-code {
+            font-size: 28px;
+            font-weight: 900;
+            color: #FAF0CA;
+            letter-spacing: 2px;
+        }
+        .btn-primary {
+            display: block;
+            width: 100%;
+            background: #FAF0CA;
+            color: #0D1321;
+            font-weight: 700;
+            font-size: 16px;
+            padding: 14px 20px;
+            border-radius: 14px;
+            text-decoration: none;
+            margin-bottom: 12px;
+            border: none;
+            cursor: pointer;
+            transition: transform 0.15s, opacity 0.15s;
+        }
+        .btn-primary:active { transform: scale(0.98); }
+        .btn-secondary {
+            display: block;
+            width: 100%;
+            background: rgba(255, 255, 255, 0.08);
+            color: #F8FAFC;
+            font-weight: 600;
+            font-size: 14px;
+            padding: 12px 20px;
+            border-radius: 14px;
+            text-decoration: none;
+            margin-bottom: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            cursor: pointer;
+        }
+        .tip {
+            font-size: 12px;
+            color: #64748B;
+            line-height: 1.5;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon-circle">&#x1F3A7;</div>
+        <h1>Listen Together</h1>
+        <p class="subtitle">You have been invited to join a synchronized listening session on Sielo Music.</p>
+        
+        <div class="room-box">
+            <div class="room-label">Room Code</div>
+            <div class="room-code" id="roomCodeDisplay">------</div>
+        </div>
+
+        <button class="btn-primary" id="openAppBtn">Open in Sielo App</button>
+        <button class="btn-secondary" id="copyCodeBtn">Copy Room Code</button>
+
+        <p class="tip">Opening Sielo automatically... If the app doesn't open, tap the button above or copy the code and enter it in Sielo.</p>
+    </div>
+
+    <script>
+        // Extract room ID and key from URL search or path
+        const params = new URLSearchParams(window.location.search);
+        let roomId = params.get('id') || params.get('room') || '';
+        let roomKey = params.get('key') || '';
+
+        // Check path if not in params e.g. /room/ABCDEF
+        if (!roomId) {
+            const parts = window.location.pathname.split('/').filter(p => p.length > 0);
+            const lastPart = parts[parts.length - 1];
+            if (lastPart && lastPart !== 'room' && lastPart !== 'index.html') {
+                roomId = lastPart;
+            }
+        }
+
+        // Check hash if key is in hash
+        if (window.location.hash) {
+            const hash = window.location.hash.substring(1);
+            const hashParams = new URLSearchParams(hash);
+            if (!roomKey && hashParams.get('key')) roomKey = hashParams.get('key');
+            if (!roomId && hashParams.get('id')) roomId = hashParams.get('id');
+        }
+
+        roomId = (roomId || '').trim().toUpperCase();
+        if (roomId) {
+            document.getElementById('roomCodeDisplay').innerText = roomId;
+        }
+
+        const appUrl = "sielo://room/" + roomId + (roomKey ? "?key=" + encodeURIComponent(roomKey) : "");
+        const intentUrl = "intent://room/" + roomId + (roomKey ? "?key=" + encodeURIComponent(roomKey) : "") + "#Intent;scheme=sielo;package=com.sielo.music;end";
+
+        // Handle button clicks
+        document.getElementById('openAppBtn').addEventListener('click', function() {
+            window.location.href = intentUrl;
+            setTimeout(function() {
+                window.location.href = appUrl;
+            }, 500);
+        });
+
+        document.getElementById('copyCodeBtn').addEventListener('click', function() {
+            if (navigator.clipboard && roomId) {
+                navigator.clipboard.writeText(roomId).then(() => {
+                    document.getElementById('copyCodeBtn').innerText = "Copied to Clipboard!";
+                    setTimeout(() => {
+                        document.getElementById('copyCodeBtn').innerText = "Copy Room Code";
+                    }, 2500);
+                });
+            }
+        });
+
+        // Auto trigger open on mobile
+        if (roomId) {
+            setTimeout(function() {
+                window.location.href = intentUrl;
+            }, 300);
+        }
+    </script>
+</body>
+</html>

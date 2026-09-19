@@ -1,0 +1,10 @@
+﻿[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "com.sielo.music",
+    "sha256_cert_fingerprints": [
+      "46:79:3A:CA:A6:43:9D:83:A0:CA:0C:83:68:29:67:48:06:6F:48:27:51:A1:E0:22:99:E4:DB:7D:CF:89:05:ED"
+    ]
+  }
+}]
