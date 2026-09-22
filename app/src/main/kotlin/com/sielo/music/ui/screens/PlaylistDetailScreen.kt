@@ -21,14 +21,22 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import com.sielo.music.ui.components.SongActionsSheet
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -67,6 +75,8 @@ fun PlaylistDetailScreen(
         onBack()
     }
 
+    var selectedSongActionsTrack by remember { mutableStateOf<SieloTrack?>(null) }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -74,7 +84,7 @@ fun PlaylistDetailScreen(
     ) {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(bottom = 120.dp)
+            contentPadding = PaddingValues(bottom = 210.dp)
         ) {
             // Header Image & Gradient Banner
             item {
@@ -125,9 +135,9 @@ fun PlaylistDetailScreen(
                                 .fillMaxSize()
                                 .background(
                                     Brush.verticalGradient(
-                                        colors = listOf(
+                                        listOf(
                                             Color.Transparent,
-                                            PaletteDarkNavy.copy(alpha = 0.6f),
+                                            PaletteDarkNavy.copy(alpha = 0.8f),
                                             PaletteDarkNavy
                                         )
                                     )
@@ -135,68 +145,63 @@ fun PlaylistDetailScreen(
                         )
                     }
 
-                    // Top Bar Back Button
-                    IconButton(
-                        onClick = onBack,
+                    // Floating Back Button
+                    Box(
                         modifier = Modifier
-                            .padding(top = 20.dp, start = 16.dp)
+                            .padding(top = 48.dp, start = 20.dp)
                             .size(40.dp)
                             .clip(CircleShape)
-                            .background(PaletteDarkNavy.copy(alpha = 0.75f))
-                            .border(1.dp, BorderGlass, CircleShape)
+                            .background(PaletteDarkNavy.copy(alpha = 0.65f))
+                            .clickable { onBack() },
+                        contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "Back",
-                            tint = PaletteCream
+                            tint = PaletteCream,
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                 }
             }
 
-            // Playlist Info & Play Action Header
+            // Playlist Info Header
             item {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 20.dp)
                 ) {
-                    // Genre Pill Badge
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(PaletteSageGreen.copy(alpha = 0.2f))
-                            .border(1.dp, PaletteSageGreen.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = playlist.genre.uppercase(),
-                            color = PaletteSageGreen,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
                     Text(
                         text = playlist.title,
                         color = PaletteCream,
+                        fontFamily = com.sielo.music.ui.theme.SoraFontFamily,
                         fontSize = 24.sp,
                         fontWeight = FontWeight.Bold,
-                        lineHeight = 30.sp
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
                     )
 
                     Spacer(modifier = Modifier.height(4.dp))
 
                     Text(
-                        text = "${playlist.subtitle} • ${tracks.size} tracks",
-                        color = TextSecondary,
-                        fontSize = 13.sp
+                        text = playlist.subtitle,
+                        color = PaletteSand,
+                        fontFamily = com.sielo.music.ui.theme.UrbanistFontFamily,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
                     )
 
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Text(
+                        text = "${tracks.size} tracks curated for you",
+                        color = TextSecondary,
+                        fontFamily = com.sielo.music.ui.theme.UrbanistFontFamily,
+                        fontSize = 12.sp
+                    )
+
+                    Spacer(modifier = Modifier.height(14.dp))
 
                     // "Play All" Action Button
                     Row(
@@ -272,24 +277,37 @@ fun PlaylistDetailScreen(
                     PlaylistTrackRow(
                         index = index + 1,
                         track = track,
-                        onPlay = { onPlayTrack(track, tracks) }
+                        onPlay = { onPlayTrack(track, tracks) },
+                        onMoreClick = { selectedSongActionsTrack = track }
                     )
                 }
             }
         }
     }
+
+    selectedSongActionsTrack?.let { tr ->
+        SongActionsSheet(
+            track = tr,
+            onDismiss = { selectedSongActionsTrack = null }
+        )
+    }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PlaylistTrackRow(
     index: Int,
     track: SieloTrack,
-    onPlay: () -> Unit
+    onPlay: () -> Unit,
+    onMoreClick: (() -> Unit)? = null
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onPlay() }
+            .combinedClickable(
+                onClick = onPlay,
+                onLongClick = { onMoreClick?.invoke() }
+            )
             .padding(horizontal = 20.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
@@ -329,7 +347,7 @@ fun PlaylistTrackRow(
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = "${track.artist} • ${track.durationText ?: "3:24"}",
+                    text = "${track.artist} • ${track.formattedDuration}",
                     color = TextSecondary,
                     fontSize = 12.sp,
                     maxLines = 1,
@@ -338,13 +356,29 @@ fun PlaylistTrackRow(
             }
         }
 
-        IconButton(onClick = onPlay) {
-            Icon(
-                imageVector = Icons.Default.PlayArrow,
-                contentDescription = "Play",
-                tint = PaletteSand,
-                modifier = Modifier.size(20.dp)
-            )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            IconButton(onClick = onPlay) {
+                Icon(
+                    imageVector = Icons.Default.PlayArrow,
+                    contentDescription = "Play",
+                    tint = PaletteSand,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            if (onMoreClick != null) {
+                IconButton(onClick = onMoreClick) {
+                    Icon(
+                        imageVector = Icons.Default.MoreVert,
+                        contentDescription = "Options",
+                        tint = TextSecondary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
         }
     }
 }

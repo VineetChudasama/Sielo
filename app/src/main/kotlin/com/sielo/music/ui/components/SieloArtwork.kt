@@ -13,9 +13,12 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -162,29 +165,34 @@ fun SieloSongArtwork(
     val context = LocalContext.current
 
     // Synchronous memory cache check to avoid reloading on screen transitions
-    val raw = thumbnailUrl?.trim() ?: ""
+    val raw = thumbnailUrl?.trim()?.takeIf { it.isNotBlank() }
     val cached = JioSaavnSongArtworkResolver.getCachedArtwork(title, artist)
-    val isAlreadyStudioArt = raw.isNotBlank() && !raw.contains("i.ytimg.com") && !raw.contains("lh3.googleusercontent.com") && !raw.contains("default-music") && !raw.contains("default-film")
-    val initialResolved = cached ?: if (isAlreadyStudioArt) raw else null
+    val initialResolved = cached ?: raw
 
     // Dynamically resolve high-res studio artwork without flashing raw video thumbnails
-    val resolvedUrl by produceState<String?>(
-        initialValue = initialResolved,
-        key1 = thumbnailUrl,
-        key2 = title,
-        key3 = artist
-    ) {
-        if (!cached.isNullOrBlank()) {
-            value = cached
+    var resolvedUrl by remember(thumbnailUrl, title, artist) {
+        mutableStateOf(initialResolved)
+    }
+
+    LaunchedEffect(thumbnailUrl, title, artist) {
+        val currentCached = JioSaavnSongArtworkResolver.getCachedArtwork(title, artist)
+        val isRawValidStudioArt = !raw.isNullOrBlank() &&
+            (raw.contains("googleusercontent.com") || raw.contains("c.saavncdn.com") || raw.contains("hqdefault") || raw.contains("sddefault")) &&
+            !raw.contains("default.jpg")
+
+        if (!currentCached.isNullOrBlank()) {
+            resolvedUrl = currentCached
+        } else if (isRawValidStudioArt) {
+            resolvedUrl = raw
         } else if (!title.isNullOrBlank()) {
             val saavnCover = JioSaavnSongArtworkResolver.resolveSongArtwork(title, artist)
             if (!saavnCover.isNullOrBlank()) {
-                value = saavnCover
-            } else if (raw.isNotBlank()) {
-                value = raw
+                resolvedUrl = saavnCover
+            } else if (!raw.isNullOrBlank()) {
+                resolvedUrl = raw
             }
-        } else if (raw.isNotBlank()) {
-            value = raw
+        } else if (!raw.isNullOrBlank()) {
+            resolvedUrl = raw
         }
     }
 
@@ -194,7 +202,7 @@ fun SieloSongArtwork(
                 .data(resolvedUrl)
                 .memoryCacheKey(resolvedUrl)
                 .memoryCachePolicy(CachePolicy.ENABLED)
-                .diskCachePolicy(CachePolicy.DISABLED)
+                .diskCachePolicy(CachePolicy.ENABLED)
                 .networkCachePolicy(CachePolicy.ENABLED)
                 .crossfade(200)
                 .build()
@@ -292,38 +300,49 @@ fun SieloArtistPhoto(
     }
 
     val raw = imageUrl?.trim() ?: ""
-    val cachedPhoto = YouTubeArtistImageResolver.getCachedArtistImageUrl(name)
-    val isDirectPhoto = raw.isNotBlank() && (raw.contains("ggpht.com") || raw.contains("googleusercontent.com")) && !raw.contains("i.ytimg.com") && !raw.contains("default-music")
-    val initialPhoto = cachedPhoto ?: if (isDirectPhoto) raw else null
+    var fallbackUrl by remember(name) { mutableStateOf<String?>(null) }
+    var didErrorOccur by remember(raw, name) { mutableStateOf(false) }
 
-    // Directly fetch artist photo from YouTube Music on the fly when needed
-    val resolvedUrl by produceState<String?>(
-        initialValue = initialPhoto,
-        key1 = imageUrl,
-        key2 = name
-    ) {
-        if (!cachedPhoto.isNullOrBlank()) {
-            value = cachedPhoto
-        } else if (isDirectPhoto) {
-            value = raw
-        } else if (name.isNotBlank()) {
-            val ytPhoto = YouTubeArtistImageResolver.resolveArtistImageUrl(name)
-            if (!ytPhoto.isNullOrBlank()) {
-                value = ytPhoto
-            } else if (raw.isNotBlank()) {
-                value = raw
+    LaunchedEffect(didErrorOccur, name) {
+        if (didErrorOccur && name.isNotBlank()) {
+            val liveUrl = YouTubeArtistImageResolver.resolveArtistImageUrl(name)
+            if (!liveUrl.isNullOrBlank() && liveUrl != raw) {
+                fallbackUrl = liveUrl
             }
         }
     }
 
-    val imageRequest = remember(resolvedUrl) {
-        if (!resolvedUrl.isNullOrBlank()) {
+    val cachedPhoto = YouTubeArtistImageResolver.getCachedArtistImageUrl(name)
+    val isDirectPhoto = raw.isNotBlank() && (raw.contains("saavncdn.com/") || raw.contains("googleusercontent.com") || raw.contains("ggpht.com")) && !raw.contains("default") && !raw.contains("film") && !raw.contains("music")
+
+    val initialPhoto = cachedPhoto ?: fallbackUrl ?: if (isDirectPhoto && !didErrorOccur) raw else null
+
+    // Directly fetch artist photo from official verified source on the fly when needed
+    val resolvedUrl by produceState<String?>(
+        initialValue = initialPhoto,
+        imageUrl,
+        name,
+        fallbackUrl,
+        didErrorOccur
+    ) {
+        if (!cachedPhoto.isNullOrBlank()) {
+            this.value = cachedPhoto
+        } else if (!fallbackUrl.isNullOrBlank()) {
+            this.value = fallbackUrl
+        } else if (isDirectPhoto && !didErrorOccur) {
+            this.value = raw
+        } else if (name.isNotBlank()) {
+            val photo = YouTubeArtistImageResolver.resolveArtistImageUrl(name)
+            this.value = photo
+        }
+    }
+
+    val finalUrl = fallbackUrl ?: resolvedUrl
+
+    val imageRequest = remember(finalUrl) {
+        if (!finalUrl.isNullOrBlank()) {
             ImageRequest.Builder(context)
-                .data(resolvedUrl)
-                .memoryCacheKey(resolvedUrl)
-                .memoryCachePolicy(CachePolicy.ENABLED)
-                .diskCachePolicy(CachePolicy.DISABLED)
-                .networkCachePolicy(CachePolicy.ENABLED)
+                .data(finalUrl)
                 .crossfade(200)
                 .build()
         } else null
@@ -334,6 +353,9 @@ fun SieloArtistPhoto(
             model = imageRequest,
             contentDescription = name,
             contentScale = contentScale,
+            onError = {
+                didErrorOccur = true
+            },
             modifier = modifier
                 .clip(shape)
                 .background(PaletteOxfordBlue)

@@ -210,12 +210,22 @@ class UserManager @Inject constructor(
         _isOnboardingOpen.value = false
     }
 
+    fun updateProfile(name: String, username: String? = null, bio: String? = null) {
+        val current = _currentUser.value ?: return
+        val updated = current.copy(
+            name = name.trim().ifBlank { current.name },
+            username = username?.trim()?.removePrefix("@")?.ifBlank { null },
+            bio = bio?.trim()?.ifBlank { null }
+        )
+        persistUser(updated)
+    }
+
     /**
      * Dynamically updates user taste weights as they listen to music.
      */
     fun recordSongPlayed(artist: String, genre: String? = null) {
         val current = _currentUser.value ?: return
-        val cleanArtist = artist.split(Regex("(?i)\\s*(?:,|&|feat\\.?|ft\\.?|/|;|x)\\s*")).firstOrNull()?.trim()?.lowercase()
+        val cleanArtist = artist.split(Regex("(?i)\\s*(?:,|&|\\bfeat\\.?\\b|\\bft\\.?\\b|/|;|\\bx\\b|\\bwith\\b)\\s*")).firstOrNull()?.trim()?.lowercase()
             ?: artist.trim().lowercase()
 
         val updatedArtistWeights = current.artistTasteWeights.toMutableMap()
@@ -236,6 +246,32 @@ class UserManager @Inject constructor(
 
     fun getFavoriteArtists(): List<String> {
         return _currentUser.value?.favoriteArtists ?: emptyList()
+    }
+
+    fun isArtistFollowed(artistName: String): Boolean {
+        val clean = artistName.trim()
+        return _currentUser.value?.favoriteArtists?.any { it.equals(clean, ignoreCase = true) } == true
+    }
+
+    fun toggleFollowArtist(artistName: String): Boolean {
+        val current = _currentUser.value ?: return false
+        val clean = artistName.trim()
+        val isFollowed = current.favoriteArtists.any { it.equals(clean, ignoreCase = true) }
+        val updatedList = if (isFollowed) {
+            current.favoriteArtists.filterNot { it.equals(clean, ignoreCase = true) }
+        } else {
+            current.favoriteArtists + clean
+        }
+        val updatedWeights = current.artistTasteWeights.toMutableMap()
+        if (!isFollowed) {
+            updatedWeights[clean.lowercase()] = (updatedWeights[clean.lowercase()] ?: 0) + 15
+        }
+        val updated = current.copy(
+            favoriteArtists = updatedList.distinct(),
+            artistTasteWeights = updatedWeights
+        )
+        persistUser(updated)
+        return !isFollowed
     }
 
     fun getFavoriteGenres(): List<String> {
@@ -280,6 +316,57 @@ class UserManager @Inject constructor(
             }
             try {
                 databaseCleaner.clearAll()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun deleteAccount() {
+        val email = _currentUser.value?.email?.trim()?.lowercase()
+        _currentUser.value = null
+
+        // 1. Wipe current user and email entry from auth preferences
+        val authEditor = prefs.edit().remove(KEY_CURRENT_USER)
+        if (!email.isNullOrBlank()) {
+            authEditor.remove("$KEY_ALL_USERS_PREFIX$email")
+        }
+        authEditor.apply()
+
+        // 2. Wipe related preferences (room sessions, player state, lyric offsets)
+        try {
+            context.getSharedPreferences("sielo_player_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+            context.getSharedPreferences("sielo_room_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+            context.getSharedPreferences("sielo_user_lyric_offsets", Context.MODE_PRIVATE).edit().clear().commit()
+            context.getSharedPreferences("sielo_room_session", Context.MODE_PRIVATE).edit().clear().commit()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        // 3. Reset app flow to fresh auth
+        _isOnboardingOpen.value = false
+        _isAuthDialogOpen.value = true
+
+        // 4. Background purge of database tables, feature cache, audio player, and disk cache
+        scope.launch(Dispatchers.IO) {
+            try {
+                playerManager.resetPlayer()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            try {
+                databaseCleaner.clearAll()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            try {
+                val featureFile = java.io.File(context.filesDir, "track_audio_features_cache.json")
+                if (featureFile.exists()) featureFile.delete()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            try {
+                context.cacheDir.deleteRecursively()
             } catch (e: Exception) {
                 e.printStackTrace()
             }

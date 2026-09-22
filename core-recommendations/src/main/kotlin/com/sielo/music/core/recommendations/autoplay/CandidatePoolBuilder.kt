@@ -342,7 +342,7 @@ open class CandidatePoolBuilder @Inject constructor(
 
     private fun extractPrimaryArtist(rawArtist: String): String {
         if (rawArtist.isBlank()) return ""
-        val cleaned = rawArtist.split(Regex("(?i)\\s*(?:,|&|feat\\.?|ft\\.?|/|;|x)\\s*")).firstOrNull()?.trim()
+        val cleaned = rawArtist.split(Regex("(?i)\\s*(?:,|&|\\bfeat\\.?\\b|\\bft\\.?\\b|/|;|\\bx\\b|\\bwith\\b)\\s*")).firstOrNull()?.trim()
         return if (!cleaned.isNullOrBlank()) cleaned else rawArtist.trim()
     }
 }

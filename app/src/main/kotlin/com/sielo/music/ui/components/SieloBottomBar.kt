@@ -66,7 +66,7 @@ fun SieloBottomBar(
     val items = Screen.bottomNavItems
     val selectedIndex = remember(currentRoute) {
         val idx = items.indexOfFirst { it.route == currentRoute }
-        if (idx >= 0) idx else 0
+        if (idx >= 0) idx else if (currentRoute == "settings" || currentRoute == "user_playlists") 4 else 0
     }
 
     val density = LocalDensity.current

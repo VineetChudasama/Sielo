@@ -84,7 +84,7 @@ object JioSaavnSongArtworkResolver {
         if (query.isBlank()) return null
         try {
             val encodedQuery = URLEncoder.encode(query, "UTF-8")
-            val url = "https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&cc=in&includeMetaTags=1&p=1&n=5&q=$encodedQuery"
+            val url = "https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&_marker=0&cc=in&includeMetaTags=1&p=1&n=20&q=$encodedQuery"
 
             val request = Request.Builder()
                 .url(url)
@@ -98,13 +98,35 @@ object JioSaavnSongArtworkResolver {
 
             if (results.isEmpty()) return null
 
-            val matchingSong = results.mapNotNull { it.jsonObject }.firstOrNull { obj ->
+            val matchingCandidates = results.mapNotNull { it.jsonObject }.filter { obj ->
                 val songTitle = obj["song"]?.jsonPrimitive?.content ?: obj["title"]?.jsonPrimitive?.content ?: ""
                 val songArtist = obj["primary_artists"]?.jsonPrimitive?.content ?: obj["singers"]?.jsonPrimitive?.content ?: ""
-                TrackMatchValidator.isFuzzyMatch(expectedTitle, songTitle, expectedArtist, songArtist)
-            } ?: return null
+                val albumTitle = obj["album"]?.jsonPrimitive?.content ?: ""
 
-            val rawImage = matchingSong["image"]?.jsonPrimitive?.content ?: return null
+                val albumLower = albumTitle.lowercase()
+                val titleLower = songTitle.lowercase()
+                val isFakeCover = albumLower.contains("karaoke") || albumLower.contains("tribute") ||
+                                  albumLower.contains("instrumental") || albumLower.contains("cover") ||
+                                  titleLower.contains("karaoke") || titleLower.contains("tribute")
+
+                !isFakeCover && TrackMatchValidator.isFuzzyMatch(expectedTitle, songTitle, expectedArtist, songArtist)
+            }
+
+            if (matchingCandidates.isEmpty()) return null
+
+            // Prioritize authentic original movie / studio albums over cheap compilation re-issues with banner art
+            val bestMatchingSong = matchingCandidates.minWithOrNull(
+                compareBy<kotlinx.serialization.json.JsonObject> { obj ->
+                    val album = obj["album"]?.jsonPrimitive?.content
+                    val artist = obj["primary_artists"]?.jsonPrimitive?.content ?: obj["singers"]?.jsonPrimitive?.content
+                    if (TrackMatchValidator.isCompilationAlbum(album, artist)) 1 else 0
+                }.thenBy { obj ->
+                    val yearStr = obj["year"]?.jsonPrimitive?.content
+                    yearStr?.toIntOrNull() ?: 2099
+                }
+            ) ?: matchingCandidates.first()
+
+            val rawImage = bestMatchingSong["image"]?.jsonPrimitive?.content ?: return null
 
             val highResImage = rawImage
                 .replace("50x50", "500x500")

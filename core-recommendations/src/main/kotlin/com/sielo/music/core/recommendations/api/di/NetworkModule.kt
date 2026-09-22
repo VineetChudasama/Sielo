@@ -79,7 +79,7 @@ object NetworkModule {
         return OkHttpClient.Builder()
             .addInterceptor { chain ->
                 val request = chain.request().newBuilder()
-                    .header("User-Agent", "Sielo/1.0 (contact@sielo.app; https://github.com/sielo-app/sielo)")
+                    .header("User-Agent", "Sielo/8.0.4 (contact@sielo.app; https://github.com/VineetChudasama/Sielo)")
                     .header("Accept", "application/json")
                     .build()
                 chain.proceed(request)

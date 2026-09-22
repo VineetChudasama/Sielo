@@ -77,6 +77,106 @@ object TrackMatchValidator {
             .trim()
     }
 
+    val COMPILATION_KEYWORDS = listOf(
+        "hits", "hit songs", "best of", "collection", "compilation", "greatest hits",
+        "love hits", "romantic hits", "classic hits", "top hits", "hot hits", "super hits",
+        "special", "valentines", "wedding", "heartbeats", "chillout", "feel good",
+        "happy vibes", "vibes", "through the years", "jukebox", "party songs", "dance hits",
+        "essentials", "non stop", "nonstop", "mashup", "unplugged collection", "bollywood",
+        "film hits", "movie hits", "radio hits",
+        // Extended keywords for authentic album filtering
+        "old hindi songs", "hindi songs", "old is gold", "romantic songs", "love songs", "sad songs",
+        "gold songs", "golden songs", "golden collection", "all time hits", "evergreen",
+        "retro", "nostalgia", "melodies", "superhit", "superhits", "blockbuster",
+        "anthology", "timeless", "gems", "favorites", "favourites", "classics",
+        "vol.", "vol ", "volume", "chapter", "jhankar", "remix", "party", "dance",
+        "unforgettable", "sentimental", "magical", "tribute", "dedication", "remembering",
+        "memorial", "legends", "legend", "top 10", "top 20", "top 50", "top 100",
+        "songs by", "songs of", "music by", "greatest", "all-time",
+        "karaoke", "karaoke picks", "sing-along", "sing along", "instrumental", "tribute",
+        "tribute to", "cover", "piano", "acoustic cover", "ringtone", "backing track", "prosortc"
+    )
+
+    fun isCompilationAlbum(album: String?, artist: String? = null): Boolean {
+        if (album.isNullOrBlank()) return false
+        val lower = album.lowercase().trim()
+        if (!artist.isNullOrBlank()) {
+            val aLower = artist.lowercase().trim()
+            if (lower.contains(aLower) && (
+                lower.contains("hits") || lower.contains("best") ||
+                lower.contains("collection") || lower.contains("love") ||
+                lower.contains("romantic") || lower.contains("songs") ||
+                lower.contains("special") || lower.contains("classics")
+            )) {
+                return true
+            }
+        }
+        return COMPILATION_KEYWORDS.any { lower.contains(it) }
+    }
+
+    /**
+     * Strictly verifies whether an album was authentically made by the artist.
+     * Rejects compilations, playlists, tribute collections, and albums created by other artists.
+     */
+    fun isAlbumMadeByArtist(
+        albumTitle: String,
+        albumArtist: String?,
+        targetArtist: String,
+        primaryArtists: String? = null,
+        singers: String? = null,
+        music: String? = null
+    ): Boolean {
+        val titleLower = albumTitle.lowercase().trim()
+        val artistLower = targetArtist.lowercase().trim()
+
+        // 1. Must not be a compilation or generic playlist
+        if (isCompilationAlbum(titleLower, targetArtist)) {
+            return false
+        }
+
+        // 2. Reject if the title explicitly attributes the work to other artists (e.g. "by Rafi & Lata")
+        if (titleLower.contains(" by ") && !titleLower.contains(artistLower)) {
+            return false
+        }
+
+        // 3. Check JioSaavn structured artist fields if provided
+        val hasStructuredArtists = !primaryArtists.isNullOrBlank() || !singers.isNullOrBlank() || !music.isNullOrBlank()
+        if (hasStructuredArtists) {
+            val inPrimary = primaryArtists?.contains(artistLower, ignoreCase = true) == true
+            val inSingers = singers?.contains(artistLower, ignoreCase = true) == true
+            val inMusic = music?.contains(artistLower, ignoreCase = true) == true
+
+            // For an original album, artist must be primary artist, singer, or composer
+            if (!inPrimary && !inSingers && !inMusic) {
+                return false
+            }
+        }
+
+        // 4. If album artist string is provided (e.g. from YouTube Music)
+        if (!albumArtist.isNullOrBlank()) {
+            val albumArtistLower = albumArtist.lowercase().trim()
+            if (albumArtistLower.contains("various artists", ignoreCase = true) ||
+                albumArtistLower.contains("compilation", ignoreCase = true)
+            ) {
+                return false
+            }
+            // If the albumArtist does not match target artist and does not contain it
+            if (!albumArtistLower.contains(artistLower) && !artistLower.contains(albumArtistLower)) {
+                return false
+            }
+        }
+
+        return true
+    }
+
+    fun isYouTubeChannelId(idOrName: String?): Boolean {
+        if (idOrName.isNullOrBlank()) return false
+        val clean = idOrName.trim()
+        return (clean.startsWith("UC") && clean.length in 20..32 && clean.none { it.isWhitespace() }) ||
+               (clean.startsWith("FE") && clean.length in 10..32 && clean.none { it.isWhitespace() }) ||
+               (clean.startsWith("VL") && clean.length in 10..34 && clean.none { it.isWhitespace() })
+    }
+
     /**
      * Generates a canonical deduplication key by normalizing title noise (like "(From ...)")
      * and sorting artist names alphabetically so swapped artist orders collapse together.
@@ -106,14 +206,66 @@ object TrackMatchValidator {
     }
 
     fun deduplicateTracks(tracks: List<com.sielo.music.core.network.models.SieloTrack>): List<com.sielo.music.core.network.models.SieloTrack> {
-        val seen = HashSet<String>()
-        val result = ArrayList<com.sielo.music.core.network.models.SieloTrack>()
+        val groups = LinkedHashMap<String, MutableList<com.sielo.music.core.network.models.SieloTrack>>()
         for (track in tracks) {
             val key = canonicalTrackKey(track.title, track.artist)
-            if (key.isBlank() || seen.add(key)) {
-                result.add(track)
+            if (key.isBlank()) {
+                groups.getOrPut(track.id) { ArrayList() }.add(track)
+            } else {
+                groups.getOrPut(key) { ArrayList() }.add(track)
             }
         }
+
+        val result = ArrayList<com.sielo.music.core.network.models.SieloTrack>()
+        for ((_, group) in groups) {
+            // Sort each group so that:
+            // 1. Original studio/movie releases come BEFORE compilation re-issues (prevents fake compilation art)
+            // 2. High-res studio artwork (c.saavncdn.com) preferred over YouTube video thumbnails (i.ytimg.com)
+            // 3. Audio stream URL availability preferred
+            val bestTrack = group.minWithOrNull(
+                compareBy<com.sielo.music.core.network.models.SieloTrack> { track ->
+                    if (isCompilationAlbum(track.album, track.artist)) 1 else 0
+                }.thenBy { track ->
+                    val thumb = track.thumbnailUrl ?: ""
+                    if (thumb.contains("c.saavncdn.com")) 0 else if (thumb.contains("i.ytimg.com")) 2 else 1
+                }.thenBy { track ->
+                    if (!track.streamUrl.isNullOrBlank()) 0 else 1
+                }
+            ) ?: group.first()
+            result.add(bestTrack)
+        }
         return result
+    }
+
+    fun isSongByOrFeaturingArtist(
+        trackTitle: String?,
+        trackArtist: String?,
+        targetArtist: String?
+    ): Boolean {
+        if (targetArtist.isNullOrBlank()) return true
+        val cleanTarget = targetArtist.trim()
+        val targetNorm = cleanTarget.lowercase().replace(Regex("[^a-z0-9]"), "")
+        if (targetNorm.isBlank()) return true
+
+        val artistStr = trackArtist.orEmpty()
+        val titleStr = trackTitle.orEmpty()
+
+        val artistNorm = artistStr.lowercase().replace(Regex("[^a-z0-9]"), "")
+        if (artistNorm.contains(targetNorm)) return true
+
+        val titleNorm = titleStr.lowercase().replace(Regex("[^a-z0-9]"), "")
+        if (titleNorm.contains(targetNorm)) return true
+
+        // Check if all meaningful tokens of targetArtist exist in track artist or title
+        val tokens = cleanTarget.lowercase().split(Regex("[^a-z0-9]+")).filter { it.length >= 2 }
+        if (tokens.size >= 2) {
+            val aLower = artistStr.lowercase()
+            val tLower = titleStr.lowercase()
+            val inArtist = tokens.all { aLower.contains(it) }
+            val inTitle = tokens.all { tLower.contains(it) }
+            if (inArtist || inTitle) return true
+        }
+
+        return false
     }
 }

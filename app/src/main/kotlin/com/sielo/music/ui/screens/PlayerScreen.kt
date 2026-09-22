@@ -181,7 +181,7 @@ fun PlayerScreen(
     }
 
     BackHandler(enabled = pagerState.currentPage == 1) {
-        dismissPlayer()
+        onClose()
     }
 
     Box(
@@ -403,7 +403,8 @@ private fun NowPlayingPageView(
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 32.dp)
             )
 
             Spacer(modifier = Modifier.height(4.dp))
@@ -413,7 +414,11 @@ private fun NowPlayingPageView(
                 color = TextSecondary,
                 fontFamily = UrbanistFontFamily,
                 fontSize = 15.sp,
-                fontWeight = FontWeight.Normal
+                fontWeight = FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 32.dp)
             )
 
             Spacer(modifier = Modifier.height(22.dp))

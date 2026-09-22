@@ -56,11 +56,39 @@ class MusicPlaybackService : MediaSessionService() {
         fun getCache(context: Context): SimpleCache {
             if (simpleCache == null) {
                 val cacheDir = File(context.cacheDir, "sielo_audio_cache")
-                val evictor = LeastRecentlyUsedCacheEvictor(120 * 1024 * 1024L) // 120 MB disk cache
+                val evictor = LeastRecentlyUsedCacheEvictor(512 * 1024 * 1024L) // 512 MB disk cache
                 val databaseProvider = StandaloneDatabaseProvider(context)
                 simpleCache = SimpleCache(cacheDir, evictor, databaseProvider)
             }
             return simpleCache!!
+        }
+
+        fun clearAudioCache(context: Context) {
+            try {
+                simpleCache?.let { cache ->
+                    for (key in cache.keys.toList()) {
+                        try { cache.removeResource(key) } catch (_: Exception) {}
+                    }
+                }
+                val cacheDir = File(context.cacheDir, "sielo_audio_cache")
+                if (cacheDir.exists()) {
+                    cacheDir.deleteRecursively()
+                    cacheDir.mkdirs()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        fun getCacheSizeBytes(context: Context): Long {
+            return try {
+                val cacheDir = File(context.cacheDir, "sielo_audio_cache")
+                if (cacheDir.exists()) {
+                    cacheDir.walkTopDown().filter { it.isFile }.map { it.length() }.sum()
+                } else 0L
+            } catch (_: Exception) {
+                0L
+            }
         }
     }
 
@@ -141,6 +169,10 @@ class MusicPlaybackService : MediaSessionService() {
             .build().apply {
                 playbackParameters = androidx.media3.common.PlaybackParameters(1.0f)
                 addListener(object : androidx.media3.common.Player.Listener {
+                    override fun onAudioSessionIdChanged(audioSessionId: Int) {
+                        com.sielo.music.core.audio.AudioEffectsManager.onAudioSessionIdChanged(audioSessionId)
+                    }
+
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                         android.util.Log.e("MusicPlaybackService", "ExoPlayer Error in Service: ${error.errorCodeName} - ${error.message}", error)
                     }
@@ -149,6 +181,7 @@ class MusicPlaybackService : MediaSessionService() {
                         android.util.Log.d("MusicPlaybackService", "Service Playback State changed: $playbackState (isPlaying=$isPlaying)")
                     }
                 })
+                com.sielo.music.core.audio.AudioEffectsManager.onAudioSessionIdChanged(audioSessionId)
             }
 
         val forwardingPlayer = object : ForwardingPlayer(player) {
@@ -231,7 +264,18 @@ class MusicPlaybackService : MediaSessionService() {
         return mediaSession
     }
 
+    override fun onTaskRemoved(rootIntent: android.content.Intent?) {
+        try {
+            playerManager.get().saveCurrentPlaybackPosition(forceSync = true)
+        } catch (_: Exception) {}
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
+        try {
+            playerManager.get().saveCurrentPlaybackPosition(forceSync = true)
+        } catch (_: Exception) {}
+        com.sielo.music.core.audio.AudioEffectsManager.release()
         mediaSession?.run {
             player.release()
             release()

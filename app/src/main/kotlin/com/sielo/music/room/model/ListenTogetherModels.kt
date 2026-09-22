@@ -56,7 +56,8 @@ sealed class RoomEvent {
         val positionMs: Long,
         val timestampEpochMs: Long,
         val queue: List<RoomQueueItem>,
-        val participants: List<RoomParticipant>
+        val participants: List<RoomParticipant>,
+        val sequenceNumber: Long = 0L
     ) : RoomEvent()
 
     @Serializable
@@ -72,7 +73,8 @@ sealed class RoomEvent {
         val track: SieloTrack? = null,
         val positionMs: Long = 0L,
         val timestampEpochMs: Long = System.currentTimeMillis(),
-        val triggeredBy: String
+        val triggeredBy: String,
+        val sequenceNumber: Long = 0L
     ) : RoomEvent()
 
     @Serializable
@@ -99,6 +101,14 @@ sealed class RoomEvent {
         val userId: String,
         val userName: String,
         val isTyping: Boolean
+    ) : RoomEvent()
+
+    @Serializable
+    @SerialName("transfer_host")
+    data class TransferHost(
+        val newHostId: String,
+        val newHostName: String,
+        val previousHostName: String
     ) : RoomEvent()
 }
 

@@ -20,5 +20,7 @@ data class UserProfile(
     val favoriteArtists: List<String> = emptyList(),
     val favoriteGenres: List<String> = emptyList(),
     val artistTasteWeights: Map<String, Int> = emptyMap(),
-    val genreTasteWeights: Map<String, Int> = emptyMap()
+    val genreTasteWeights: Map<String, Int> = emptyMap(),
+    val bio: String? = null,
+    val username: String? = null
 )

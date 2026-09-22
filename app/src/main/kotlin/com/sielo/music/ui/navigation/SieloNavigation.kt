@@ -54,6 +54,20 @@ sealed class Screen(
         unselectedIcon = Icons.Outlined.Person
     )
 
+    data object Settings : Screen(
+        route = "settings",
+        title = "Settings",
+        selectedIcon = Icons.Filled.Person,
+        unselectedIcon = Icons.Outlined.Person
+    )
+
+    data object UserPlaylists : Screen(
+        route = "user_playlists",
+        title = "Playlists",
+        selectedIcon = Icons.Filled.Person,
+        unselectedIcon = Icons.Outlined.Person
+    )
+
     companion object {
         val bottomNavItems: List<Screen>
             get() = listOf(Home, Search, ListenTogether, Stats, Profile)

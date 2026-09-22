@@ -3,6 +3,7 @@ package com.sielo.music.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.sielo.music.core.audio.PlayerManager
+import com.sielo.music.core.audio.model.PlaybackState
 import com.sielo.music.core.database.dao.FavoriteTrackDao
 import com.sielo.music.core.database.dao.ListeningHistoryDao
 import com.sielo.music.core.database.dao.SearchHistoryDao
@@ -17,8 +18,10 @@ import com.sielo.music.core.network.models.ArtistDetails
 import com.sielo.music.core.network.models.SieloArtist
 import com.sielo.music.core.network.models.SieloTrack
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -34,7 +37,8 @@ class SearchViewModel @Inject constructor(
     private val favoriteTrackDao: FavoriteTrackDao,
     private val searchHistoryDao: SearchHistoryDao,
     private val searchPlayHistoryDao: SearchPlayHistoryDao,
-    private val listeningHistoryDao: ListeningHistoryDao
+    private val listeningHistoryDao: ListeningHistoryDao,
+    private val userManager: com.sielo.music.core.auth.UserManager
 ) : ViewModel() {
 
     private val _searchQuery = MutableStateFlow("")
@@ -125,8 +129,7 @@ class SearchViewModel @Inject constructor(
         }
 
         searchJob = viewModelScope.launch {
-            // Ultra-responsive debounce for typing feedback
-            delay(120)
+            delay(280)
             executeSearch(query, _filterCategory.value)
         }
     }
@@ -176,10 +179,11 @@ class SearchViewModel @Inject constructor(
 
     fun setCategory(category: String) {
         _filterCategory.value = category
-        if (_searchQuery.value.isNotBlank()) {
+        val currentQuery = _searchQuery.value.trim()
+        if (currentQuery.isNotBlank()) {
             searchJob?.cancel()
             searchJob = viewModelScope.launch {
-                executeSearch(_searchQuery.value, category)
+                executeSearch(currentQuery, category)
             }
         }
     }
@@ -197,24 +201,36 @@ class SearchViewModel @Inject constructor(
             .replace(Regex("(?i)\\bhe\\b"), "hi")
     }
 
-    private fun executeSearch(query: String, category: String) {
+    private suspend fun executeSearch(query: String, category: String) {
         val trimmed = query.trim()
+        if (trimmed.isBlank()) {
+            _searchResults.value = emptyList()
+            _artistResults.value = emptyList()
+            _isSearching.value = false
+            return
+        }
         val normalized = normalizeSearchQuery(trimmed)
-        viewModelScope.launch {
-            _isSearching.value = true
+        _isSearching.value = true
+
+        try {
             when (category) {
                 "Artists" -> {
                     val artists = innerTubeClient.searchArtists(trimmed)
-                    _artistResults.value = rankArtists(artists, trimmed)
-                    _searchResults.value = emptyList()
+                    // Guard against race condition if user typed new characters while search was running
+                    if (_searchQuery.value.trim().equals(trimmed, ignoreCase = true)) {
+                        _artistResults.value = rankArtists(artists, trimmed)
+                        _searchResults.value = emptyList()
+                    }
                 }
                 "Songs" -> {
                     val primaryTracks = innerTubeClient.search(trimmed)
                     val additionalTracks = if (normalized != trimmed) innerTubeClient.search(normalized) else emptyList()
                     val allTracks = (primaryTracks + additionalTracks)
                     val deduplicated = TrackMatchValidator.deduplicateTracks(allTracks).distinctBy { it.id }
-                    _searchResults.value = rankTracks(deduplicated, trimmed)
-                    _artistResults.value = emptyList()
+                    if (_searchQuery.value.trim().equals(trimmed, ignoreCase = true)) {
+                        _searchResults.value = rankTracks(deduplicated, trimmed)
+                        _artistResults.value = emptyList()
+                    }
                 }
                 else -> { // "All" or other
                     val primaryTracks = innerTubeClient.search(trimmed)
@@ -222,11 +238,16 @@ class SearchViewModel @Inject constructor(
                     val allTracks = (primaryTracks + additionalTracks)
                     val artists = innerTubeClient.searchArtists(trimmed)
                     val deduplicated = TrackMatchValidator.deduplicateTracks(allTracks).distinctBy { it.id }
-                    _searchResults.value = rankTracks(deduplicated, trimmed)
-                    _artistResults.value = rankArtists(artists, trimmed)
+                    if (_searchQuery.value.trim().equals(trimmed, ignoreCase = true)) {
+                        _searchResults.value = rankTracks(deduplicated, trimmed)
+                        _artistResults.value = rankArtists(artists, trimmed)
+                    }
                 }
             }
-            _isSearching.value = false
+        } finally {
+            if (_searchQuery.value.trim().equals(trimmed, ignoreCase = true)) {
+                _isSearching.value = false
+            }
         }
     }
 
@@ -305,6 +326,10 @@ class SearchViewModel @Inject constructor(
                     if (name.startsWith(w)) score += 80
                     else if (name.contains(w)) score += 40
                 }
+
+                if (!artist.imageUrl.isNullOrBlank()) {
+                    score += 100
+                }
                 score
             }
         }
@@ -332,7 +357,12 @@ class SearchViewModel @Inject constructor(
                 name = artist.name,
                 imageUrl = artist.imageUrl
             )
-            val fullDetails = innerTubeClient.getArtistDetails(artist.id, artist.imageUrl)
+            val saavnId = if (artist.id.all { it.isDigit() }) artist.id else null
+            val fullDetails = innerTubeClient.getArtistDetails(
+                artistIdOrName = artist.name,
+                artistImageUrl = artist.imageUrl,
+                artistId = saavnId
+            )
             if (fullDetails != null) {
                 _selectedArtist.value = fullDetails
             }
@@ -340,8 +370,19 @@ class SearchViewModel @Inject constructor(
         }
     }
 
+    val playbackState: StateFlow<PlaybackState> = playerManager.playbackState
+
+    fun isArtistFollowed(artistName: String): Boolean = userManager.isArtistFollowed(artistName)
+
+    fun toggleFollowArtist(artistName: String): Boolean = userManager.toggleFollowArtist(artistName)
+
     fun closeArtist() {
         _selectedArtist.value = null
+    }
+
+    suspend fun getAlbumSongs(album: com.sielo.music.core.network.models.SieloAlbum): List<SieloTrack> {
+        if (album.tracks.isNotEmpty()) return album.tracks
+        return innerTubeClient.getAlbumSongs(album.id, album.title, album.artist)
     }
 
     fun playTrack(track: SieloTrack, queue: List<SieloTrack>) {
@@ -364,6 +405,14 @@ class SearchViewModel @Inject constructor(
             )
         }
         playerManager.playTrack(track, queue)
+    }
+
+    fun playAlbum(track: SieloTrack, queue: List<SieloTrack>) {
+        playerManager.playAlbum(track, queue)
+    }
+
+    fun playArtistRadio(track: SieloTrack, queue: List<SieloTrack>, artistName: String) {
+        playerManager.playArtistRadio(track, queue, artistName)
     }
 
     fun appendToQueue(tracks: List<SieloTrack>) {
@@ -460,15 +509,24 @@ class SearchViewModel @Inject constructor(
     }
 
     fun toggleFavorite(track: SieloTrack) {
-        viewModelScope.launch {
-            favoriteTrackDao.insertFavorite(
-                FavoriteTrackEntity(
-                    id = track.id,
-                    title = track.title,
-                    artist = track.artist,
-                    thumbnailUrl = track.thumbnailUrl
-                )
-            )
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val isFav = favoriteTrackDao.isFavorite(track.id).first()
+                if (isFav) {
+                    favoriteTrackDao.deleteById(track.id)
+                } else {
+                    favoriteTrackDao.insertFavorite(
+                        FavoriteTrackEntity(
+                            id = track.id,
+                            title = track.title,
+                            artist = track.artist,
+                            thumbnailUrl = track.thumbnailUrl
+                        )
+                    )
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
     }
 }

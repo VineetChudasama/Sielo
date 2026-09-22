@@ -72,11 +72,11 @@ class StatsViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val topSongs: StateFlow<List<SongStat>> = _selectedTimeframe
-        .flatMapLatest { tf -> listeningHistoryDao.getTopSongs(sinceMsForTimeframe(tf), 10) }
+        .flatMapLatest { tf -> listeningHistoryDao.getTopSongs(sinceMsForTimeframe(tf), 20) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val allSongs: StateFlow<List<SongStat>> = _selectedTimeframe
-        .flatMapLatest { tf -> listeningHistoryDao.getTopSongs(sinceMsForTimeframe(tf), 100) }
+        .flatMapLatest { tf -> listeningHistoryDao.getTopSongs(sinceMsForTimeframe(tf), 500) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val streamHistory: StateFlow<List<com.sielo.music.core.database.entity.ListeningEventEntity>> = _selectedTimeframe

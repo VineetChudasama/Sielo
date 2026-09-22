@@ -1,16 +1,12 @@
 package com.sielo.music.ui.screens
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -25,9 +21,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -39,6 +35,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
@@ -50,34 +47,22 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
-import androidx.compose.ui.input.nestedscroll.NestedScrollSource
-import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.Velocity
 import com.sielo.music.R
-import kotlinx.coroutines.launch
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -103,10 +88,15 @@ import com.sielo.music.viewmodel.ArtistProfile
 import com.sielo.music.viewmodel.GenreItem
 import com.sielo.music.viewmodel.HomeViewModel
 import com.sielo.music.viewmodel.PlaylistCardItem
+import com.sielo.music.ui.components.SongActionsSheet
+import androidx.compose.foundation.combinedClickable
+import androidx.hilt.navigation.compose.hiltViewModel
+import com.sielo.music.viewmodel.PlaylistImportViewModel
 
 @Composable
 fun HomeScreen(
     viewModel: HomeViewModel,
+    importViewModel: PlaylistImportViewModel? = null,
     onNavigateToSearch: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -125,84 +115,17 @@ fun HomeScreen(
     val genreTracks by viewModel.genreTracks.collectAsState()
     val isGenreLoading by viewModel.isGenreLoading.collectAsState()
     val songsForYouTracks by viewModel.songsForYouTracks.collectAsState()
+    val playbackState by viewModel.playbackState.collectAsState()
 
     val customPlaylists = viewModel.customPlaylists
     val trendingGenres = viewModel.trendingGenres
+    var selectedSongActionsTrack by remember { mutableStateOf<SieloTrack?>(null) }
+    var showImportDialog by remember { mutableStateOf(false) }
 
-    val density = LocalDensity.current
-    val coroutineScope = rememberCoroutineScope()
     val lazyListState = rememberLazyListState()
 
-    var isDragStartedAtTop by remember { androidx.compose.runtime.mutableStateOf(false) }
-    val pullOffsetY = remember { Animatable(0f) }
-    val refreshThresholdPx = with(density) { 85.dp.toPx() }
-    val maxPullPx = with(density) { 140.dp.toPx() }
-
-    val nestedScrollConnection = remember(isRefreshing) {
-        object : NestedScrollConnection {
-            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                if (available.y < 0 && pullOffsetY.value > 0f) {
-                    val consumed = available.y.coerceAtLeast(-pullOffsetY.value)
-                    coroutineScope.launch {
-                        pullOffsetY.snapTo((pullOffsetY.value + consumed).coerceAtLeast(0f))
-                    }
-                    return Offset(0f, consumed)
-                }
-                return Offset.Zero
-            }
-
-            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
-                // STRICT: Only allow pull if user touch began while ALREADY at the top of the page.
-                // Swiping/flinging up from below to reach the top will NEVER trigger a pull or refresh.
-                if (available.y > 0 && !isRefreshing && isDragStartedAtTop && source == NestedScrollSource.UserInput && lazyListState.firstVisibleItemIndex == 0 && lazyListState.firstVisibleItemScrollOffset == 0) {
-                    val dampedDelta = available.y * 0.45f
-                    val newOffset = (pullOffsetY.value + dampedDelta).coerceAtMost(maxPullPx)
-                    coroutineScope.launch {
-                        pullOffsetY.snapTo(newOffset)
-                    }
-                    return Offset(0f, available.y)
-                }
-                return Offset.Zero
-            }
-
-            override suspend fun onPreFling(available: Velocity): Velocity {
-                if (!isRefreshing && pullOffsetY.value > 0f) {
-                    if (isDragStartedAtTop && pullOffsetY.value >= refreshThresholdPx) {
-                        coroutineScope.launch {
-                            pullOffsetY.animateTo(refreshThresholdPx, spring(stiffness = Spring.StiffnessMediumLow))
-                        }
-                        viewModel.refreshHome()
-                    } else {
-                        coroutineScope.launch {
-                            pullOffsetY.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow))
-                        }
-                    }
-                }
-                isDragStartedAtTop = false
-                return Velocity.Zero
-            }
-
-            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
-                if (!isRefreshing && pullOffsetY.value > 0f) {
-                    coroutineScope.launch {
-                        pullOffsetY.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow))
-                    }
-                }
-                isDragStartedAtTop = false
-                return Velocity.Zero
-            }
-        }
-    }
-
-    LaunchedEffect(isRefreshing) {
-        if (!isRefreshing) {
-            pullOffsetY.animateTo(0f, spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow))
-        } else {
-            if (pullOffsetY.value < refreshThresholdPx) {
-                pullOffsetY.animateTo(refreshThresholdPx, spring(stiffness = Spring.StiffnessMediumLow))
-            }
-        }
-    }
+    @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+    val pullState = androidx.compose.material3.pulltorefresh.rememberPullToRefreshState()
 
     val infiniteTransition = rememberInfiniteTransition(label = "refresh_spin")
     val spinRotation by infiniteTransition.animateFloat(
@@ -248,12 +171,21 @@ fun HomeScreen(
 
     // Display Artist Profile Screen if an artist is selected
     if (selectedArtist != null) {
+        val artist = selectedArtist!!
         ArtistProfileScreen(
-            artist = selectedArtist!!,
+            artist = artist,
             isLoading = isArtistLoading,
             onBack = { viewModel.closeArtist() },
             onPlayTrack = { track, q -> viewModel.playTrack(track, q) },
+            onPlayAlbum = { track, q -> viewModel.playAlbum(track, q) },
+            onPlayRadio = { track, q, artistName -> viewModel.playArtistRadio(track, q, artistName) },
             onToggleFavorite = { viewModel.toggleFavorite(it) },
+            onOpenArtist = { a -> viewModel.openArtist(a) },
+            isFollowed = viewModel.isArtistFollowed(artist.name),
+            onToggleFollow = { name -> viewModel.toggleFollowArtist(name) },
+            currentTrackId = playbackState.currentTrack?.id,
+            isPlaying = playbackState.isPlaying,
+            onLoadAlbumTracks = { album -> viewModel.getAlbumSongs(album) },
             modifier = modifier
         )
         return
@@ -280,43 +212,89 @@ fun HomeScreen(
             isLoading = isGenreLoading,
             onBack = { viewModel.closeGenre() },
             onPlayTrack = { track, q -> viewModel.playTrack(track, q) },
+            onMoreTrack = { selectedSongActionsTrack = it },
             modifier = modifier
         )
         return
     }
 
-    Box(
+    @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+    androidx.compose.material3.pulltorefresh.PullToRefreshBox(
+        isRefreshing = isRefreshing,
+        onRefresh = { viewModel.refreshHome() },
+        state = pullState,
         modifier = modifier
             .fillMaxSize()
-            .background(PaletteDarkNavy)
-            .pointerInput(isRefreshing) {
-                awaitPointerEventScope {
-                    while (true) {
-                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                        if (event.changes.any { it.pressed }) {
-                            // Touch began: strictly verify if page is ALREADY at the top
-                            if (lazyListState.firstVisibleItemIndex == 0 && lazyListState.firstVisibleItemScrollOffset == 0) {
-                                isDragStartedAtTop = true
+            .background(PaletteDarkNavy),
+        indicator = {
+            // Branded Sielo refresh indicator — only visible during a real top overscroll pull or refresh.
+            // Taps and horizontal card swipes never produce overscroll, so they can never show this.
+            val progress = pullState.distanceFraction.coerceIn(0f, 1.5f)
+            if (progress > 0.02f || isRefreshing) {
+                val isTriggerReached = progress >= 1f || isRefreshing
+                val glowAlpha by animateFloatAsState(
+                    targetValue = if (isTriggerReached) 0.65f else (progress * 0.35f).coerceIn(0f, 0.35f),
+                    animationSpec = tween(durationMillis = 200),
+                    label = "glowAlpha"
+                )
+                val glowScale by animateFloatAsState(
+                    targetValue = if (isTriggerReached) 1.15f else 0.9f,
+                    animationSpec = tween(durationMillis = 200),
+                    label = "glowScale"
+                )
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .size(56.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(54.dp)
+                            .graphicsLayer {
+                                alpha = glowAlpha
+                                scaleX = glowScale
+                                scaleY = glowScale
                             }
-                        }
-                        if (event.changes.all { !it.pressed }) {
-                            if (!isRefreshing) {
-                                if (isDragStartedAtTop && pullOffsetY.value >= refreshThresholdPx) {
-                                    coroutineScope.launch {
-                                        pullOffsetY.animateTo(refreshThresholdPx, spring(stiffness = Spring.StiffnessMediumLow))
-                                    }
-                                    viewModel.refreshHome()
-                                } else if (pullOffsetY.value > 0f) {
-                                    coroutineScope.launch {
-                                        pullOffsetY.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow))
-                                    }
-                                }
-                            }
-                            isDragStartedAtTop = false
-                        }
+                            .background(
+                                brush = Brush.radialGradient(
+                                    colors = listOf(
+                                        PaletteSand.copy(alpha = 0.4f),
+                                        PaletteSand.copy(alpha = 0.1f),
+                                        Color.Transparent
+                                    )
+                                ),
+                                shape = CircleShape
+                            )
+                    )
+                    if (isRefreshing) {
+                        CircularProgressIndicator(
+                            color = PaletteSand,
+                            strokeWidth = 2.5.dp,
+                            modifier = Modifier.size(46.dp)
+                        )
+                    } else if (progress > 0.05f) {
+                        CircularProgressIndicator(
+                            progress = { progress.coerceIn(0.05f, 1f) },
+                            color = PaletteSand,
+                            trackColor = PaletteSand.copy(alpha = 0.15f),
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(46.dp)
+                        )
                     }
+                    Image(
+                        painter = painterResource(id = R.drawable.ic_refresh_logo),
+                        contentDescription = "Sielo Refresh Logo",
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .graphicsLayer {
+                                rotationZ = if (isRefreshing) spinRotation else (progress * 360f)
+                            }
+                    )
                 }
             }
+        }
     ) {
         if (isLoading && activeTracks.isEmpty()) {
             Box(
@@ -329,12 +307,19 @@ fun HomeScreen(
             // Keep Listening list: strictly user-played tracks, never backfilled with random tracks
             val keepListeningList = remember(recentPlayedSongs) {
                 recentPlayedSongs.map { event ->
+                    val durSec = (event.songDurationMs / 1000).coerceAtLeast(0L)
+                    val durText = if (durSec > 0) {
+                        val m = durSec / 60
+                        val s = durSec % 60
+                        "$m:${s.toString().padStart(2, '0')}"
+                    } else null
                     SieloTrack(
                         id = event.songId,
                         title = event.songTitle,
                         artist = event.artistName,
                         album = event.albumName,
-                        durationText = "3:24",
+                        durationText = durText,
+                        durationSeconds = durSec,
                         thumbnailUrl = event.thumbnailUrl
                     )
                 }.distinctBy { it.id }.take(5)
@@ -344,12 +329,19 @@ fun HomeScreen(
             val usedIds = keepListeningList.map { it.id }.toSet()
             val rediscoverList = remember(rediscoveredFavorites, usedIds) {
                 rediscoveredFavorites.map { event ->
+                    val durSec = (event.songDurationMs / 1000).coerceAtLeast(0L)
+                    val durText = if (durSec > 0) {
+                        val m = durSec / 60
+                        val s = durSec % 60
+                        "$m:${s.toString().padStart(2, '0')}"
+                    } else null
                     SieloTrack(
                         id = event.songId,
                         title = event.songTitle,
                         artist = event.artistName,
                         album = event.albumName,
-                        durationText = "3:30",
+                        durationText = durText,
+                        durationSeconds = durSec,
                         thumbnailUrl = event.thumbnailUrl
                     )
                 }.filterNot { it.id in usedIds }.distinctBy { it.id }
@@ -357,19 +349,15 @@ fun HomeScreen(
 
             LazyColumn(
                 state = lazyListState,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .nestedScroll(nestedScrollConnection)
-                    .graphicsLayer {
-                        translationY = pullOffsetY.value * 0.45f
-                    },
-                contentPadding = PaddingValues(top = 16.dp, bottom = 100.dp)
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(top = 16.dp, bottom = 210.dp)
             ) {
                 // Top App Bar: Brand name with increased font size and functional search & refresh button
                 item {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .statusBarsPadding()
                             .padding(horizontal = 20.dp, vertical = 8.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
@@ -383,23 +371,13 @@ fun HomeScreen(
                             letterSpacing = 1.sp
                         )
 
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = onNavigateToSearch) {
-                                Icon(
-                                    imageVector = Icons.Default.Search,
-                                    contentDescription = "Search",
-                                    tint = PaletteCream,
-                                    modifier = Modifier.size(26.dp)
-                                )
-                            }
-                            IconButton(onClick = { /* Settings */ }) {
-                                Icon(
-                                    imageVector = Icons.Default.Settings,
-                                    contentDescription = "Settings",
-                                    tint = PaletteCream,
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            }
+                        IconButton(onClick = onNavigateToSearch) {
+                            Icon(
+                                imageVector = Icons.Default.Search,
+                                contentDescription = "Search",
+                                tint = PaletteCream,
+                                modifier = Modifier.size(26.dp)
+                            )
                         }
                     }
                     Spacer(modifier = Modifier.height(10.dp))
@@ -422,10 +400,11 @@ fun HomeScreen(
                             horizontalArrangement = Arrangement.spacedBy(14.dp),
                             modifier = Modifier.padding(top = 8.dp)
                         ) {
-                            items(keepListeningList) { track ->
+                            items(keepListeningList, key = { it.id }) { track ->
                                 KeepListeningCard(
                                     track = track,
-                                    onPlay = { viewModel.playTrack(track, keepListeningList) }
+                                    onPlay = { viewModel.playTrack(track, keepListeningList) },
+                                    onMore = { selectedSongActionsTrack = track }
                                 )
                             }
                         }
@@ -465,10 +444,11 @@ fun HomeScreen(
                             horizontalArrangement = Arrangement.spacedBy(14.dp),
                             modifier = Modifier.padding(top = 10.dp)
                         ) {
-                            items(songsForYouTracks) { track ->
+                            items(songsForYouTracks, key = { it.id }) { track ->
                                 KeepListeningCard(
                                     track = track,
-                                    onPlay = { viewModel.playTrack(track, songsForYouTracks) }
+                                    onPlay = { viewModel.playTrack(track, songsForYouTracks) },
+                                    onMore = { selectedSongActionsTrack = track }
                                 )
                             }
                         }
@@ -503,12 +483,6 @@ fun HomeScreen(
                                 fontSize = 22.sp,
                                 fontWeight = FontWeight.Bold
                             )
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                                contentDescription = "More",
-                                tint = PaletteSageGreen,
-                                modifier = Modifier.size(20.dp)
-                            )
                         }
                     }
 
@@ -517,7 +491,7 @@ fun HomeScreen(
                         horizontalArrangement = Arrangement.spacedBy(18.dp),
                         modifier = Modifier.padding(top = 12.dp)
                     ) {
-                        items(dynamicSimilarArtists) { artist ->
+                        items(dynamicSimilarArtists.filter { it.imageUrl.isNotBlank() }, key = { it.name }) { artist ->
                             ArtistCircleCard(
                                 artist = artist,
                                 onClick = { viewModel.openArtist(artist.name, artist.imageUrl) }
@@ -554,12 +528,6 @@ fun HomeScreen(
                                 fontSize = 22.sp,
                                 fontWeight = FontWeight.Bold
                             )
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                                contentDescription = "More",
-                                tint = PaletteSageGreen,
-                                modifier = Modifier.size(20.dp)
-                            )
                         }
                     }
 
@@ -568,7 +536,13 @@ fun HomeScreen(
                         horizontalArrangement = Arrangement.spacedBy(14.dp),
                         modifier = Modifier.padding(top = 12.dp)
                     ) {
-                        items(customPlaylists) { playlist ->
+                        item {
+                            ImportPlaylistBentoCard(
+                                onClick = { showImportDialog = true }
+                            )
+                        }
+
+                        items(customPlaylists, key = { it.title }) { playlist ->
                             PlaylistBentoCard(
                                 playlist = playlist,
                                 onClick = { viewModel.openPlaylist(playlist) }
@@ -612,7 +586,8 @@ fun HomeScreen(
                             rediscoverList.forEach { track ->
                                 RediscoverFavoriteRow(
                                     track = track,
-                                    onPlay = { viewModel.playTrack(track, rediscoverList) }
+                                    onPlay = { viewModel.playTrack(track, rediscoverList) },
+                                    onMoreClick = { selectedSongActionsTrack = track }
                                 )
                             }
                         }
@@ -675,93 +650,94 @@ fun HomeScreen(
                     Spacer(modifier = Modifier.height(20.dp))
                 }
             }
+        }
+    }
 
-            // Sliding Refresh Indicator (slides down from top boundary when swiped down, hides when swiped up)
-            val pullProgress = (pullOffsetY.value / refreshThresholdPx).coerceIn(0f, 1.5f)
-            val indicatorTopOffsetDp = with(density) {
-                (-65.dp.toPx() + (pullOffsetY.value * 0.75f)).toDp()
-            }
+    // Song Actions Sheet
+    selectedSongActionsTrack?.let { track ->
+        SongActionsSheet(
+            track = track,
+            onDismiss = { selectedSongActionsTrack = null }
+        )
+    }
 
-            if ((pullOffsetY.value > 2f || isRefreshing) && (indicatorTopOffsetDp > -55.dp || isRefreshing)) {
-                val isTriggerReached = pullProgress >= 1f || isRefreshing
-                val glowAlpha by animateFloatAsState(
-                    targetValue = if (isTriggerReached) 0.9f else 0f,
-                    animationSpec = tween(durationMillis = 200),
-                    label = "glowAlpha"
-                )
-                val glowScale by animateFloatAsState(
-                    targetValue = if (isTriggerReached) 1.25f else 0.85f,
-                    animationSpec = tween(durationMillis = 200),
-                    label = "glowScale"
-                )
+    val activeImportVm = importViewModel ?: hiltViewModel<PlaylistImportViewModel>()
+    if (showImportDialog) {
+        ImportPlaylistDialog(
+            viewModel = activeImportVm,
+            onDismiss = { showImportDialog = false }
+        )
+    }
+}
 
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .offset(y = indicatorTopOffsetDp)
-                        .size(72.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    // Soft illuminated radial glow halo behind the button (always present, GPU alpha/scale)
-                    Box(
-                        modifier = Modifier
-                            .size(70.dp)
-                            .graphicsLayer {
-                                alpha = glowAlpha
-                                scaleX = glowScale
-                                scaleY = glowScale
-                            }
-                            .background(
-                                brush = Brush.radialGradient(
-                                    colors = listOf(
-                                        PaletteSand.copy(alpha = 0.5f),
-                                        PaletteSand.copy(alpha = 0.15f),
-                                        Color.Transparent
-                                    )
-                                ),
-                                shape = CircleShape
-                            )
+@Composable
+private fun ImportPlaylistBentoCard(
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .width(140.dp)
+            .height(180.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        PaletteOxfordBlue,
+                        Color(0xFF1E2D44),
+                        PaletteDarkNavy
                     )
-
-                    // Core Refresh Button
-                    Box(
-                        modifier = Modifier
-                            .size(52.dp)
-                            .graphicsLayer {
-                                alpha = if (isRefreshing) 1f else (pullProgress * 1.6f).coerceIn(0f, 1f)
-                                scaleX = 0.85f + (pullProgress * 0.15f).coerceAtMost(0.3f)
-                                scaleY = 0.85f + (pullProgress * 0.15f).coerceAtMost(0.3f)
-                            }
-                            .shadow(
-                                elevation = 10.dp,
-                                shape = CircleShape,
-                                ambientColor = if (isTriggerReached) PaletteSand.copy(alpha = 0.6f) else Color.Black,
-                                spotColor = if (isTriggerReached) PaletteSand else Color.Black
-                            )
-                            .clip(CircleShape)
-                            .background(PaletteOxfordBlue.copy(alpha = 0.96f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (isRefreshing) {
-                            CircularProgressIndicator(
-                                color = PaletteSand,
-                                strokeWidth = 2.5.dp,
-                                modifier = Modifier.size(32.dp)
-                            )
-                        }
-                        Image(
-                            painter = painterResource(id = R.drawable.app_logo),
-                            contentDescription = "Sielo Refresh Logo",
-                            modifier = Modifier
-                                .size(24.dp)
-                                .clip(CircleShape)
-                                .graphicsLayer {
-                                    rotationZ = if (isRefreshing) spinRotation else (pullProgress * 360f)
-                                }
-                        )
-                    }
-                }
+                )
+            )
+            .border(
+                1.dp,
+                Brush.verticalGradient(
+                    listOf(
+                        PaletteSand.copy(alpha = 0.6f),
+                        BorderGlass
+                    )
+                ),
+                RoundedCornerShape(18.dp)
+            )
+            .clickable { onClick() }
+            .padding(14.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(52.dp)
+                    .clip(CircleShape)
+                    .background(PaletteSand.copy(alpha = 0.15f))
+                    .border(1.dp, PaletteSand.copy(alpha = 0.4f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CloudDownload,
+                    contentDescription = "Import Playlist",
+                    tint = PaletteSand,
+                    modifier = Modifier.size(26.dp)
+                )
             }
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "Import",
+                color = PaletteCream,
+                fontFamily = SoraFontFamily,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "YouTube & Spotify",
+                color = TextSecondary,
+                fontFamily = UrbanistFontFamily,
+                fontSize = 11.sp,
+                textAlign = TextAlign.Center
+            )
         }
     }
 }
@@ -773,46 +749,84 @@ fun TrendingGenreCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val accent = Color(genre.accentColor)
     Box(
         modifier = modifier
-            .height(102.dp)
-            .clip(RoundedCornerShape(16.dp))
+            .height(116.dp)
+            .clip(RoundedCornerShape(18.dp))
             .background(
                 Brush.linearGradient(
-                    listOf(
-                        Color(genre.accentColor).copy(alpha = 0.35f),
-                        PaletteOxfordBlue
+                    colors = listOf(
+                        accent.copy(alpha = 0.32f),
+                        accent.copy(alpha = 0.12f),
+                        PaletteOxfordBlue.copy(alpha = 0.95f)
                     )
                 )
             )
-            .border(1.dp, Color(genre.accentColor).copy(alpha = 0.4f), RoundedCornerShape(16.dp))
+            .border(
+                width = 1.dp,
+                brush = Brush.linearGradient(
+                    listOf(
+                        accent.copy(alpha = 0.50f),
+                        BorderGlass
+                    )
+                ),
+                shape = RoundedCornerShape(18.dp)
+            )
             .clickable { onClick() }
-            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .padding(12.dp)
     ) {
-        Row(
+        Column(
             modifier = Modifier.fillMaxSize(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            verticalArrangement = Arrangement.SpaceBetween
         ) {
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(end = 6.dp),
-                verticalArrangement = Arrangement.Center
+            // Header Row: Emoji badge + Explore indicator
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = genre.icon,
-                    fontSize = 22.sp
-                )
-                Spacer(modifier = Modifier.height(3.dp))
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.30f))
+                        .border(1.dp, accent.copy(alpha = 0.35f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = genre.icon,
+                        fontSize = 17.sp
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .size(26.dp)
+                        .clip(CircleShape)
+                        .background(PaletteDarkNavy.copy(alpha = 0.65f))
+                        .border(1.dp, BorderGlass, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Explore",
+                        tint = PaletteSand,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+            }
+
+            // Genre Name & Description (clean, no broken marquee)
+            Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
                     text = genre.name,
                     color = PaletteCream,
                     fontFamily = SoraFontFamily,
-                    fontSize = 14.sp,
+                    fontSize = 14.5.sp,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
-                    modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE)
+                    overflow = TextOverflow.Ellipsis
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
@@ -820,23 +834,8 @@ fun TrendingGenreCard(
                     color = TextSecondary,
                     fontFamily = UrbanistFontFamily,
                     fontSize = 11.5.sp,
-                    lineHeight = 14.sp,
                     maxLines = 1,
-                    modifier = Modifier.basicMarquee(iterations = Int.MAX_VALUE)
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .size(30.dp)
-                    .clip(CircleShape)
-                    .background(PaletteDarkNavy.copy(alpha = 0.6f)),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.PlayArrow,
-                    contentDescription = "Explore",
-                    tint = PaletteSand,
-                    modifier = Modifier.size(17.dp)
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }
@@ -850,6 +849,7 @@ fun GenreDetailScreen(
     isLoading: Boolean,
     onBack: () -> Unit,
     onPlayTrack: (SieloTrack, List<SieloTrack>) -> Unit,
+    onMoreTrack: (SieloTrack) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -859,7 +859,7 @@ fun GenreDetailScreen(
     ) {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(bottom = 120.dp)
+            contentPadding = PaddingValues(bottom = 210.dp)
         ) {
             // Header Banner
             item {
@@ -993,7 +993,8 @@ fun GenreDetailScreen(
                     PlaylistTrackRow(
                         index = index + 1,
                         track = track,
-                        onPlay = { onPlayTrack(track, tracks) }
+                        onPlay = { onPlayTrack(track, tracks) },
+                        onMoreClick = { onMoreTrack(track) }
                     )
                 }
             }
@@ -1001,19 +1002,24 @@ fun GenreDetailScreen(
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun KeepListeningCard(
     track: SieloTrack,
-    onPlay: () -> Unit
+    onPlay: () -> Unit,
+    onMore: () -> Unit = {}
 ) {
     Column(
         modifier = Modifier
-            .width(140.dp)
-            .clickable { onPlay() }
+            .width(148.dp)
+            .combinedClickable(
+                onClick = onPlay,
+                onLongClick = onMore
+            )
     ) {
         Box(
             modifier = Modifier
-                .size(140.dp)
+                .size(148.dp)
                 .clip(RoundedCornerShape(14.dp))
                 .background(PaletteOxfordBlue)
                 .border(1.dp, BorderGlass, RoundedCornerShape(14.dp)),
@@ -1051,17 +1057,17 @@ fun KeepListeningCard(
             text = track.title,
             color = PaletteCream,
             fontFamily = UrbanistFontFamily,
-            fontSize = 14.sp,
+            fontSize = 13.5.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
 
         Text(
-            text = "${track.artist} • ${track.durationText ?: "3:24"}",
+            text = if (track.formattedDuration.isNotBlank()) "${track.artist} • ${track.formattedDuration}" else track.artist,
             color = TextSecondary,
             fontFamily = UrbanistFontFamily,
-            fontSize = 12.sp,
+            fontSize = 11.sp,
             fontWeight = FontWeight.Normal,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
@@ -1162,17 +1168,22 @@ fun PlaylistBentoCard(
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun RediscoverFavoriteRow(
     track: SieloTrack,
-    onPlay: () -> Unit
+    onPlay: () -> Unit,
+    onMoreClick: () -> Unit = {}
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(PaletteOxfordBlue)
-            .clickable { onPlay() }
+            .combinedClickable(
+                onClick = onPlay,
+                onLongClick = onMoreClick
+            )
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
@@ -1213,11 +1224,24 @@ fun RediscoverFavoriteRow(
             }
         }
 
-        Icon(
-            imageVector = Icons.Default.PlayArrow,
-            contentDescription = "Play",
-            tint = PaletteSand,
-            modifier = Modifier.size(22.dp)
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = Icons.Default.PlayArrow,
+                contentDescription = "Play",
+                tint = PaletteSand,
+                modifier = Modifier.size(22.dp)
+            )
+            IconButton(
+                onClick = onMoreClick,
+                modifier = androidx.compose.ui.Modifier.size(32.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.MoreVert,
+                    contentDescription = "More options",
+                    tint = PaletteSand.copy(alpha = 0.7f),
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
     }
 }

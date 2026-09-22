@@ -30,6 +30,12 @@
 - **Acoustic Calibration**: Automatic intro offset calibration for acoustic cuts and live edits.
 - **Interactive Seeking**: Tap any lyric line to jump directly to that timestamp in the audio.
 
+### 🌌 Personal Music Universe Stats Redesign (v5.0.0)
+- **Atmospheric Celestial Hero**: Central glowing planetary sphere with twilight aura, contemplative ridge silhouette, tilted orbital rings with pearl nodes, and attached reactive metrics (*This Month*, *Tracks*, *Artists*, *Plays*).
+- **Circadian Flow Wave Graph**: Flowing golden landscape wave graph (`Canvas`) showing activity across 4 interactive circadian day-parts (*Morning*, *Afternoon*, *Evening*, *Night*) with rising sun peak and dynamic duration/percentage guide pins.
+- **Dual Spotlight Cards & Leaderboards**: Balanced side-by-side cards for *Top Artists* (overlapping circular portraits) and *Top Tracks* (stacked fanned-out album artwork) with direct 1-tap playback.
+- **Listening Vibe Persona**: Orbital glowing star graphic, discovery prompts, and aesthetic personality dimensions bar (`MOOD | ENERGY | GENRE MIX | CONSISTENCY`).
+
 ### 🎬 Cinematic Brand Launch Reveal
 - **Macondo Brand Emergence**: Elegant app launch splash featuring the custom "Sielo" logo in **Macondo** typography with a warm ambient radial glow.
 - **Dynamic Glyph Targeting**: Uses Compose layout measurement (`onTextLayout`) to dynamically calculate the center of the letter **"e"** as the focal zoom pivot.

@@ -3,6 +3,7 @@ package com.sielo.music.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.sielo.music.core.audio.PlayerManager
+import com.sielo.music.core.audio.model.PlaybackState
 import com.sielo.music.core.database.dao.ArtistStat
 import com.sielo.music.core.database.dao.FavoriteTrackDao
 import com.sielo.music.core.database.dao.ListeningHistoryDao
@@ -10,15 +11,22 @@ import com.sielo.music.core.database.dao.SongStat
 import com.sielo.music.core.database.entity.FavoriteTrackEntity
 import com.sielo.music.core.database.entity.ListeningEventEntity
 import com.sielo.music.core.network.innertube.InnerTubeClient
+import com.sielo.music.core.network.innertube.YouTubeArtistImageResolver
+import com.sielo.music.core.network.models.SieloArtist
 import com.sielo.music.core.network.models.SieloTrack
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.util.Calendar
 import javax.inject.Inject
@@ -97,6 +105,7 @@ class HomeViewModel @Inject constructor(
     init {
         loadInitialFeed()
         viewModelScope.launch {
+            var hasInitialized = false
             userManager.currentUser.collect { user ->
                 if (user == null) {
                     _recentPlayedSongs.value = emptyList()
@@ -106,36 +115,133 @@ class HomeViewModel @Inject constructor(
                     _songsForYouTracks.value = emptyList()
                     _sinceYouLikeTracks.value = emptyList()
                     _currentSimilarToArtist.value = "The Weeknd"
+                    hasInitialized = false
                 } else if (user.hasCompletedOnboarding) {
-                    refreshHome()
+                    if (!hasInitialized) {
+                        refreshHome()
+                        hasInitialized = true
+                    }
                 }
             }
         }
     }
 
-    private suspend fun resolveSongsForYou(): List<SieloTrack> {
-        val userArtists = (userManager.getFavoriteArtists() + userManager.getTopTasteArtists(5))
-            .filter { it.isNotBlank() }
-            .distinct()
-
-        val artistsToQuery = if (userArtists.isNotEmpty()) userArtists.shuffled().take(4) else listOf("Arijit Singh", "The Weeknd", "Diljit Dosanjh", "Taylor Swift")
-        val gatheredTracks = mutableListOf<SieloTrack>()
-
-        for (artist in artistsToQuery) {
-            try {
-                val details = innerTubeClient.getArtistDetails(artist)
-                val topSongs = details?.topSongs?.take(4) ?: innerTubeClient.search("$artist top hits").take(4)
-                gatheredTracks.addAll(topSongs)
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+    private suspend fun resolveSongsForYou(): List<SieloTrack> = coroutineScope {
+        // Check listening history to accurately distinguish new user from established user
+        val historyEvents = try {
+            listeningHistoryDao.getStreamHistory(sinceMs = 0L, limit = 500).firstOrNull() ?: emptyList()
+        } catch (_: Exception) {
+            emptyList()
         }
 
-        val clean = gatheredTracks
-            .distinctBy { it.id }
-            .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+        val playedSongIds = historyEvents.map { it.songId }.toSet()
+        val playedSongTitles = historyEvents.map { it.songTitle.trim().lowercase() }.toSet()
+        val isNewUser = historyEvents.size < 3
 
-        return if (clean.isNotEmpty()) clean.shuffled().take(12) else defaultStarterTracks().shuffled().take(8)
+        if (isNewUser) {
+            // NEW USER: Strictly recommend songs from their chosen artists
+            val chosenArtists = userManager.getFavoriteArtists()
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+
+            val artistsToQuery = if (chosenArtists.isNotEmpty()) {
+                chosenArtists.shuffled().take(6)
+            } else {
+                listOf("The Weeknd", "Arijit Singh", "Taylor Swift", "Diljit Dosanjh")
+            }
+
+            val deferredTracks = artistsToQuery.map { artist ->
+                async {
+                    try {
+                        val details = innerTubeClient.getArtistDetails(artist)
+                        val topSongs = details?.topSongs?.take(5) ?: innerTubeClient.search("$artist top hits").take(5)
+                        // Strictly filter to ensure songs belong to the chosen artist
+                        topSongs.filter { song ->
+                            song.artist.contains(artist, ignoreCase = true) ||
+                            artist.contains(song.artist, ignoreCase = true) ||
+                            chosenArtists.any { song.artist.contains(it, ignoreCase = true) }
+                        }
+                    } catch (e: Exception) {
+                        emptyList()
+                    }
+                }
+            }
+            val gatheredTracks = deferredTracks.awaitAll().flatten()
+            val clean = gatheredTracks
+                .distinctBy { it.id }
+                .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+
+            if (clean.isNotEmpty()) clean.shuffled().take(12) else defaultStarterTracks().shuffled().take(8)
+        } else {
+            // ESTABLISHED USER: Recommend based on preferences learned from listening activity,
+            // strictly providing ONLY NEW songs that they have NOT listened to yet.
+            val topHistoryArtists = try {
+                listeningHistoryDao.getTopArtistsSnapshot(sinceMs = 0L, limit = 8).map { it.artistName }
+            } catch (_: Exception) {
+                emptyList()
+            }
+            val tasteArtists = (topHistoryArtists + userManager.getTopTasteArtists(8) + userManager.getFavoriteArtists())
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .distinct()
+
+            // Also find dynamic similar artist recommendations based on top taste
+            val topSeed = tasteArtists.firstOrNull() ?: "The Weeknd"
+            val similarCluster = try {
+                getSimilarArtistNames(topSeed)
+            } catch (_: Exception) {
+                emptyList()
+            }
+
+            val candidateArtists = (tasteArtists.shuffled().take(4) + similarCluster.shuffled().take(3))
+                .distinct()
+                .filter { it.isNotBlank() }
+
+            val deferredTracks = candidateArtists.map { artist ->
+                async {
+                    try {
+                        val details = innerTubeClient.getArtistDetails(artist)
+                        val songs = details?.topSongs?.take(6) ?: innerTubeClient.search("$artist hits").take(6)
+                        // Strictly filter out any song the user has already listened to
+                        songs.filter { song ->
+                            song.id !in playedSongIds &&
+                            song.title.trim().lowercase() !in playedSongTitles
+                        }
+                    } catch (e: Exception) {
+                        emptyList()
+                    }
+                }
+            }
+
+            val gathered = deferredTracks.awaitAll().flatten()
+                .distinctBy { it.id }
+                .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+                .filter { it.id !in playedSongIds && it.title.trim().lowercase() !in playedSongTitles }
+
+            if (gathered.isNotEmpty()) {
+                gathered.shuffled().take(12)
+            } else {
+                // If all direct songs were played, discover deeper track catalogue from dynamic similar artists
+                val fallbackDeferred = similarCluster.take(4).map { artist ->
+                    async {
+                        try {
+                            innerTubeClient.search("$artist deep cuts essentials")
+                                .filter { it.id !in playedSongIds && it.title.trim().lowercase() !in playedSongTitles }
+                                .take(4)
+                        } catch (_: Exception) {
+                            emptyList()
+                        }
+                    }
+                }
+                val fallbackGathered = fallbackDeferred.awaitAll().flatten()
+                    .distinctBy { it.id }
+                    .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+                    .filter { it.id !in playedSongIds && it.title.trim().lowercase() !in playedSongTitles }
+
+                if (fallbackGathered.isNotEmpty()) fallbackGathered.shuffled().take(10)
+                else defaultStarterTracks().filter { it.id !in playedSongIds }.take(6)
+            }
+        }
     }
 
     private suspend fun pickDynamicSimilarArtist(): String {
@@ -170,26 +276,51 @@ class HomeViewModel @Inject constructor(
                 _recentPlayedSongs.value = recent
                 _rediscoveredFavorites.value = rediscovered
                 _topArtistStat.value = topArtists
+                resolveMissingDurations(recent)
 
                 val cleanedQuery = _selectedMood.value.replace(Regex("[^a-zA-Z0-9 ]"), "").trim()
                 val query = if (cleanedQuery.isNotEmpty()) cleanedQuery else "Top Hits 2026"
-                val tracks = innerTubeClient.search(query)
-                val cleanTracks = if (tracks.isNotEmpty()) {
-                    tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
-                } else defaultStarterTracks()
-                _trendingTracks.value = cleanTracks
 
                 val topArtistName = pickDynamicSimilarArtist()
                 _currentSimilarToArtist.value = topArtistName
                 lastResolvedArtist = topArtistName
-                val similarList = fetchSimilarArtistProfiles(topArtistName)
-                if (similarList.isNotEmpty()) {
-                    _dynamicSimilarArtists.value = similarList
-                }
 
-                // Curate personalized "Songs for you" based on previously selected artists
-                val songsForYou = resolveSongsForYou()
-                _songsForYouTracks.value = songsForYou
+                coroutineScope {
+                    val tracksDeferred = async {
+                        try {
+                            val tracks = innerTubeClient.search(query)
+                            if (tracks.isNotEmpty()) {
+                                tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+                            } else defaultStarterTracks()
+                        } catch (e: Exception) {
+                            defaultStarterTracks()
+                        }
+                    }
+
+                    val similarDeferred = async {
+                        try {
+                            fetchSimilarArtistProfiles(topArtistName)
+                        } catch (e: Exception) {
+                            emptyList()
+                        }
+                    }
+
+                    val songsForYouDeferred = async {
+                        try {
+                            resolveSongsForYou()
+                        } catch (e: Exception) {
+                            defaultStarterTracks().shuffled().take(8)
+                        }
+                    }
+
+                    _trendingTracks.value = tracksDeferred.await()
+                    val similarList = similarDeferred.await()
+                    if (similarList.isNotEmpty()) {
+                        _currentSimilarToArtist.value = topArtistName
+                        _dynamicSimilarArtists.value = similarList
+                    }
+                    _songsForYouTracks.value = songsForYouDeferred.await()
+                }
             } catch (e: Exception) {
                 _trendingTracks.value = defaultStarterTracks()
             } finally {
@@ -201,13 +332,8 @@ class HomeViewModel @Inject constructor(
     fun refreshHome() {
         viewModelScope.launch {
             _isRefreshing.value = true
-            val startTime = System.currentTimeMillis()
-
             try {
-                // 1. Compute new greeting in memory
                 val newGreeting = computeGreeting()
-
-                // 2. Query history snapshots in memory
                 val newRecent = listeningHistoryDao.getRecentUniquePlayedSongs(5).firstOrNull() ?: emptyList()
                 val newRediscovered = listeningHistoryDao.getRediscoveredFavorites(
                     twoDaysAgoMs = System.currentTimeMillis() - (2L * 24 * 60 * 60 * 1000L),
@@ -215,43 +341,83 @@ class HomeViewModel @Inject constructor(
                 ).firstOrNull() ?: emptyList()
                 val newTopArtists = listeningHistoryDao.getTopArtists(sinceMs = 0L, limit = 1).firstOrNull() ?: emptyList()
 
-                // 3. Query feed tracks in memory
                 val cleanedQuery = _selectedMood.value.replace(Regex("[^a-zA-Z0-9 ]"), "").trim()
                 val query = if (cleanedQuery.isNotEmpty()) cleanedQuery else "Top Hits 2026"
-                val tracks = innerTubeClient.search(query)
-                val newTracks = if (tracks.isNotEmpty()) {
-                    tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
-                } else defaultStarterTracks().shuffled()
 
-                // 4. Query dynamic similar artists dynamically shuffled among user choices
                 val topArtistName = pickDynamicSimilarArtist()
                 _currentSimilarToArtist.value = topArtistName
                 lastResolvedArtist = topArtistName
-                val newSimilarArtists = fetchSimilarArtistProfiles(topArtistName)
 
-                // 5. Query personalized "Songs for you"
-                val songsForYou = resolveSongsForYou()
+                coroutineScope {
+                    val tracksDeferred = async {
+                        try {
+                            val tracks = innerTubeClient.search(query)
+                            if (tracks.isNotEmpty()) {
+                                tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+                            } else defaultStarterTracks().shuffled()
+                        } catch (e: Exception) {
+                            defaultStarterTracks().shuffled()
+                        }
+                    }
 
-                // 6. Ensure refresh animation runs for a smooth minimum time so user sees the animation
-                val elapsed = System.currentTimeMillis() - startTime
-                if (elapsed < 800) {
-                    kotlinx.coroutines.delay(800 - elapsed)
-                }
+                    val similarDeferred = async {
+                        try {
+                            fetchSimilarArtistProfiles(topArtistName)
+                        } catch (e: Exception) {
+                            emptyList()
+                        }
+                    }
 
-                // 7. SYNC ALL REFRESHES TOGETHER ATOMICALLY
-                _greeting.value = newGreeting
-                _recentPlayedSongs.value = newRecent
-                _rediscoveredFavorites.value = newRediscovered
-                _topArtistStat.value = newTopArtists
-                _trendingTracks.value = newTracks
-                _songsForYouTracks.value = songsForYou
-                if (newSimilarArtists.isNotEmpty()) {
-                    _dynamicSimilarArtists.value = newSimilarArtists
+                    val songsForYouDeferred = async {
+                        try {
+                            resolveSongsForYou()
+                        } catch (e: Exception) {
+                            defaultStarterTracks().shuffled().take(8)
+                        }
+                    }
+
+                    _greeting.value = newGreeting
+                    _recentPlayedSongs.value = newRecent
+                    _rediscoveredFavorites.value = newRediscovered
+                    _topArtistStat.value = newTopArtists
+                    resolveMissingDurations(newRecent)
+                    playerManager.reloadCurrentTrackArtwork()
+
+                    val newTracks = tracksDeferred.await()
+                    _trendingTracks.value = newTracks
+                    val newSimilarArtists = similarDeferred.await()
+                    if (newSimilarArtists.isNotEmpty()) {
+                        _currentSimilarToArtist.value = topArtistName
+                        _dynamicSimilarArtists.value = newSimilarArtists
+                    }
+                    _songsForYouTracks.value = songsForYouDeferred.await()
                 }
             } catch (e: Exception) {
                 // Retain current states on error
             } finally {
                 _isRefreshing.value = false
+            }
+        }
+    }
+
+    private fun resolveMissingDurations(events: List<ListeningEventEntity>) {
+        val missing = events.filter { it.songDurationMs <= 0L }
+        if (missing.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            for (item in missing) {
+                try {
+                    val query = "${item.songTitle} ${item.artistName}".trim()
+                    val tracks = innerTubeClient.search(query)
+                    val match = tracks.firstOrNull { it.durationSeconds > 0L }
+                    if (match != null && match.durationSeconds > 0L) {
+                        val durationMs = match.durationSeconds * 1000L
+                        listeningHistoryDao.updateSongDurationBySongId(item.songId, durationMs)
+                    }
+                } catch (_: Exception) {}
+            }
+            val updated = listeningHistoryDao.getRecentUniquePlayedSongs(5).firstOrNull()
+            if (!updated.isNullOrEmpty()) {
+                _recentPlayedSongs.value = updated
             }
         }
     }
@@ -339,15 +505,20 @@ class HomeViewModel @Inject constructor(
         _genreTracks.value = emptyList()
     }
 
-    fun openArtist(artistName: String, imageUrl: String? = null) {
+    fun openArtist(artist: SieloArtist) {
+        val saavnId = if (artist.id.all { it.isDigit() }) artist.id else null
+        openArtist(artist.name, artist.imageUrl, saavnId)
+    }
+
+    fun openArtist(artistName: String, imageUrl: String? = null, artistId: String? = null) {
         viewModelScope.launch {
             _isArtistLoading.value = true
             _selectedArtist.value = com.sielo.music.core.network.models.ArtistDetails(
-                id = artistName,
+                id = artistId ?: artistName,
                 name = artistName,
                 imageUrl = imageUrl
             )
-            val full = innerTubeClient.getArtistDetails(artistName, imageUrl)
+            val full = innerTubeClient.getArtistDetails(artistName, imageUrl, artistId)
             if (full != null) {
                 _selectedArtist.value = full
             }
@@ -355,8 +526,19 @@ class HomeViewModel @Inject constructor(
         }
     }
 
+    val playbackState: StateFlow<PlaybackState> = playerManager.playbackState
+
+    fun isArtistFollowed(artistName: String): Boolean = userManager.isArtistFollowed(artistName)
+
+    fun toggleFollowArtist(artistName: String): Boolean = userManager.toggleFollowArtist(artistName)
+
     fun closeArtist() {
         _selectedArtist.value = null
+    }
+
+    suspend fun getAlbumSongs(album: com.sielo.music.core.network.models.SieloAlbum): List<SieloTrack> {
+        if (album.tracks.isNotEmpty()) return album.tracks
+        return innerTubeClient.getAlbumSongs(album.id, album.title, album.artist)
     }
 
     private fun computeGreeting(): String {
@@ -421,6 +603,14 @@ class HomeViewModel @Inject constructor(
         playerManager.playTrack(track, queue)
     }
 
+    fun playAlbum(track: SieloTrack, queue: List<SieloTrack>) {
+        playerManager.playAlbum(track, queue)
+    }
+
+    fun playArtistRadio(track: SieloTrack, queue: List<SieloTrack>, artistName: String) {
+        playerManager.playArtistRadio(track, queue, artistName)
+    }
+
     fun appendToQueue(tracks: List<SieloTrack>) {
         playerManager.appendToQueue(tracks)
     }
@@ -440,33 +630,39 @@ class HomeViewModel @Inject constructor(
     }
 
     fun toggleFavorite(track: SieloTrack) {
-        viewModelScope.launch {
-            favoriteTrackDao.insertFavorite(
-                FavoriteTrackEntity(
-                    id = track.id,
-                    title = track.title,
-                    artist = track.artist,
-                    thumbnailUrl = track.thumbnailUrl
-                )
-            )
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val isFav = favoriteTrackDao.isFavorite(track.id).first()
+                if (isFav) {
+                    favoriteTrackDao.deleteById(track.id)
+                } else {
+                    favoriteTrackDao.insertFavorite(
+                        FavoriteTrackEntity(
+                            id = track.id,
+                            title = track.title,
+                            artist = track.artist,
+                            thumbnailUrl = track.thumbnailUrl
+                        )
+                    )
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
     }
 
     private suspend fun fetchSimilarArtistProfiles(topArtistName: String): List<ArtistProfile> {
         val names = getSimilarArtistNames(topArtistName)
+            .filterNot { it.equals(topArtistName, ignoreCase = true) }
+            .distinctBy { it.lowercase().trim() }
+
         val list = mutableListOf<ArtistProfile>()
         for (name in names) {
-            try {
-                val searchResult = innerTubeClient.searchArtists(name)
-                val img = searchResult.firstOrNull()?.imageUrl
-                val finalImg = if (!img.isNullOrBlank() && !img.contains("default-music") && !img.contains("default-film")) {
-                    img
-                } else {
-                    "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=500&auto=format&fit=crop&q=80"
-                }
-                list.add(ArtistProfile(name, finalImg))
-            } catch (e: Exception) {
-                list.add(ArtistProfile(name, "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=500&auto=format&fit=crop&q=80"))
+            val photo = YouTubeArtistImageResolver.resolveArtistImageUrl(name)
+                ?: innerTubeClient.getArtistPhotoFromYouTube(name)
+            if (!photo.isNullOrBlank()) {
+                list.add(ArtistProfile(name, photo))
+                if (list.size >= 8) break
             }
         }
         return list
@@ -584,8 +780,44 @@ class HomeViewModel @Inject constructor(
             "Karol G", "Rosalía", "Feid", "Myke Towers", "Anuel AA", "Bizarrap"
         )
 
+        // 15. Vintage Indian Golden Era (1950s - 1980s: Lata Mangeshkar, Kishore Kumar, Mukesh, Mohammad Rafi...)
+        val indianGoldenVintageCluster = listOf(
+            "Kishore Kumar", "Lata Mangeshkar", "Mukesh", "Mohammed Rafi", "Asha Bhosle",
+            "Manna Dey", "Mahendra Kapoor", "Hemant Kumar", "Geeta Dutt", "R.D. Burman", "S.D. Burman", "Kalyanji-Anandji"
+        )
+
+        // 16. Indian 90s & 2000s Nostalgia Era (Kumar Sanu, Udit Narayan, Alka Yagnik, Sonu Nigam...)
+        val indian90sNostalgiaCluster = listOf(
+            "Kumar Sanu", "Udit Narayan", "Alka Yagnik", "Sonu Nigam", "Shaan",
+            "Abhijeet", "Kavita Krishnamurthy", "Anuradha Paudwal", "Lucky Ali", "KK", "Sadhana Sargam", "Hariharan"
+        )
+
+        // 17. Worldwide Vintage Classic Rock & Pop Era (1960s - 1980s: The Beatles, Queen, Michael Jackson...)
+        val globalClassicVintageCluster = listOf(
+            "The Beatles", "Queen", "Michael Jackson", "Elton John", "ABBA",
+            "Bee Gees", "Fleetwood Mac", "David Bowie", "Elvis Presley", "Frank Sinatra", "Stevie Wonder", "Billy Joel", "Phil Collins"
+        )
+
+        // 18. Worldwide 90s & 2000s Pop & Rock Era (Britney Spears, Backstreet Boys, Avril Lavigne...)
+        val global90s2000sCluster = listOf(
+            "Britney Spears", "Backstreet Boys", "N'Sync", "Christina Aguilera", "Avril Lavigne",
+            "Destiny's Child", "Justin Timberlake", "Pink", "Gwen Stefani", "Linkin Park", "Green Day"
+        )
+
         // First check static matching with full country & scene awareness
         val matchedPool = when {
+            // Indian Golden Vintage Era (Lata Mangeshkar, Kishore Kumar, Mukesh, Mohammad Rafi, Asha Bhosle...)
+            listOf("lata", "mangeshkar", "kishore", "mukesh", "rafi", "mohammed rafi", "asha bhosle", "asha", "manna dey", "mahendra kapoor", "hemant", "geeta dutt", "burman").any { lower.contains(it) } -> indianGoldenVintageCluster
+
+            // Indian 90s/2000s Nostalgia Era (Kumar Sanu, Udit Narayan, Alka Yagnik, Sonu Nigam, Shaan...)
+            listOf("kumar sanu", "sanu", "udit", "narayan", "alka", "yagnik", "sonu nigam", "sonu", "shaan", "abhijeet", "anuradha", "lucky ali", "sadhana", "hariharan").any { lower.contains(it) } -> indian90sNostalgiaCluster
+
+            // Worldwide Classic Vintage Era (The Beatles, Queen, Michael Jackson, Elton John, ABBA...)
+            listOf("beatles", "queen", "michael jackson", "jackson", "elton", "abba", "bee gees", "fleetwood", "bowie", "presley", "sinatra", "stevie wonder", "billy joel", "phil collins").any { lower.contains(it) } -> globalClassicVintageCluster
+
+            // Worldwide 90s/2000s Era (Britney Spears, Backstreet Boys, N'Sync, Avril Lavigne...)
+            listOf("britney", "backstreet", "nsync", "christina aguilera", "avril", "destiny's child", "gwen stefani").any { lower.contains(it) } -> global90s2000sCluster
+
             // Indian Electronic / EDM (Lost Stories, Nucleya, Zaeden, Ritviz, KSHMR, Anyasa...)
             listOf("lost stories", "nucleya", "zaeden", "ritviz", "kshmr", "sickflip", "anyasa", "dualist", "chetas", "mojojojo", "sartek", "zephyrtone", "anish sood", "progressive brothers").any { lower.contains(it) } -> indianEdmCluster
 
@@ -638,6 +870,17 @@ class HomeViewModel @Inject constructor(
             emptyList()
         }
 
+        val cleanTarget = topArtistName.lowercase().replace(Regex("[^a-z0-9]"), "")
+
+        fun isSingleArtistName(name: String): String? {
+            val clean = name.trim()
+            if (clean.isBlank()) return null
+            if (clean.contains(",") || clean.contains(" & ") || clean.contains("/") || clean.contains(";") || clean.contains("+")) return null
+            if (clean.contains("feat", ignoreCase = true) || clean.contains("ft.", ignoreCase = true) || clean.contains("with", ignoreCase = true)) return null
+            if (clean.contains("various", ignoreCase = true) || clean.contains("soundtrack", ignoreCase = true) || clean.contains("topic", ignoreCase = true)) return null
+            return clean
+        }
+
         val combinedPool = mutableListOf<String>()
         if (matchedPool != null) {
             combinedPool.addAll(matchedPool)
@@ -646,15 +889,19 @@ class HomeViewModel @Inject constructor(
             combinedPool.addAll(liveSimilar)
         }
         if (combinedPool.isEmpty()) {
-            // Default to Indian Indie / EDM or Global Pop based on origin check
             combinedPool.addAll(if (lower.contains(" ") || lower.length > 5) indianEdmCluster else globalPopCluster)
         }
 
-        // Clean, deduplicate and remove the source artist
-        val candidatePool = combinedPool.distinctBy { it.trim().lowercase() }
-            .filterNot { it.equals(topArtistName, ignoreCase = true) || lower.contains(it.lowercase()) }
+        // Clean, deduplicate and ensure single-artist names only
+        val candidatePool = combinedPool
+            .mapNotNull { isSingleArtistName(it) }
+            .filterNot { candidate ->
+                val cleanCand = candidate.lowercase().replace(Regex("[^a-z0-9]"), "")
+                cleanCand == cleanTarget || cleanCand.contains(cleanTarget) || cleanTarget.contains(cleanCand)
+            }
+            .distinctBy { it.lowercase() }
 
-        return candidatePool.shuffled().take(6)
+        return candidatePool.shuffled().take(8)
     }
 
     val customPlaylists: List<PlaylistCardItem> = listOf(
@@ -680,7 +927,7 @@ class HomeViewModel @Inject constructor(
             title = "Midnight R&B Sessions",
             subtitle = "Smooth late night vibrations",
             genre = "R&B / Soul",
-            coverUrl = "https://images.unsplash.com/photo-1518609878373-06d740f60d8b?w=600&auto=format&fit=crop&q=80",
+            coverUrl = "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=600&auto=format&fit=crop&q=80",
             seedQuery = "Midnight R&B Soul Hits"
         ),
         PlaylistCardItem(

@@ -44,7 +44,12 @@ data class SieloAlbum(
     val year: String? = null,
     val thumbnailUrl: String? = null,
     val tracks: List<SieloTrack> = emptyList(),
-    val songCount: Int = 0
+    val songCount: Int = 0,
+    val type: String? = "Album",
+    val description: String? = null,
+    val audioQuality: String? = null,
+    val isFavorite: Boolean = false,
+    val releaseDate: String? = null
 )
 
 @Serializable
@@ -60,8 +65,19 @@ data class ArtistDetails(
     val id: String,
     val name: String,
     val imageUrl: String? = null,
+    val heroImageUrl: String? = null,
     val bio: String? = null,
     val latestAlbum: SieloAlbum? = null,
     val topSongs: List<SieloTrack> = emptyList(),
-    val pastAlbums: List<SieloAlbum> = emptyList()
+    val pastAlbums: List<SieloAlbum> = emptyList(),
+    val originalAlbums: List<SieloAlbum> = emptyList(),
+    val featuredAlbums: List<SieloAlbum> = emptyList(),
+    val singles: List<SieloAlbum> = emptyList(),
+    val similarArtists: List<SieloArtist> = emptyList(),
+    val monthlyListeners: String? = null,
+    val followerCount: String? = null,
+    val dominantLanguage: String? = null,
+    val dominantType: String? = null,
+    val isVerified: Boolean = true,
+    val wikiUrl: String? = null
 )

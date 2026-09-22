@@ -50,38 +50,82 @@ class ListenTogetherViewModel @Inject constructor(
         roomManager.clearRoomNotification()
     }
 
+    fun extractRoomCredentials(input: String, explicitKey: String = ""): Pair<String, String>? {
+        val trimmed = input.trim()
+        if (trimmed.isBlank()) return null
+
+        var parsedId = ""
+        var parsedKey = explicitKey.trim()
+
+        // 1. Extract from key query param or hash if present
+        if (parsedKey.isBlank()) {
+            if (trimmed.contains("#key=")) {
+                parsedKey = trimmed.substringAfter("#key=").substringBefore("&").substringBefore(" ").substringBefore("\n").trim()
+            } else if (trimmed.contains("key=")) {
+                parsedKey = trimmed.substringAfter("key=").substringBefore("&").substringBefore(" ").substringBefore("\n").trim()
+            }
+        }
+
+        // 2. Look for room URL pattern: sielo.app/room/XXXXXX or sielo://room/XXXXXX
+        if (trimmed.contains("room/")) {
+            val afterRoom = trimmed.substringAfter("room/")
+            val candidate = afterRoom.substringBefore("?").substringBefore("#").substringBefore("/").substringBefore(" ").substringBefore("\n").trim()
+            if (candidate.isNotBlank()) {
+                parsedId = candidate
+            }
+        }
+
+        if (parsedId.isBlank() && trimmed.contains("id=")) {
+            val afterId = trimmed.substringAfter("id=")
+            val candidate = afterId.substringBefore("&").substringBefore("#").substringBefore(" ").substringBefore("\n").trim()
+            if (candidate.isNotBlank()) {
+                parsedId = candidate
+            }
+        }
+        if (parsedId.isBlank() && trimmed.contains("room=")) {
+            val afterRoom = trimmed.substringAfter("room=")
+            val candidate = afterRoom.substringBefore("&").substringBefore("#").substringBefore(" ").substringBefore("\n").trim()
+            if (candidate.isNotBlank()) {
+                parsedId = candidate
+            }
+        }
+
+        // 3. Look for "Room Code: XXXXXX" in copied text
+        if (parsedId.isBlank() && trimmed.contains("Room Code:", ignoreCase = true)) {
+            val afterCode = trimmed.substringAfter("Room Code:").trim()
+            val candidate = afterCode.substringBefore("\n").substringBefore(" ").trim()
+            if (candidate.isNotBlank()) {
+                parsedId = candidate
+            }
+        }
+
+        // 4. If direct room ID pattern
+        if (parsedId.isBlank()) {
+            val regex = Regex("(?i)(SL-[A-Z0-9]{4}-[A-Z0-9]{4}|[A-Z0-9]{6})")
+            val match = regex.find(trimmed)
+            if (match != null) {
+                parsedId = match.value
+            } else {
+                parsedId = trimmed.take(12)
+            }
+        }
+
+        parsedId = parsedId.replace(Regex("[^A-Za-z0-9-]"), "").trim().uppercase()
+        if (parsedId.length < 4) return null
+
+        if (parsedKey.isBlank()) {
+            parsedKey = com.sielo.music.room.crypto.RoomCrypto.deriveKey(parsedId)
+        }
+
+        return Pair(parsedId, parsedKey)
+    }
+
     /**
      * Validates and extracts Room ID and Room Key from scanned QR text.
      * Returns null if the scanned code is not of a Sielo room.
      */
     fun parseRoomQr(rawResult: String): Pair<String, String>? {
-        val trimmed = rawResult.trim()
-        var parsedRoomId = ""
-        var parsedKey = ""
-
-        if (trimmed.contains("room/") || trimmed.contains("sielo://")) {
-            try {
-                val afterRoom = trimmed.substringAfter("room/").substringBefore("?")
-                parsedRoomId = afterRoom.substringBefore("#")
-                if (trimmed.contains("#key=")) {
-                    parsedKey = trimmed.substringAfter("#key=").substringBefore("&")
-                } else if (trimmed.contains("key=")) {
-                    parsedKey = trimmed.substringAfter("key=").substringBefore("&")
-                }
-            } catch (_: Exception) {}
-        } else {
-            parsedRoomId = trimmed
-        }
-
-        val roomPattern = Regex("(?i)^(SL-[A-Z0-9]{4}-[A-Z0-9]{4}|[A-Z0-9]{6}|[A-Z0-9]{4,12})$")
-        if (parsedRoomId.matches(roomPattern)) {
-            val upperId = parsedRoomId.uppercase()
-            if (parsedKey.isBlank()) {
-                parsedKey = com.sielo.music.room.crypto.RoomCrypto.deriveKey(upperId)
-            }
-            return Pair(upperId, parsedKey)
-        }
-        return null
+        return extractRoomCredentials(rawResult)
     }
 
     private val _searchQuery = MutableStateFlow("")
@@ -119,41 +163,12 @@ class ListenTogetherViewModel @Inject constructor(
     }
 
     /**
-     * Parses room input: either a raw room ID + key or a deep link like:
-     * sielo://room/SL-ABCD-1234#key=BASE64_KEY
-     * or SL-ABCD-1234
+     * Parses room input: either a raw room ID + key or a deep link / full message.
      */
     fun joinRoom(input: String, keyInput: String, userName: String): Boolean {
         saveUserName(userName)
-        val trimmed = input.trim()
-
-        var resolvedRoomId = ""
-        var resolvedKey = keyInput.trim()
-
-        if (trimmed.contains("room/") || trimmed.contains("sielo://")) {
-            try {
-                val afterRoom = trimmed.substringAfter("room/").substringBefore("?")
-                resolvedRoomId = afterRoom.substringBefore("#")
-
-                if (trimmed.contains("#key=")) {
-                    resolvedKey = trimmed.substringAfter("#key=").substringBefore("&")
-                } else if (trimmed.contains("key=")) {
-                    resolvedKey = trimmed.substringAfter("key=").substringBefore("&")
-                }
-            } catch (_: Exception) {}
-        } else {
-            resolvedRoomId = trimmed
-        }
-
-        if (resolvedKey.isBlank() && resolvedRoomId.isNotBlank()) {
-            resolvedKey = com.sielo.music.room.crypto.RoomCrypto.deriveKey(resolvedRoomId)
-        }
-
-        if (resolvedRoomId.isBlank()) {
-            return false
-        }
-
-        roomManager.joinRoom(resolvedRoomId, resolvedKey, userName)
+        val creds = extractRoomCredentials(input, keyInput) ?: return false
+        roomManager.joinRoom(creds.first, creds.second, userName)
         return true
     }
 
@@ -163,6 +178,10 @@ class ListenTogetherViewModel @Inject constructor(
 
     fun leaveRoom() {
         roomManager.leaveRoom()
+    }
+
+    fun transferHostAndLeave(newHostId: String) {
+        roomManager.transferHostAndLeave(newHostId)
     }
 
     fun sendChatMessage(text: String, replyToText: String? = null, replyToSender: String? = null) {
@@ -222,13 +241,18 @@ class ListenTogetherViewModel @Inject constructor(
         roomManager.skipTrack()
     }
 
+    fun removeTrackFromRoom(track: SieloTrack) {
+        roomManager.removeTrackFromRoom(track)
+    }
+
     fun getInviteLink(state: ActiveRoomState): String {
         return roomManager.getInviteLink(state)
     }
 
     fun shareRoomInvite(context: Context, state: ActiveRoomState) {
-        val link = getInviteLink(state)
-        val shareText = "Join my synchronized Listen Together room on Sielo!\n\nRoom ID: ${state.roomId}\nTap to join: $link"
+        val appLink = "sielo://room/${state.roomId}?key=${state.roomKey}"
+        val webLink = getInviteLink(state)
+        val shareText = "🎧 Join my Sielo Listen Together room!\n\nRoom Code: ${state.roomId}\n\nTap to join in Sielo:\n$appLink\n\nWeb Link:\n$webLink\n\n(Or open Sielo -> Listen Together -> tap Join!)"
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_SUBJECT, "Join my Sielo Listen Together room")
@@ -238,5 +262,48 @@ class ListenTogetherViewModel @Inject constructor(
         context.startActivity(Intent.createChooser(intent, "Share Room Invite").apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
         })
+    }
+
+    fun shareRoomQrWithImage(context: Context, state: ActiveRoomState) {
+        val appLink = "sielo://room/${state.roomId}?key=${state.roomKey}"
+        val webLink = getInviteLink(state)
+        val shareText = "🎧 Scan or tap to join my Sielo Listen Together room!\n\nRoom Code: ${state.roomId}\n\nOpen in Sielo:\n$appLink\n\nWeb Link:\n$webLink\n\n(Or open Sielo -> Listen Together -> tap Join!)"
+        try {
+            val qrBitmap = com.sielo.music.room.qr.QrCodeGenerator.generateQrBitmap(webLink, context, sizePx = 600)
+            val sharedDir = java.io.File(context.cacheDir, "shared_qr").apply { if (!exists()) mkdirs() }
+            val qrFile = java.io.File(sharedDir, "sielo_room_${state.roomId}.png")
+            java.io.FileOutputStream(qrFile).use { out ->
+                qrBitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
+            }
+            val contentUri = androidx.core.content.FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                qrFile
+            )
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "image/png"
+                putExtra(Intent.EXTRA_STREAM, contentUri)
+                putExtra(Intent.EXTRA_SUBJECT, "Join my Sielo Listen Together room")
+                putExtra(Intent.EXTRA_TEXT, shareText)
+                clipData = android.content.ClipData.newRawUri("Sielo QR Code", contentUri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+
+            val resInfoList = context.packageManager.queryIntentActivities(intent, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)
+            for (resolveInfo in resInfoList) {
+                val packageName = resolveInfo.activityInfo.packageName
+                context.grantUriPermission(packageName, contentUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+
+            val chooser = Intent.createChooser(intent, "Share Room QR").apply {
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(chooser)
+        } catch (e: Exception) {
+            android.util.Log.e("ListenTogetherVM", "Failed to share QR image", e)
+            shareRoomInvite(context, state)
+        }
     }
 }

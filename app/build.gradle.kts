@@ -16,8 +16,8 @@ android {
         applicationId = "com.sielo.music"
         minSdk = 26
         targetSdk = 35
-        versionCode = 404
-        versionName = "4.0.4"
+        versionCode = 804
+        versionName = "8.0.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -28,6 +28,8 @@ android {
             storePassword = "android"
             keyAlias = "sielodebugkey"
             keyPassword = "android"
+            enableV1Signing = true
+            enableV2Signing = true
         }
     }
 
@@ -61,6 +63,7 @@ dependencies {
     implementation(project(":core-network"))
     implementation(project(":core-lyrics"))
     implementation(project(":core-database"))
+    implementation(project(":core-playlist-import"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
@@ -107,3 +110,4 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 }
+

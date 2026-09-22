@@ -100,6 +100,12 @@ interface ListeningHistoryDao {
     @Query("UPDATE listening_history SET durationPlayedMs = :durationMs WHERE eventId = :eventId")
     suspend fun updateDurationPlayed(eventId: Long, durationMs: Long)
 
+    @Query("UPDATE listening_history SET songDurationMs = :songDurationMs WHERE eventId = :eventId AND (songDurationMs = 0 OR songDurationMs IS NULL)")
+    suspend fun updateSongDuration(eventId: Long, songDurationMs: Long)
+
+    @Query("UPDATE listening_history SET songDurationMs = :songDurationMs WHERE songId = :songId AND (songDurationMs = 0 OR songDurationMs IS NULL)")
+    suspend fun updateSongDurationBySongId(songId: String, songDurationMs: Long)
+
     @Query("UPDATE listening_history SET durationPlayedMs = durationPlayedMs + :deltaMs WHERE eventId = :eventId")
     suspend fun incrementDurationPlayed(eventId: Long, deltaMs: Long)
 

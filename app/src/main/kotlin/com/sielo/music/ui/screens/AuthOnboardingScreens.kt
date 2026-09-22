@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -713,18 +714,44 @@ fun GoogleAccountChooserDialog(
 @Composable
 fun NewUserOnboardingScreen(
     userManager: UserManager,
+    innerTubeClient: com.sielo.music.core.network.innertube.InnerTubeClient? = null,
     onFinished: () -> Unit
 ) {
     var step by remember { mutableStateOf(1) } // 1: Artists, 2: Genres
     val selectedArtists = remember { mutableStateListOf<String>() }
     val selectedGenres = remember { mutableStateListOf<String>() }
 
+    var artistSearchQuery by remember { mutableStateOf("") }
+    var searchedArtists by remember { mutableStateOf<List<com.sielo.music.core.network.models.SieloArtist>>(emptyList()) }
+    var isSearchingArtists by remember { mutableStateOf(false) }
+
+    androidx.compose.runtime.LaunchedEffect(artistSearchQuery) {
+        val q = artistSearchQuery.trim()
+        if (q.isBlank()) {
+            searchedArtists = emptyList()
+            isSearchingArtists = false
+        } else {
+            isSearchingArtists = true
+            kotlinx.coroutines.delay(300)
+            try {
+                val results = innerTubeClient?.searchArtists(q) ?: emptyList()
+                searchedArtists = results.filter { it.name.isNotBlank() }
+            } catch (_: Exception) {
+                searchedArtists = emptyList()
+            } finally {
+                isSearchingArtists = false
+            }
+        }
+    }
+
     // System Back Gesture handling
     BackHandler {
         if (step == 2) {
             step = 1
         } else {
-            userManager.openAuthDialog()
+            if (userManager.currentUser.value == null) {
+                userManager.openAuthDialog()
+            }
             userManager.closeOnboarding()
         }
     }
@@ -751,7 +778,9 @@ fun NewUserOnboardingScreen(
                             if (step == 2) {
                                 step = 1
                             } else {
-                                userManager.openAuthDialog()
+                                if (userManager.currentUser.value == null) {
+                                    userManager.openAuthDialog()
+                                }
                                 userManager.closeOnboarding()
                             }
                         },
@@ -803,7 +832,7 @@ fun NewUserOnboardingScreen(
                     fontSize = 22.sp,
                     fontWeight = FontWeight.Bold
                 )
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(4.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -834,28 +863,123 @@ fun NewUserOnboardingScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(3),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(bottom = 80.dp)
-                ) {
-                    items(TRENDING_ONBOARDING_ARTISTS) { artist ->
-                        val isSelected = selectedArtists.contains(artist.name)
-                        OnboardingArtistTile(
-                            artist = artist,
-                            isSelected = isSelected,
-                            onToggle = {
-                                if (isSelected) {
-                                    selectedArtists.remove(artist.name)
-                                } else {
-                                    selectedArtists.add(artist.name)
-                                }
+                // Artist-Only Search Bar
+                OutlinedTextField(
+                    value = artistSearchQuery,
+                    onValueChange = {
+                        artistSearchQuery = it
+                        if (it.isNotBlank()) {
+                            isSearchingArtists = true
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp),
+                    placeholder = {
+                        Text("Search artists (e.g. Arijit, Eminem, Diljit...)", color = TextMuted, fontSize = 13.sp)
+                    },
+                    leadingIcon = {
+                        Icon(imageVector = Icons.Default.Search, contentDescription = "Search", tint = PaletteSand)
+                    },
+                    trailingIcon = {
+                        if (artistSearchQuery.isNotBlank()) {
+                            IconButton(onClick = { artistSearchQuery = "" }) {
+                                Icon(imageVector = Icons.Default.Close, contentDescription = "Clear", tint = TextSecondary)
                             }
-                        )
+                        }
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(14.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = PaletteSand,
+                        unfocusedBorderColor = BorderGlass,
+                        focusedContainerColor = PaletteOxfordBlue,
+                        unfocusedContainerColor = PaletteOxfordBlue.copy(alpha = 0.6f),
+                        focusedTextColor = PaletteCream,
+                        unfocusedTextColor = PaletteCream
+                    )
+                )
+
+                if (artistSearchQuery.isNotBlank()) {
+                    if (isSearchingArtists || (searchedArtists.isEmpty() && artistSearchQuery.trim().length < 2)) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "Searching artists...",
+                                color = PaletteSageGreen,
+                                fontSize = 14.sp
+                            )
+                        }
+                    } else if (searchedArtists.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "No artists found for \"$artistSearchQuery\"",
+                                color = TextMuted,
+                                fontSize = 14.sp
+                            )
+                        }
+                    } else {
+                        LazyVerticalGrid(
+                            columns = GridCells.Fixed(3),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(bottom = 80.dp)
+                        ) {
+                            items(searchedArtists) { artist ->
+                                val isSelected = selectedArtists.contains(artist.name)
+                                OnboardingArtistTile(
+                                    artist = OnboardingArtist(artist.name, "Artist", artist.imageUrl ?: ""),
+                                    isSelected = isSelected,
+                                    onToggle = {
+                                        if (isSelected) {
+                                            selectedArtists.remove(artist.name)
+                                        } else {
+                                            selectedArtists.add(artist.name)
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    val customSelectedArtists = selectedArtists.filter { name ->
+                        TRENDING_ONBOARDING_ARTISTS.none { it.name.equals(name, ignoreCase = true) }
+                    }.map { name -> OnboardingArtist(name, "Your Choice", "") }
+                    val displayList = customSelectedArtists + TRENDING_ONBOARDING_ARTISTS
+
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(3),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(bottom = 80.dp)
+                    ) {
+                        items(displayList) { artist ->
+                            val isSelected = selectedArtists.contains(artist.name)
+                            OnboardingArtistTile(
+                                artist = artist,
+                                isSelected = isSelected,
+                                onToggle = {
+                                    if (isSelected) {
+                                        selectedArtists.remove(artist.name)
+                                    } else {
+                                        selectedArtists.add(artist.name)
+                                    }
+                                }
+                            )
+                        }
                     }
                 }
             } else {

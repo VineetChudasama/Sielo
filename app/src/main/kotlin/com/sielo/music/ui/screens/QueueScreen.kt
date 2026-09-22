@@ -59,6 +59,12 @@ import com.sielo.music.ui.theme.TextSecondary
 import com.sielo.music.ui.theme.SoraFontFamily
 import com.sielo.music.ui.theme.UrbanistFontFamily
 import com.sielo.music.viewmodel.PlayerViewModel
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.hilt.navigation.compose.hiltViewModel
+import com.sielo.music.ui.components.SongActionsSheet
+import com.sielo.music.viewmodel.SongActionsViewModel
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
@@ -111,9 +117,6 @@ fun QueueScreen(
     onDismissPlayer: ((velocity: Float) -> Unit)? = null,
     onSnapBack: (() -> Unit)? = null
 ) {
-    BackHandler {
-        onBack()
-    }
 
     val playbackState by viewModel.playbackState.collectAsState()
     val track = playbackState.currentTrack ?: return
@@ -133,6 +136,8 @@ fun QueueScreen(
 
     val queueListState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
+    var selectedSongActionsTrack by remember { mutableStateOf<com.sielo.music.core.network.models.SieloTrack?>(null) }
+    val songActionsVm: SongActionsViewModel = hiltViewModel()
     val shuffleAnimState = rememberShuffleAnimationState()
     var listScrolledInCurrentGesture by remember { mutableStateOf(false) }
 
@@ -385,7 +390,7 @@ fun QueueScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "UP NEXT • TUNED TO YOUR TASTE (${upcomingTracks.size})",
+                        text = if (playbackState.playNextCount > 0) "PLAY NEXT" else "UP NEXT • TUNED TO YOUR TASTE (${upcomingTracks.size})",
                         color = TextSecondary,
                         fontFamily = SoraFontFamily,
                         fontSize = 11.sp,
@@ -410,6 +415,7 @@ fun QueueScreen(
                                 coroutineScope.launch {
                                     viewModel.shuffleQueue()
                                     shuffleAnimState.playAnimation(durationMs = 1150)
+                                    queueListState.animateScrollToItem(0)
                                 }
                             }
                             .padding(horizontal = 10.dp, vertical = 5.dp),
@@ -525,23 +531,35 @@ fun QueueScreen(
                             positionalThreshold = { distance -> distance * 0.35f }
                         )
 
-                        SwipeToDismissBox(
-                            state = dismissState,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .animateItem()
-                                .zIndex(if (isDragging) 10f else 1f)
-                                .graphicsLayer {
-                                    translationY = if (isDragging) dragOffsetY else 0f
-                                    scaleX = scale
-                                    scaleY = scale
-                                    shadowElevation = elevation.toPx()
-                                }
-                                .onGloballyPositioned { coordinates ->
-                                    if (measuredItemHeightPx == 0f && coordinates.size.height > 0) {
-                                        measuredItemHeightPx = coordinates.size.height.toFloat() + with(density) { 10.dp.toPx() }
+                        Column(modifier = Modifier.animateItem()) {
+                            if (playbackState.playNextCount > 0 && offsetIndex == playbackState.playNextCount) {
+                                Text(
+                                    text = "UP NEXT • TUNED TO YOUR TASTE (${upcomingTracks.size - playbackState.playNextCount})",
+                                    color = TextSecondary,
+                                    fontFamily = SoraFontFamily,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 1.sp,
+                                    modifier = Modifier.padding(start = 4.dp, top = 16.dp, bottom = 12.dp)
+                                )
+                            }
+                            
+                            SwipeToDismissBox(
+                                state = dismissState,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .zIndex(if (isDragging) 10f else 1f)
+                                    .graphicsLayer {
+                                        translationY = if (isDragging) dragOffsetY else 0f
+                                        scaleX = scale
+                                        scaleY = scale
+                                        shadowElevation = elevation.toPx()
                                     }
-                                },
+                                    .onGloballyPositioned { coordinates ->
+                                        if (measuredItemHeightPx == 0f && coordinates.size.height > 0) {
+                                            measuredItemHeightPx = coordinates.size.height.toFloat() + with(density) { 10.dp.toPx() }
+                                        }
+                                    },
                             enableDismissFromStartToEnd = true,
                             enableDismissFromEndToStart = false,
                             gesturesEnabled = (draggingIndex == null),
@@ -694,7 +712,7 @@ fun QueueScreen(
                                     fontWeight = FontWeight.Normal
                                 )
 
-                                Spacer(modifier = Modifier.width(8.dp))
+                                Spacer(modifier = Modifier.width(12.dp))
 
                                 Icon(
                                     imageVector = Icons.Default.DragHandle,
@@ -704,9 +722,19 @@ fun QueueScreen(
                                 )
                             }
                         }
+                        }
                     }
                 }
             }
         }
+    }
+
+    // Song Actions Sheet
+    selectedSongActionsTrack?.let { track ->
+        SongActionsSheet(
+            track = track,
+            onDismiss = { selectedSongActionsTrack = null },
+            viewModel = songActionsVm
+        )
     }
 }

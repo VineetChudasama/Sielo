@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -75,6 +76,9 @@ import com.sielo.music.ui.theme.TextSecondary
 import com.sielo.music.ui.theme.SoraFontFamily
 import com.sielo.music.ui.theme.UrbanistFontFamily
 import com.sielo.music.viewmodel.SearchViewModel
+import androidx.compose.material.icons.filled.MoreVert
+import com.sielo.music.ui.components.SongActionsSheet
+import androidx.compose.foundation.combinedClickable
 
 @Composable
 fun SearchScreen(
@@ -93,8 +97,10 @@ fun SearchScreen(
     val isCategoryLoading by viewModel.isCategoryLoading.collectAsState()
     val recentSearches by viewModel.recentSearches.collectAsState()
     val previousPlayedSongs by viewModel.previousPlayedSongs.collectAsState()
+    val playbackState by viewModel.playbackState.collectAsState()
 
     var isDedicatedSearchOpen by remember { mutableStateOf(false) }
+    var selectedSongActionsTrack by remember { mutableStateOf<SieloTrack?>(null) }
 
     // System Back Press Handler
     BackHandler(enabled = selectedArtist != null || selectedCategory != null || isDedicatedSearchOpen) {
@@ -110,12 +116,21 @@ fun SearchScreen(
 
     // Render Artist Profile Screen if an artist is selected
     if (selectedArtist != null) {
+        val artist = selectedArtist!!
         ArtistProfileScreen(
-            artist = selectedArtist!!,
+            artist = artist,
             isLoading = isArtistLoading,
             onBack = { viewModel.closeArtist() },
             onPlayTrack = { track, q -> viewModel.playTrack(track, q) },
+            onPlayAlbum = { track, q -> viewModel.playAlbum(track, q) },
+            onPlayRadio = { track, q, artistName -> viewModel.playArtistRadio(track, q, artistName) },
             onToggleFavorite = { viewModel.toggleFavorite(it) },
+            onOpenArtist = { a -> viewModel.openArtist(a) },
+            isFollowed = viewModel.isArtistFollowed(artist.name),
+            onToggleFollow = { name -> viewModel.toggleFollowArtist(name) },
+            currentTrackId = playbackState.currentTrack?.id,
+            isPlaying = playbackState.isPlaying,
+            onLoadAlbumTracks = { album -> viewModel.getAlbumSongs(album) },
             modifier = modifier
         )
         return
@@ -171,6 +186,7 @@ fun SearchScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .statusBarsPadding()
                         .padding(horizontal = 14.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -263,7 +279,7 @@ fun SearchScreen(
                     // Full Dropdown / List of ALL Past Searches
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp)
+                        contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 210.dp)
                     ) {
                         if (recentSearches.isNotEmpty()) {
                             item {
@@ -359,7 +375,7 @@ fun SearchScreen(
                     // Live Search Results (Ranked by Relevance)
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = 140.dp)
+                        contentPadding = PaddingValues(bottom = 210.dp)
                     ) {
                         // 1. Artists Section
                         if (filterCategory == "Artists" || (filterCategory == "All" && artistResults.isNotEmpty())) {
@@ -417,7 +433,7 @@ fun SearchScreen(
                                 SearchResultTrackRow(
                                     track = track,
                                     onPlay = { viewModel.playTrack(track, listOf(track)) },
-                                    onFavorite = { viewModel.toggleFavorite(track) }
+                                    onMoreClick = { selectedSongActionsTrack = track }
                                 )
                             }
                         }
@@ -431,7 +447,8 @@ fun SearchScreen(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(top = 20.dp)
+                    .statusBarsPadding()
+                    .padding(top = 10.dp)
             ) {
                 // Header
                 Text(
@@ -480,7 +497,7 @@ fun SearchScreen(
 
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 140.dp)
+                    contentPadding = PaddingValues(bottom = 210.dp)
                 ) {
                     // Recent Searches Chips (Keep ONLY past 3 searches in the scroll)
                     if (recentSearches.isNotEmpty()) {
@@ -700,6 +717,14 @@ fun SearchScreen(
             }
         }
     }
+
+    // Song Actions Sheet
+    selectedSongActionsTrack?.let { track ->
+        SongActionsSheet(
+            track = track,
+            onDismiss = { selectedSongActionsTrack = null }
+        )
+    }
 }
 
 @Composable
@@ -719,7 +744,7 @@ fun CategoryDetailScreen(
     ) {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(bottom = 120.dp)
+            contentPadding = PaddingValues(bottom = 210.dp)
         ) {
             // Header Banner
             item {
@@ -865,7 +890,7 @@ fun CategoryDetailScreen(
                     SearchResultTrackRow(
                         track = track,
                         onPlay = { onPlayTrack(track, tracks) },
-                        onFavorite = { onFavorite(track) }
+                        onMoreClick = { onFavorite(track) }
                     )
                 }
             }
@@ -1044,11 +1069,12 @@ fun SearchArtistFullRow(
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun SearchResultTrackRow(
     track: SieloTrack,
     onPlay: () -> Unit,
-    onFavorite: () -> Unit
+    onMoreClick: () -> Unit = {}
 ) {
     Box(
         modifier = Modifier
@@ -1057,7 +1083,10 @@ fun SearchResultTrackRow(
             .clip(RoundedCornerShape(14.dp))
             .background(PaletteOxfordBlue)
             .border(1.dp, BorderGlass, RoundedCornerShape(14.dp))
-            .clickable { onPlay() }
+            .combinedClickable(
+                onClick = onPlay,
+                onLongClick = onMoreClick
+            )
             .padding(horizontal = 12.dp, vertical = 10.dp)
     ) {
         Row(
@@ -1102,10 +1131,10 @@ fun SearchResultTrackRow(
                 }
             }
 
-            IconButton(onClick = onFavorite) {
+            IconButton(onClick = onMoreClick) {
                 Icon(
-                    imageVector = Icons.Default.Favorite,
-                    contentDescription = "Favorite",
+                    imageVector = Icons.Default.MoreVert,
+                    contentDescription = "More options",
                     tint = PaletteSlateBlue,
                     modifier = Modifier.size(20.dp)
                 )

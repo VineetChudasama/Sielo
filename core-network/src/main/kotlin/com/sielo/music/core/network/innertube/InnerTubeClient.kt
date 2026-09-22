@@ -18,6 +18,7 @@ import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.math.abs
 
 @Singleton
 class InnerTubeClient @Inject constructor(
@@ -35,6 +36,7 @@ class InnerTubeClient @Inject constructor(
     private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
 
     companion object {
+        var preferredBitrateSuffix: String = "_320.mp4"
         private val NON_MUSIC_KEYWORDS = listOf(
             "mashup", "mash-up", "mash up", "mega mashup", "megamashup",
             "jukebox", "full album", "all songs", "top songs collection",
@@ -82,7 +84,7 @@ class InnerTubeClient @Inject constructor(
         val altSaavnTracks = if (normalizedQuery != query) searchJioSaavn(normalizedQuery) else emptyList()
         val ytTracks = searchYouTube(query)
         val altYtTracks = if (normalizedQuery != query && ytTracks.isEmpty()) searchYouTube(normalizedQuery) else emptyList()
-        
+
         // Combine results prioritizing official label tracks and canonical deduplication
         val combined = (saavnTracks + altSaavnTracks + ytTracks + altYtTracks)
             .filter { isPureMusicTrack(it.title, it.artist, it.durationSeconds) }
@@ -514,56 +516,131 @@ class InnerTubeClient @Inject constructor(
         }
     }
 
-    suspend fun getAlbumSongs(albumId: String): List<SieloTrack> = withContext(Dispatchers.IO) {
+    suspend fun getSimilarArtists(artistName: String): List<SieloArtist> = withContext(Dispatchers.IO) {
         try {
-            val url = "https://www.jiosaavn.com/api.php?__call=content.getAlbumDetails&_format=json&cc=in&albumid=$albumId"
+            val results = searchArtistsSaavn(artistName)
+            results.filter { !it.imageUrl.isNullOrBlank() }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    suspend fun getAlbumSongs(albumId: String, albumTitle: String? = null, artistName: String? = null): List<SieloTrack> = withContext(Dispatchers.IO) {
+        try {
+            // JioSaavn's album endpoint is the primary source because it returns
+            // the complete release track list. Do not require a numeric album id:
+            // some JioSaavn responses use string/slug-style ids.
+            val encodedAlbumId = URLEncoder.encode(albumId, "UTF-8")
+            val url = "https://www.jiosaavn.com/api.php?__call=content.getAlbumDetails&_format=json&cc=in&albumid=$encodedAlbumId"
             val request = Request.Builder()
                 .url(url)
                 .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
                 .build()
 
             val response = client.newCall(request).execute()
-            val bodyString = response.body?.string() ?: return@withContext emptyList()
-            val root = json.parseToJsonElement(bodyString).jsonObject
-            val songArray = root["songs"]?.jsonArray ?: root["list"]?.jsonArray ?: return@withContext emptyList()
+            val bodyString = response.body?.string().orEmpty()
 
-            songArray.mapNotNull { item ->
-                val obj = item.jsonObject
-                val id = obj["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                val songTitle = unescapeHtml(obj["song"]?.jsonPrimitive?.content ?: obj["title"]?.jsonPrimitive?.content ?: "Unknown")
-                val songArtist = unescapeHtml(obj["primary_artists"]?.jsonPrimitive?.content ?: obj["singers"]?.jsonPrimitive?.content ?: "Artist")
-                val album = obj["album"]?.jsonPrimitive?.content?.let { unescapeHtml(it) }
-                val image = obj["image"]?.jsonPrimitive?.content
-                    ?.replace("50x50", "500x500")
-                    ?.replace("150x150", "500x500")
-                val durSec = obj["duration"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
-                val durationText = if (durSec > 0) "${durSec / 60}:${(durSec % 60).toString().padStart(2, '0')}" else "3:30"
-                val encUrl = obj["encrypted_media_url"]?.jsonPrimitive?.content
-                val streamUrl = if (!encUrl.isNullOrBlank()) decryptDesUrl(encUrl) else null
+            if (bodyString.isNotBlank()) {
+                val root = json.parseToJsonElement(bodyString).jsonObject
+                val songArray = root["songs"]?.jsonArray
+                    ?: root["list"]?.jsonArray
+                    ?: root["results"]?.jsonArray
+                    ?: root["data"]?.jsonObject?.get("songs")?.jsonArray
 
-                SieloTrack(
-                    id = id,
-                    title = songTitle,
-                    artist = songArtist,
-                    album = album,
-                    durationText = durationText,
-                    durationSeconds = durSec,
-                    thumbnailUrl = image,
-                    streamUrl = streamUrl
-                )
-            }.filter { isPureMusicTrack(it.title, it.artist, it.durationSeconds) }
-             .distinctBy { it.id }
+                if (songArray != null) {
+                    val jioTracks = songArray.mapNotNull { item ->
+                        val obj = item.jsonObject
+                        val id = obj["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
+                        val songTitle = unescapeHtml(
+                            obj["song"]?.jsonPrimitive?.content
+                                ?: obj["title"]?.jsonPrimitive?.content
+                                ?: return@mapNotNull null
+                        )
+                        val songArtist = unescapeHtml(
+                            obj["primary_artists"]?.jsonPrimitive?.content
+                                ?: obj["singers"]?.jsonPrimitive?.content
+                                ?: obj["artist"]?.jsonPrimitive?.content
+                                ?: "Artist"
+                        )
+                        val album = obj["album"]?.jsonPrimitive?.content?.let { unescapeHtml(it) }
+                        val image = (obj["image"]?.jsonPrimitive?.content
+                            ?: obj["album_image"]?.jsonPrimitive?.content)
+                            ?.replace("50x50", "500x500")
+                            ?.replace("150x150", "500x500")
+                        val durSec = obj["duration"]?.jsonPrimitive?.content?.toLongOrNull()
+                            ?: obj["more_info"]?.jsonObject?.get("duration")?.jsonPrimitive?.content?.toLongOrNull()
+                            ?: 0L
+                        val durationText = if (durSec > 0) {
+                            "${durSec / 60}:${(durSec % 60).toString().padStart(2, '0')}"
+                        } else "3:30"
+                        val encUrl = obj["encrypted_media_url"]?.jsonPrimitive?.content
+                            ?: obj["more_info"]?.jsonObject?.get("encrypted_media_url")?.jsonPrimitive?.content
+                        val streamUrl = if (!encUrl.isNullOrBlank()) decryptDesUrl(encUrl) else null
+
+                        SieloTrack(
+                            id = id,
+                            title = songTitle,
+                            artist = songArtist,
+                            album = album ?: albumTitle,
+                            durationText = durationText,
+                            durationSeconds = durSec,
+                            thumbnailUrl = image,
+                            streamUrl = streamUrl
+                        )
+                    }
+                        .filter { isPureMusicTrack(it.title, it.artist, it.durationSeconds) }
+                        .distinctBy { it.id }
+
+                    if (jioTracks.isNotEmpty()) {
+                        return@withContext jioTracks
+                    }
+                }
+            }
+
+            // Fallback for releases that JioSaavn's album endpoint does not
+            // expose correctly. Search YouTube using the actual release title
+            // and keep only tracks that belong to that album.
+            val title = albumTitle?.trim().orEmpty()
+            val artist = artistName?.trim().orEmpty()
+            if (title.isNotBlank()) {
+                val query = if (artist.isNotBlank()) "$artist $title" else title
+                val normalizedAlbum = normalizeAlbumKey(title)
+                val fallback = searchYouTube(query)
+                    .filter { track ->
+                        if (!TrackMatchValidator.isSongByOrFeaturingArtist(track.title, track.artist, artist)) {
+                            false
+                        } else {
+                            val trackAlbum = normalizeAlbumKey(track.album.orEmpty())
+                            trackAlbum.isBlank() ||
+                                    trackAlbum == normalizedAlbum ||
+                                    trackAlbum.contains(normalizedAlbum) ||
+                                    normalizedAlbum.contains(trackAlbum)
+                        }
+                    }
+                    .distinctBy { it.id }
+
+                if (fallback.isNotEmpty()) {
+                    return@withContext fallback
+                }
+            }
+
+            emptyList()
         } catch (e: Exception) {
             android.util.Log.e("InnerTubeClient", "Error fetching album songs for $albumId: ${e.message}", e)
             emptyList()
         }
     }
 
-    suspend fun getArtistDetails(artistIdOrName: String, artistImageUrl: String? = null): ArtistDetails? = withContext(Dispatchers.IO) {
+    suspend fun getArtistDetails(artistIdOrName: String, artistImageUrl: String? = null, artistId: String? = null): ArtistDetails? = withContext(Dispatchers.IO) {
         // 1. Check in-memory session cache first
         val cached = artistProfileCache.get(artistIdOrName)
         if (cached != null) {
-            return@withContext cached
+            val hasDiscography = cached.originalAlbums.isNotEmpty() ||
+                    cached.featuredAlbums.isNotEmpty() ||
+                    cached.singles.isNotEmpty()
+            if (hasDiscography) {
+                return@withContext cached
+            }
         }
 
         try {
@@ -580,7 +657,7 @@ class InnerTubeClient @Inject constructor(
                 artists.firstOrNull()?.id ?: return@withContext createGuaranteedArtistProfile(artistIdOrName, ytPhoto)
             }
 
-            val url = "https://www.jiosaavn.com/api.php?__call=artist.getArtistPageDetails&_format=json&_marker=0&artistId=$artistId&n_song=15&n_album=10"
+            val url = "https://www.jiosaavn.com/api.php?__call=artist.getArtistPageDetails&_format=json&_marker=0&artistId=$artistId&n_song=50&n_album=50"
             val request = Request.Builder()
                 .url(url)
                 .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
@@ -590,7 +667,11 @@ class InnerTubeClient @Inject constructor(
             val bodyString = response.body?.string() ?: return@withContext createGuaranteedArtistProfile(artistIdOrName, ytPhoto)
             val root = json.parseToJsonElement(bodyString).jsonObject
 
-            val name = unescapeHtml(root["name"]?.jsonPrimitive?.content ?: artistIdOrName)
+            val rawName = unescapeHtml(root["name"]?.jsonPrimitive?.content ?: artistIdOrName)
+            val name = if (rawName.equals("Artist", ignoreCase = true) || rawName.isBlank()) {
+                if (!artistIdOrName.equals("Artist", ignoreCase = true) && artistIdOrName.isNotBlank()) artistIdOrName else "Official Artist"
+            } else rawName
+
             val rawImage = root["image"]?.jsonPrimitive?.content
                 ?.replace("50x50", "500x500")
                 ?.replace("150x150", "500x500")
@@ -600,7 +681,7 @@ class InnerTubeClient @Inject constructor(
             val topSongsObj = root["topSongs"]?.jsonObject
             val songArray = topSongsObj?.get("songs")?.jsonArray ?: root["songs"]?.jsonArray ?: kotlinx.serialization.json.JsonArray(emptyList())
 
-            val topSongs = songArray.mapNotNull { item ->
+            val parsedTopSongs = songArray.mapNotNull { item ->
                 val obj = item.jsonObject
                 val id = obj["id"]?.jsonPrimitive?.content ?: return@mapNotNull null
                 val songTitle = unescapeHtml(obj["song"]?.jsonPrimitive?.content ?: obj["title"]?.jsonPrimitive?.content ?: "Unknown")
@@ -625,12 +706,25 @@ class InnerTubeClient @Inject constructor(
                     streamUrl = streamUrl
                 )
             }.filter { isPureMusicTrack(it.title, it.artist, it.durationSeconds) }
-             .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
-             .take(5)
+                .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+
+            // Ensure top songs is never empty
+            val topSongs = if (parsedTopSongs.size >= 5) {
+                parsedTopSongs.take(20)
+            } else {
+                val searchFallback = searchYouTube("$name hits")
+                    .filter { isPureMusicTrack(it.title, it.artist, it.durationSeconds) }
+                    .filter { TrackMatchValidator.isSongByOrFeaturingArtist(it.title, it.artist, name) }
+                (parsedTopSongs + searchFallback).distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }.take(12)
+            }
 
             // Top Albums & Past Albums with full tracks
             val topAlbumsObj = root["topAlbums"]?.jsonObject
-            val albumArray = topAlbumsObj?.get("albums")?.jsonArray ?: root["albums"]?.jsonArray ?: kotlinx.serialization.json.JsonArray(emptyList())
+            val albumArray = topAlbumsObj?.get("albums")?.jsonArray
+                ?: runCatching { root["albums"]?.jsonArray }.getOrNull()
+                ?: runCatching { root["albums"]?.jsonObject?.get("albums")?.jsonArray }.getOrNull()
+                ?: runCatching { root["artistAlbums"]?.jsonArray }.getOrNull()
+                ?: kotlinx.serialization.json.JsonArray(emptyList())
 
             val rawAlbums = albumArray.mapNotNull { item ->
                 val obj = item.jsonObject
@@ -641,19 +735,40 @@ class InnerTubeClient @Inject constructor(
                     ?.replace("50x50", "500x500")
                     ?.replace("150x150", "500x500")
 
+                val isMovieStr = obj["is_movie"]?.jsonPrimitive?.content
+                    ?: obj["more_info"]?.jsonObject?.get("is_movie")?.jsonPrimitive?.content
+                val isMovie = isMovieStr == "1" || isMovieStr.equals("true", ignoreCase = true)
+                val songCount = obj["song_count"]?.jsonPrimitive?.content?.toIntOrNull()
+                    ?: obj["more_info"]?.jsonObject?.get("song_count")?.jsonPrimitive?.content?.toIntOrNull()
+                    ?: 0
+                val rawType = obj["type"]?.jsonPrimitive?.content
+                    ?: obj["more_info"]?.jsonObject?.get("type")?.jsonPrimitive?.content
+                    ?: "album"
+
+                val isSingle = songCount == 1 || rawType.equals("single", ignoreCase = true) || albumTitle.contains("single", ignoreCase = true)
+                val isFeaturedSoundtrack = isMovie || (!isSingle && (albumTitle.lowercase().contains("soundtrack") || albumTitle.lowercase().contains("ost") || albumTitle.lowercase().contains("from \"") || albumTitle.lowercase().contains("from '")))
+
+                val calculatedType = when {
+                    isSingle -> "Single"
+                    isFeaturedSoundtrack -> "Soundtrack"
+                    else -> "Album"
+                }
+
                 SieloAlbum(
                     id = albumId,
                     title = albumTitle,
                     artist = name,
                     year = year,
-                    thumbnailUrl = cover
+                    thumbnailUrl = cover,
+                    type = calculatedType,
+                    songCount = songCount
                 )
             }
 
             // Concurrently fetch tracks for each album
             val fullAlbums = rawAlbums.map { album ->
-                val songs = if (album.id.all { it.isDigit() }) {
-                    getAlbumSongs(album.id)
+                val songs = if (album.id.isNotBlank()) {
+                    getAlbumSongs(album.id, album.title, name)
                 } else emptyList()
 
                 val resolvedSongs = if (songs.isNotEmpty()) {
@@ -664,7 +779,7 @@ class InnerTubeClient @Inject constructor(
 
                 album.copy(
                     tracks = resolvedSongs,
-                    songCount = if (resolvedSongs.isNotEmpty()) resolvedSongs.size else 4
+                    songCount = if (resolvedSongs.isNotEmpty()) resolvedSongs.size else album.songCount
                 )
             }
 
@@ -674,12 +789,23 @@ class InnerTubeClient @Inject constructor(
             } else {
                 val searchFallback = search("$name album hits").take(12)
                 val combinedSongs = (topSongs + searchFallback).distinctBy { it.id }
-                val grouped = combinedSongs.groupBy { it.album ?: "$name Collection" }
+
+                // Fallback search metadata can incorrectly put the song title in
+                // the album field. Normalize that case into one collection so a
+                // search result never becomes its own one-song album card.
+                val grouped = combinedSongs.groupBy { track ->
+                    val rawAlbum = track.album?.trim().orEmpty()
+                    if (rawAlbum.isBlank() || normalizeAlbumKey(rawAlbum) == normalizeAlbumKey(track.title)) {
+                        "$name Essentials"
+                    } else {
+                        rawAlbum
+                    }
+                }
                 val fallbackList = mutableListOf<SieloAlbum>()
                 for ((albName, trks) in grouped) {
                     fallbackList.add(
                         SieloAlbum(
-                            id = "alb_${kotlin.math.abs((name + albName).hashCode())}",
+                            id = "alb_${kotlin.math.abs((name + normalizeAlbumKey(albName)).hashCode())}",
                             title = albName,
                             artist = name,
                             year = "2023",
@@ -704,7 +830,30 @@ class InnerTubeClient @Inject constructor(
                 } else fallbackList
             }
 
-            val latestAlbum = pastAlbums.maxByOrNull { it.year?.toIntOrNull() ?: 0 } ?: pastAlbums.firstOrNull()
+            val searchedJioAlbums = searchJioSaavnAlbums(name)
+            val ytArtistAlbums = searchYouTubeArtistAlbums(name)
+
+            // Merge releases from every source by album title instead of using
+            // distinctBy(). This is important because the same album can arrive
+            // from JioSaavn, the artist page and YouTube with different track lists.
+            // Keeping only the first item can make an album appear as a separate
+            // one-song album for every track.
+            val allArtistAlbums = mergeArtistAlbums(
+                pastAlbums + searchedJioAlbums + ytArtistAlbums,
+                name
+            )
+
+            val origList = allArtistAlbums.filter {
+                it.type == "Album" && !TrackMatchValidator.isCompilationAlbum(it.title, name)
+            }
+            val featList = allArtistAlbums.filter {
+                it.type == "Soundtrack" || it.title.lowercase().contains("soundtrack") || it.title.lowercase().contains("movie") || it.title.lowercase().contains(" ost") || it.title.lowercase().contains("(ost)")
+            }
+            val singList = allArtistAlbums.filter {
+                it.type == "Single" || it.type == "EP" || it.songCount == 1
+            }
+
+            val latestAlbum = allArtistAlbums.maxByOrNull { it.year?.toIntOrNull() ?: 0 } ?: pastAlbums.firstOrNull()
 
             val details = ArtistDetails(
                 id = artistId,
@@ -713,7 +862,20 @@ class InnerTubeClient @Inject constructor(
                 bio = "Official Artist on Sielo",
                 latestAlbum = latestAlbum,
                 topSongs = topSongs,
-                pastAlbums = pastAlbums
+                originalAlbums = if (origList.isNotEmpty()) {
+                    origList
+                } else {
+                    pastAlbums.filter {
+                        it.tracks.size >= 2 &&
+                                it.type != "Soundtrack" &&
+                                it.type != "EP" &&
+                                !TrackMatchValidator.isCompilationAlbum(it.title, name)
+                    }
+                },
+                featuredAlbums = featList,
+                singles = singList,
+                pastAlbums = allArtistAlbums,
+                isVerified = true
             )
 
             // Save in session cache
@@ -728,26 +890,312 @@ class InnerTubeClient @Inject constructor(
         }
     }
 
+    /**
+     * Searches JioSaavn's album index directly. The artist-page response can be
+     * incomplete for older releases, while search.getAlbumResults exposes a
+     * broader release set.
+     */
+    private suspend fun searchJioSaavnAlbums(artistName: String): List<SieloAlbum> {
+        return try {
+            val encodedQuery = URLEncoder.encode(artistName, "UTF-8")
+            val url = "https://www.jiosaavn.com/api.php?__call=search.getAlbumResults&_format=json&_marker=0&cc=in&includeMetaTags=1&p=1&n=50&q=$encodedQuery"
+            val request = Request.Builder()
+                .url(url)
+                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
+                .build()
+
+            val response = client.newCall(request).execute()
+            val bodyString = response.body?.string() ?: return emptyList()
+            val results = json.parseToJsonElement(bodyString).jsonObject["results"]?.jsonArray
+                ?: return emptyList()
+
+            results.mapNotNull { item ->
+                val obj = item.jsonObject
+                val title = unescapeHtml(
+                    obj["title"]?.jsonPrimitive?.content
+                        ?: obj["album"]?.jsonPrimitive?.content
+                        ?: obj["name"]?.jsonPrimitive?.content
+                        ?: return@mapNotNull null
+                )
+
+                val albumId = obj["albumid"]?.jsonPrimitive?.content
+                    ?: obj["id"]?.jsonPrimitive?.content
+                    ?: return@mapNotNull null
+
+                val artistText = unescapeHtml(
+                    obj["primary_artists"]?.jsonPrimitive?.content
+                        ?: obj["artist"]?.jsonPrimitive?.content
+                        ?: obj["subtitle"]?.jsonPrimitive?.content
+                        ?: obj["more_info"]?.jsonObject?.get("primary_artists")?.jsonPrimitive?.content
+                        ?: ""
+                )
+
+                if (artistText.isNotBlank() &&
+                    !artistText.contains(artistName, ignoreCase = true) &&
+                    !artistName.contains(artistText, ignoreCase = true)
+                ) {
+                    return@mapNotNull null
+                }
+
+                val image = (obj["image"]?.jsonPrimitive?.content
+                    ?: obj["imageUrl"]?.jsonPrimitive?.content)
+                    ?.replace("50x50", "500x500")
+                    ?.replace("150x150", "500x500")
+
+                val year = obj["year"]?.jsonPrimitive?.content
+                    ?: obj["release_year"]?.jsonPrimitive?.content
+                    ?: "2024"
+
+                val songCount = obj["song_count"]?.jsonPrimitive?.content?.toIntOrNull()
+                    ?: obj["more_info"]?.jsonObject?.get("song_count")?.jsonPrimitive?.content?.toIntOrNull()
+                    ?: 0
+
+                val isMovieText = obj["is_movie"]?.jsonPrimitive?.content
+                    ?: obj["more_info"]?.jsonObject?.get("is_movie")?.jsonPrimitive?.content
+                val isMovie = isMovieText == "1" || isMovieText.equals("true", ignoreCase = true)
+
+                val rawType = obj["type"]?.jsonPrimitive?.content
+                    ?: obj["more_info"]?.jsonObject?.get("type")?.jsonPrimitive?.content
+                    ?: ""
+
+                val lowerTitle = title.lowercase()
+                // Do not use song_count == 1 here. The album-search endpoint can
+                // report an incomplete/incorrect count for a release. The final
+                // type is determined again after the complete album track list is
+                // loaded below.
+                val type = when {
+                    isMovie || rawType.equals("soundtrack", true) ||
+                            lowerTitle.contains("soundtrack") ||
+                            lowerTitle.contains(" ost") ||
+                            lowerTitle.contains("(ost)") ||
+                            lowerTitle.contains("movie") -> "Soundtrack"
+                    rawType.equals("ep", true) -> "EP"
+                    rawType.equals("single", true) || lowerTitle.contains("single") -> "Single"
+                    else -> "Album"
+                }
+
+                SieloAlbum(
+                    id = albumId,
+                    title = title,
+                    artist = artistName,
+                    year = year,
+                    thumbnailUrl = image,
+                    type = type,
+                    songCount = songCount
+                )
+            }
+                .groupBy { normalizeAlbumKey(it.title) }
+                .map { (_, sameTitleAlbums) ->
+                    val base = sameTitleAlbums.first()
+                    val tracks = sameTitleAlbums.flatMap { it.tracks }.distinctBy { it.id }
+                    base.copy(
+                        tracks = tracks,
+                        songCount = maxOf(base.songCount, tracks.size)
+                    )
+                }
+                .map { album ->
+                    // Album search results normally contain the album id but not
+                    // its complete track list. Resolve it once so all songs from
+                    // the same release are displayed inside one album card.
+                    val tracks = if (album.id.isNotBlank()) {
+                        getAlbumSongs(album.id, album.title, artistName)
+                    } else emptyList()
+
+                    if (tracks.isNotEmpty()) {
+                        val lowerTitle = album.title.lowercase()
+                        val resolvedType = when {
+                            album.type == "Soundtrack" ||
+                                    lowerTitle.contains("soundtrack") ||
+                                    lowerTitle.contains(" ost") ||
+                                    lowerTitle.contains("(ost)") ||
+                                    lowerTitle.contains("movie") -> "Soundtrack"
+                            album.type == "EP" -> "EP"
+                            album.type == "Single" && lowerTitle.contains("single") -> "Single"
+                            tracks.size == 1 -> "Single"
+                            else -> "Album"
+                        }
+                        album.copy(
+                            tracks = tracks,
+                            type = resolvedType,
+                            songCount = tracks.size
+                        )
+                    } else {
+                        album
+                    }
+                }
+        } catch (e: Exception) {
+            android.util.Log.e("InnerTubeClient", "Error searching artist albums: ${e.message}", e)
+            emptyList()
+        }
+    }
+
+    private fun searchYouTubeArtistAlbums(artistName: String): List<SieloAlbum> {
+        return try {
+            val tracks = searchYouTube("$artistName album")
+                .filter { TrackMatchValidator.isSongByOrFeaturingArtist(it.title, it.artist, artistName) }
+                .distinctBy { it.id }
+
+            // YouTube search metadata is not consistent: some results expose the
+            // song title as the album, while others expose the real release name.
+            // Never create a new album for a result whose album field is actually
+            // just that track's title. Those tracks are kept in one fallback group.
+            val grouped = tracks.groupBy { track ->
+                val rawAlbum = track.album?.trim().orEmpty()
+                val normalizedAlbum = normalizeAlbumKey(rawAlbum)
+                val normalizedTrack = normalizeAlbumKey(track.title)
+
+                if (rawAlbum.isBlank() || normalizedAlbum == normalizedTrack) {
+                    "${artistName.trim()} Collection"
+                } else {
+                    rawAlbum
+                }
+            }
+
+            grouped.mapNotNull { (albTitle, albTracks) ->
+                if (albTracks.isEmpty()) return@mapNotNull null
+
+                val lowerTitle = albTitle.lowercase()
+                val count = albTracks.size
+                val isSoundtrack = lowerTitle.contains("soundtrack") ||
+                        lowerTitle.contains(" ost") ||
+                        lowerTitle.contains("(ost)") ||
+                        lowerTitle.contains("movie") ||
+                        lowerTitle.contains("from \"" ) ||
+                        lowerTitle.contains("from '")
+                val looksLikeCollection = normalizeAlbumKey(albTitle) == normalizeAlbumKey("${artistName.trim()} Collection")
+
+                // A one-track group is a real single only when YouTube supplied a
+                // meaningful release name. The synthetic Collection group is not
+                // a single and must remain one grouped fallback album.
+                val type = when {
+                    isSoundtrack -> "Soundtrack"
+                    count == 1 && !looksLikeCollection -> "Single"
+                    else -> "Album"
+                }
+
+                SieloAlbum(
+                    id = "alb_${abs((artistName + normalizeAlbumKey(albTitle)).hashCode())}",
+                    title = albTitle,
+                    artist = artistName,
+                    year = "2024",
+                    thumbnailUrl = albTracks.firstOrNull()?.thumbnailUrl,
+                    tracks = albTracks,
+                    type = type,
+                    songCount = albTracks.size
+                )
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    /**
+     * Combines the same release coming from JioSaavn, the artist page and
+     * YouTube into ONE SieloAlbum. Track lists are merged instead of selecting
+     * whichever source happened to appear first.
+     */
+    private fun mergeArtistAlbums(albums: List<SieloAlbum>, artistName: String): List<SieloAlbum> {
+        return albums
+            .filter { it.title.isNotBlank() }
+            .filterNot { TrackMatchValidator.isCompilationAlbum(it.title, artistName) }
+            .groupBy { normalizeAlbumKey(it.title) }
+            .mapNotNull { (_, sameTitleAlbums) ->
+                val base = sameTitleAlbums
+                    .sortedByDescending { it.tracks.size }
+                    .firstOrNull() ?: return@mapNotNull null
+
+                val mergedTracks = sameTitleAlbums
+                    .flatMap { it.tracks }
+                    .distinctBy {
+                        // IDs are preferred, but a few sources can generate
+                        // different IDs for the same recording. The title/artist
+                        // fallback prevents duplicate copies of the same song.
+                        val trackArtist = it.artist.trim().lowercase()
+                        "${it.title.trim().lowercase()}|$trackArtist"
+                    }
+
+                val lowerTitle = base.title.lowercase()
+                val type = when {
+                    sameTitleAlbums.any { it.type == "Soundtrack" } ||
+                            lowerTitle.contains("soundtrack") ||
+                            lowerTitle.contains(" ost") ||
+                            lowerTitle.contains("(ost)") ||
+                            lowerTitle.contains("movie") -> "Soundtrack"
+                    sameTitleAlbums.any { it.type == "EP" } -> "EP"
+                    // The API can incorrectly label a multi-track release as a
+                    // Single. The actual merged track count is authoritative.
+                    mergedTracks.size >= 2 -> "Album"
+                    else -> "Single"
+                }
+
+                base.copy(
+                    tracks = mergedTracks,
+                    type = type,
+                    songCount = maxOf(mergedTracks.size, sameTitleAlbums.maxOfOrNull { it.songCount } ?: 0)
+                )
+            }
+            .sortedWith(
+                compareByDescending<SieloAlbum> { it.year?.toIntOrNull() ?: 0 }
+                    .thenBy { it.title.lowercase() }
+            )
+    }
+
+    /** Normalizes album names so casing, whitespace and harmless punctuation do not
+     * create separate album cards for the same release. */
+    private fun normalizeAlbumKey(title: String): String {
+        return title
+            .trim()
+            .lowercase()
+            .replace(Regex("&"), "and")
+            .replace(Regex("[\\\"'`’]"), "")
+            .replace(Regex("[^a-z0-9]+"), " ")
+            .trim()
+            .replace(Regex("\\s+"), " ")
+    }
+
     private suspend fun createGuaranteedArtistProfile(artistName: String, imageUrl: String?): ArtistDetails {
-        val tracks = search("$artistName top songs").take(8)
-        val image = imageUrl ?: tracks.firstOrNull()?.thumbnailUrl ?: "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=500&auto=format&fit=crop&q=80"
-        val album = SieloAlbum(
-            id = "alb_fallback",
-            title = "$artistName Top Hits",
-            artist = artistName,
+        val cleanName = if (artistName.equals("Artist", ignoreCase = true) || artistName.isBlank()) "Official Artist" else artistName.trim()
+        val photo = imageUrl ?: YouTubeArtistImageResolver.resolveArtistImageUrl(cleanName)
+
+        val hits = searchYouTube("$cleanName hits")
+            .filter { isPureMusicTrack(it.title, it.artist, it.durationSeconds) }
+            .filter { TrackMatchValidator.isSongByOrFeaturingArtist(it.title, it.artist, cleanName) }
+        val topTracks = if (hits.isNotEmpty()) hits.distinctBy { it.id }.take(20) else search("$cleanName songs").take(8)
+
+        val jioAlbums = searchJioSaavnAlbums(cleanName)
+        val ytAlbums = searchYouTubeArtistAlbums(cleanName)
+        val allAlbums = mergeArtistAlbums(jioAlbums + ytAlbums, cleanName)
+
+        val origAlbums = allAlbums.filter { it.type == "Album" }
+        val featuredAlbums = allAlbums.filter { it.type == "Soundtrack" }
+        val singlesList = allAlbums.filter { it.type == "Single" || it.type == "EP" }
+
+        val mainImage = photo ?: topTracks.firstOrNull()?.thumbnailUrl ?: "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=500&auto=format&fit=crop&q=80"
+
+        val defaultAlbum = if (origAlbums.isNotEmpty()) origAlbums.first() else SieloAlbum(
+            id = "alb_${abs(cleanName.hashCode())}",
+            title = "$cleanName Essentials",
+            artist = cleanName,
             year = "2024",
-            thumbnailUrl = image,
-            tracks = tracks,
-            songCount = tracks.size
+            thumbnailUrl = mainImage,
+            tracks = topTracks,
+            songCount = topTracks.size
         )
+
+        val pastList = if (origAlbums.isNotEmpty()) origAlbums else listOf(defaultAlbum)
+
         return ArtistDetails(
-            id = artistName,
-            name = artistName,
-            imageUrl = image,
+            id = cleanName,
+            name = cleanName,
+            imageUrl = mainImage,
             bio = "Official Artist on Sielo",
-            latestAlbum = album,
-            topSongs = tracks.take(5),
-            pastAlbums = listOf(album)
+            latestAlbum = defaultAlbum,
+            topSongs = topTracks,
+            originalAlbums = origAlbums,
+            featuredAlbums = featuredAlbums,
+            singles = singlesList,
+            pastAlbums = if (allAlbums.isNotEmpty()) allAlbums else pastList,
+            isVerified = true
         )
     }
 
@@ -844,6 +1292,65 @@ class InnerTubeClient @Inject constructor(
         } catch (e: Exception) {
             android.util.Log.e("InnerTubeClient", "Error resolving JioSaavn stream: ${e.message}", e)
             null
+        }
+    }
+
+    fun getYouTubePlaylistSongs(playlistId: String): List<SieloTrack> {
+        return try {
+            val cleanId = playlistId.substringAfter("list=").substringBefore("&").trim()
+            val browseId = if (cleanId.startsWith("VL")) cleanId else "VL$cleanId"
+            val requestBody = """
+                {
+                    "context": {
+                        "client": {
+                            "clientName": "WEB_REMIX",
+                            "clientVersion": "1.20260114.01.00",
+                            "hl": "en",
+                            "gl": "US"
+                        }
+                    },
+                    "browseId": "$browseId"
+                }
+            """.trimIndent()
+
+            val request = Request.Builder()
+                .url("https://music.youtube.com/youtubei/v1/browse")
+                .post(requestBody.toRequestBody(JSON_MEDIA))
+                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
+                .addHeader("Origin", "https://music.youtube.com")
+                .addHeader("Referer", "https://music.youtube.com/")
+                .build()
+
+            val response = client.newCall(request).execute()
+            val bodyString = response.body?.string() ?: return emptyList()
+            val root = json.parseToJsonElement(bodyString).jsonObject
+
+            val tabs = root["contents"]?.jsonObject
+                ?.get("singleColumnBrowseResultsRenderer")?.jsonObject
+                ?.get("tabs")?.jsonArray
+
+            val sectionList = tabs?.getOrNull(0)?.jsonObject
+                ?.get("tabRenderer")?.jsonObject
+                ?.get("content")?.jsonObject
+                ?.get("sectionListRenderer")?.jsonObject
+                ?.get("contents")?.jsonArray
+
+            val musicPlaylistShelf = sectionList?.getOrNull(0)?.jsonObject
+                ?.get("musicPlaylistShelfRenderer")?.jsonObject
+                ?: sectionList?.getOrNull(0)?.jsonObject
+                    ?.get("musicShelfRenderer")?.jsonObject
+
+            val items = musicPlaylistShelf?.get("contents")?.jsonArray ?: return emptyList()
+            val tracks = mutableListOf<SieloTrack>()
+
+            items.forEach { item ->
+                val responsiveItem = item.jsonObject["musicResponsiveListItemRenderer"]?.jsonObject ?: return@forEach
+                parseResponsiveItem(responsiveItem)?.let { tracks.add(it) }
+            }
+            tracks
+        } catch (e: Exception) {
+            e.printStackTrace()
+            emptyList()
         }
     }
 

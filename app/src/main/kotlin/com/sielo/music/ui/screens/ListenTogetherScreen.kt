@@ -28,6 +28,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -41,10 +42,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -66,6 +69,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Headphones
@@ -81,9 +85,15 @@ import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.material.icons.filled.Stars
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import com.sielo.music.ui.theme.SoraFontFamily
+import com.sielo.music.ui.theme.UrbanistFontFamily
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -91,6 +101,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.Tab
@@ -138,6 +150,7 @@ import coil.compose.AsyncImage
 import com.sielo.music.core.network.models.SieloTrack
 import com.sielo.music.room.model.ActiveRoomState
 import com.sielo.music.room.model.RoomChatMessage
+import com.sielo.music.room.model.RoomParticipant
 import com.sielo.music.room.model.RoomQueueItem
 import com.sielo.music.room.model.SavedRoomSession
 import com.sielo.music.room.qr.CameraQrScannerDialog
@@ -161,7 +174,8 @@ import com.sielo.music.viewmodel.ListenTogetherViewModel
 @Composable
 fun ListenTogetherScreen(
     modifier: Modifier = Modifier,
-    viewModel: ListenTogetherViewModel = hiltViewModel()
+    viewModel: ListenTogetherViewModel = hiltViewModel(),
+    onNavigateBack: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val roomState by viewModel.roomState.collectAsState()
@@ -179,6 +193,7 @@ fun ListenTogetherScreen(
     var showCameraScanner by remember { mutableStateOf(false) }
     var showQrDialog by remember { mutableStateOf(false) }
     var showSearchSheet by remember { mutableStateOf(false) }
+    var showChooseNewHostDialog by remember { mutableStateOf(false) }
 
     // Scanned QR result state for prompting username
     var scannedRoomId by remember { mutableStateOf<String?>(null) }
@@ -201,24 +216,102 @@ fun ListenTogetherScreen(
             .fillMaxSize()
             .background(PaletteDarkNavy)
     ) {
+        val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
+        var detectedClipboardRoom by remember { mutableStateOf<Pair<String, String>?>(null) }
+        var dismissedClipboardRoomId by remember { mutableStateOf<String?>(null) }
+
+        LaunchedEffect(roomState) {
+            if (roomState == null) {
+                val clip = clipboardManager.getText()?.text
+                if (!clip.isNullOrBlank()) {
+                    val extracted = viewModel.extractRoomCredentials(clip)
+                    if (extracted != null && extracted.first != dismissedClipboardRoomId) {
+                        detectedClipboardRoom = extracted
+                    }
+                }
+            }
+        }
+
         if (roomState == null) {
             // LOBBY VIEW
-            ListenTogetherLobby(
-                onCreateRoomClick = { showCreateDialog = true },
-                onScanQrClick = {
-                    val hasPermission = ContextCompat.checkSelfPermission(
-                        context,
-                        Manifest.permission.CAMERA
-                    ) == PackageManager.PERMISSION_GRANTED
-
-                    if (hasPermission) {
-                        showCameraScanner = true
-                    } else {
-                        cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+            Column(modifier = Modifier.fillMaxSize()) {
+                AnimatedVisibility(
+                    visible = detectedClipboardRoom != null,
+                    enter = fadeIn() + expandVertically(),
+                    exit = fadeOut() + shrinkVertically()
+                ) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = PaletteOxfordBlue),
+                        border = BorderStroke(1.dp, PaletteSand),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "📋 Room Code in Clipboard",
+                                    color = PaletteSand,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Join Room: ${detectedClipboardRoom?.first}?",
+                                    color = TextPrimary,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(
+                                    onClick = {
+                                        dismissedClipboardRoomId = detectedClipboardRoom?.first
+                                        detectedClipboardRoom = null
+                                    },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(Icons.Filled.Close, contentDescription = "Dismiss", tint = TextSecondary)
+                                }
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Button(
+                                    onClick = {
+                                        val room = detectedClipboardRoom
+                                        detectedClipboardRoom = null
+                                        if (room != null) {
+                                            viewModel.joinRoom(room.first, room.second, viewModel.getSavedUserName())
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = PaletteSand)
+                                ) {
+                                    Text("Join", color = PaletteDarkNavy, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
                     }
-                },
-                onQuickJoinClick = { showQuickJoinDialog = true }
-            )
+                }
+
+                ListenTogetherLobby(
+                    onCreateRoomClick = { showCreateDialog = true },
+                    onScanQrClick = {
+                        val hasPermission = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.CAMERA
+                        ) == PackageManager.PERMISSION_GRANTED
+
+                        if (hasPermission) {
+                            showCameraScanner = true
+                        } else {
+                            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                        }
+                    },
+                    onQuickJoinClick = { showQuickJoinDialog = true }
+                )
+            }
         } else {
             // ACTIVE ROOM VIEW
             ActiveRoomContent(
@@ -226,7 +319,29 @@ fun ListenTogetherScreen(
                 viewModel = viewModel,
                 onShowQrCode = { showQrDialog = true },
                 onAddSongClick = { showSearchSheet = true },
-                onLeaveRoom = { viewModel.leaveRoom() }
+                onLeaveRoom = {
+                    viewModel.leaveRoom()
+                },
+                onNavigateBack = onNavigateBack
+            )
+        }
+
+        // CHOOSE NEW HOST MODAL (When host is leaving voluntary)
+        if (showChooseNewHostDialog && roomState != null) {
+            val otherParticipants = roomState!!.participants.filter {
+                it.id != roomState!!.localUserId && !it.name.equals(roomState!!.localUserName, ignoreCase = true)
+            }.distinctBy { it.name.lowercase().trim() }
+            ChooseNewHostDialog(
+                participants = otherParticipants,
+                onDismiss = { showChooseNewHostDialog = false },
+                onTransferAndLeave = { selectedId ->
+                    showChooseNewHostDialog = false
+                    viewModel.transferHostAndLeave(selectedId)
+                },
+                onLeaveAnyway = {
+                    showChooseNewHostDialog = false
+                    viewModel.leaveRoom()
+                }
             )
         }
 
@@ -300,7 +415,7 @@ fun ListenTogetherScreen(
             RoomQrDialog(
                 state = roomState!!,
                 onDismiss = { showQrDialog = false },
-                onShare = { viewModel.shareRoomInvite(context, roomState!!) }
+                onShare = { viewModel.shareRoomQrWithImage(context, roomState!!) }
             )
         }
 
@@ -329,7 +444,8 @@ private fun ListenTogetherLobby(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+        contentPadding = PaddingValues(bottom = 210.dp)
     ) {
         item {
             Spacer(modifier = Modifier.height(28.dp))
@@ -574,21 +690,22 @@ private fun ActiveRoomContent(
     viewModel: ListenTogetherViewModel,
     onShowQrCode: () -> Unit,
     onAddSongClick: () -> Unit,
-    onLeaveRoom: () -> Unit
+    onLeaveRoom: () -> Unit,
+    onNavigateBack: () -> Unit
 ) {
     val context = LocalContext.current
     var selectedTab by remember { mutableIntStateOf(0) }
+    var showLeaveConfirmDialog by remember { mutableStateOf(false) }
 
-    // Intercept back gesture in active room to prompt leaving room safely
+    // Intercept back gesture in active room to minimize/navigate back to app without leaving room
     BackHandler {
-        onLeaveRoom()
+        onNavigateBack()
     }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .navigationBarsPadding()
-            .imePadding()
+            .statusBarsPadding()
     ) {
         // TOP ROOM BAR - Fixed clean layout without overlapping buttons
         Row(
@@ -599,13 +716,14 @@ private fun ActiveRoomContent(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // Top-Left Back Arrow: Navigates back/minimizes room view without leaving the room
                 IconButton(
-                    onClick = onLeaveRoom,
+                    onClick = onNavigateBack,
                     modifier = Modifier.size(36.dp)
                 ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Leave Room",
+                        contentDescription = "Back to App",
                         tint = PaletteCream,
                         modifier = Modifier.size(22.dp)
                     )
@@ -619,38 +737,38 @@ private fun ActiveRoomContent(
                         .clip(RoundedCornerShape(12.dp))
                         .background(SurfaceElevated)
                         .border(1.dp, BorderGlass, RoundedCornerShape(12.dp))
-                    .clickable {
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        val clip = ClipData.newPlainText("Sielo Room Link", viewModel.getInviteLink(state))
-                        clipboard.setPrimaryClip(clip)
-                        Toast.makeText(context, "Copied Room Link to Clipboard!", Toast.LENGTH_SHORT).show()
-                    }
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(if (state.isConnected) PaletteSageGreen else PaletteSand)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = state.roomId,
-                    color = TextPrimary,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Icon(
-                    imageVector = Icons.Filled.ContentCopy,
-                    contentDescription = "Copy",
-                    tint = TextMuted,
-                    modifier = Modifier.size(14.dp)
-                )
+                        .clickable {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            val clip = ClipData.newPlainText("Sielo Room Link", viewModel.getInviteLink(state))
+                            clipboard.setPrimaryClip(clip)
+                            Toast.makeText(context, "Copied Room Link to Clipboard!", Toast.LENGTH_SHORT).show()
+                        }
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(if (state.isConnected) PaletteSageGreen else PaletteSand)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = state.roomId,
+                        color = TextPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Icon(
+                        imageVector = Icons.Filled.ContentCopy,
+                        contentDescription = "Copy",
+                        tint = TextMuted,
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
             }
-        }
 
-        // Top Actions: QR Code, Share, Leave with precise spacing
+            // Top Actions: QR Code, Share, Leave with precise spacing
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -680,7 +798,7 @@ private fun ActiveRoomContent(
                         .clip(CircleShape)
                         .background(SurfaceDark)
                         .border(1.dp, BorderGlass, CircleShape)
-                        .clickable { viewModel.shareRoomInvite(context, state) },
+                        .clickable { viewModel.shareRoomQrWithImage(context, state) },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
@@ -698,7 +816,7 @@ private fun ActiveRoomContent(
                         .clip(CircleShape)
                         .background(SurfaceDark)
                         .border(1.dp, BorderGlass, CircleShape)
-                        .clickable { onLeaveRoom() },
+                        .clickable { showLeaveConfirmDialog = true },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
@@ -795,10 +913,52 @@ private fun ActiveRoomContent(
                     state = state,
                     onAddSongClick = onAddSongClick,
                     onSkipTrack = { viewModel.skipTrack() },
+                    onRemoveTrack = { track -> viewModel.removeTrackFromRoom(track) },
                     onTrackClick = { track -> viewModel.addTrackToRoom(track) }
                 )
             }
         }
+    }
+
+    if (showLeaveConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showLeaveConfirmDialog = false },
+            title = {
+                Text(
+                    text = "Leave Room?",
+                    color = PaletteCream,
+                    fontFamily = SoraFontFamily,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+            },
+            text = {
+                Text(
+                    text = "Are you sure you want to leave room '${state.roomId}'? You will be disconnected from the active listening session.",
+                    color = TextSecondary,
+                    fontFamily = UrbanistFontFamily,
+                    fontSize = 13.5.sp
+                )
+            },
+            containerColor = PaletteOxfordBlue,
+            shape = RoundedCornerShape(18.dp),
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showLeaveConfirmDialog = false
+                        onLeaveRoom()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE63946))
+                ) {
+                    Text("Leave", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLeaveConfirmDialog = false }) {
+                    Text("Cancel", color = PaletteSand)
+                }
+            }
+        )
     }
 }
 
@@ -944,6 +1104,15 @@ private fun RoomParticipantsDropdown(state: ActiveRoomState) {
             .trim()
     }
 
+    val displayParticipants = remember(state.participants, state.localUserId, state.localUserName) {
+        val local = state.participants.find { it.id == state.localUserId }
+            ?: RoomParticipant(state.localUserId, state.localUserName, isHost = state.isHost)
+        val others = state.participants.filter {
+            it.id != state.localUserId && !it.name.equals(state.localUserName, ignoreCase = true)
+        }.distinctBy { it.name.lowercase().trim() }
+        listOf(local) + others
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -979,7 +1148,7 @@ private fun RoomParticipantsDropdown(state: ActiveRoomState) {
                 Spacer(modifier = Modifier.width(10.dp))
                 Column {
                     Text(
-                        text = "${state.participants.size} Member${if (state.participants.size != 1) "s" else ""}",
+                        text = "${displayParticipants.size} Member${if (displayParticipants.size != 1) "s" else ""}",
                         color = TextPrimary,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold
@@ -1028,7 +1197,7 @@ private fun RoomParticipantsDropdown(state: ActiveRoomState) {
                 )
                 Spacer(modifier = Modifier.height(6.dp))
 
-                state.participants.forEach { p ->
+                displayParticipants.forEach { p ->
                     val isLocal = p.id == state.localUserId
                     val songsCount = maxOf(
                         state.addedSongsCount[p.name] ?: 0,
@@ -1162,8 +1331,8 @@ private fun LiveChatView(
                 itemsIndexed(state.chatMessages, key = { index, msg -> "${msg.id}_$index" }) { index, message ->
                     val nextMessage = state.chatMessages.getOrNull(index + 1)
                     val isLastInGroup = nextMessage == null ||
-                        nextMessage.isSystemEvent ||
-                        nextMessage.senderId != message.senderId
+                            nextMessage.isSystemEvent ||
+                            nextMessage.senderId != message.senderId
 
                     ChatMessageBubble(
                         message = message,
@@ -1253,6 +1422,8 @@ private fun LiveChatView(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(SurfaceDark)
+                .navigationBarsPadding()
+                .imePadding()
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -1644,6 +1815,7 @@ private fun CollaborativeQueueView(
     state: ActiveRoomState,
     onAddSongClick: () -> Unit,
     onSkipTrack: () -> Unit,
+    onRemoveTrack: (SieloTrack) -> Unit,
     onTrackClick: (SieloTrack) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
@@ -1711,7 +1883,8 @@ private fun CollaborativeQueueView(
                     RoomQueueRow(
                         item = item,
                         isCurrent = isCurrent,
-                        onSkip = onSkipTrack
+                        onSkip = onSkipTrack,
+                        onRemove = { onRemoveTrack(item.track) }
                     )
                 }
             }
@@ -1727,7 +1900,8 @@ private fun CollaborativeQueueView(
 private fun RoomQueueRow(
     item: RoomQueueItem,
     isCurrent: Boolean,
-    onSkip: () -> Unit
+    onSkip: () -> Unit,
+    onRemove: () -> Unit
 ) {
     Box(
         modifier = Modifier
@@ -1800,6 +1974,15 @@ private fun RoomQueueRow(
                         imageVector = Icons.Filled.SkipNext,
                         contentDescription = "Skip Song",
                         tint = PaletteSand,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            } else {
+                IconButton(onClick = onRemove) {
+                    Icon(
+                        imageVector = Icons.Filled.Close,
+                        contentDescription = "Remove from queue",
+                        tint = TextMuted,
                         modifier = Modifier.size(20.dp)
                     )
                 }
@@ -2236,7 +2419,7 @@ private fun RoomQrDialog(
     onShare: () -> Unit
 ) {
     val context = LocalContext.current
-    val inviteLink = "sielo://room/${state.roomId}#key=${state.roomKey}"
+    val inviteLink = "https://vineetchudasama.github.io/Sielo/room/?id=${state.roomId}&key=${state.roomKey}"
 
     val qrBitmap = remember(inviteLink) {
         QrCodeGenerator.generateQrImageBitmap(inviteLink, context = context, sizePx = 480)
@@ -2330,6 +2513,186 @@ private fun RoomQrDialog(
                         Icon(imageVector = Icons.Filled.Share, contentDescription = null, tint = PaletteDarkNavy, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(text = "Share", color = PaletteDarkNavy, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ChooseNewHostDialog(
+    participants: List<RoomParticipant>,
+    onDismiss: () -> Unit,
+    onTransferAndLeave: (String) -> Unit,
+    onLeaveAnyway: () -> Unit
+) {
+    var selectedParticipantId by remember {
+        mutableStateOf(participants.minByOrNull { it.joinedAt }?.id ?: participants.firstOrNull()?.id ?: "")
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = PaletteDarkNavy),
+            border = BorderStroke(1.dp, BorderGlass),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(PaletteSand.copy(alpha = 0.15f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Stars,
+                            contentDescription = null,
+                            tint = PaletteSand,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = "Choose New Host",
+                            color = PaletteCream,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = com.sielo.music.ui.theme.UrbanistFontFamily
+                        )
+                        Text(
+                            text = "Select who will host before you leave",
+                            color = PaletteSageGreen,
+                            fontSize = 12.sp,
+                            fontFamily = com.sielo.music.ui.theme.UrbanistFontFamily
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 220.dp)
+                ) {
+                    items(participants) { p ->
+                        val isSelected = p.id == selectedParticipantId
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(if (isSelected) PaletteSand.copy(alpha = 0.15f) else SurfaceElevated)
+                                .border(
+                                    1.dp,
+                                    if (isSelected) PaletteSand else BorderGlass,
+                                    RoundedCornerShape(14.dp)
+                                )
+                                .clickable { selectedParticipantId = p.id }
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .background(if (isSelected) PaletteSand else PaletteSlateBlue.copy(alpha = 0.3f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = p.name.take(1).uppercase(),
+                                        color = if (isSelected) PaletteDarkNavy else PaletteCream,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Text(
+                                        text = p.name,
+                                        color = PaletteCream,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 14.sp,
+                                        fontFamily = com.sielo.music.ui.theme.UrbanistFontFamily
+                                    )
+                                    val isNextJoined = p.id == participants.minByOrNull { it.joinedAt }?.id
+                                    if (isNextJoined) {
+                                        Text(
+                                            text = "Next in queue (earliest joined)",
+                                            color = PaletteSand,
+                                            fontSize = 10.sp,
+                                            fontFamily = com.sielo.music.ui.theme.UrbanistFontFamily
+                                        )
+                                    }
+                                }
+                            }
+
+                            RadioButton(
+                                selected = isSelected,
+                                onClick = { selectedParticipantId = p.id },
+                                colors = RadioButtonDefaults.colors(
+                                    selectedColor = PaletteSand,
+                                    unselectedColor = PaletteSlateBlue
+                                )
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                // Action buttons
+                Button(
+                    onClick = {
+                        if (selectedParticipantId.isNotBlank()) {
+                            onTransferAndLeave(selectedParticipantId)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = PaletteSand,
+                        contentColor = PaletteDarkNavy
+                    )
+                ) {
+                    Text(
+                        text = "Transfer Host & Leave",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    TextButton(onClick = onLeaveAnyway) {
+                        Text(
+                            text = "Leave Without Transferring",
+                            color = Color(0xFFE63946),
+                            fontSize = 12.sp
+                        )
+                    }
+                    TextButton(onClick = onDismiss) {
+                        Text(
+                            text = "Cancel",
+                            color = PaletteSageGreen,
+                            fontSize = 12.sp
+                        )
                     }
                 }
             }
