@@ -16,8 +16,8 @@ android {
         applicationId = "com.sielo.music"
         minSdk = 26
         targetSdk = 35
-        versionCode = 804
-        versionName = "8.0.4"
+        versionCode = 811
+        versionName = "8.1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -110,4 +110,6 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 }
+
+
 

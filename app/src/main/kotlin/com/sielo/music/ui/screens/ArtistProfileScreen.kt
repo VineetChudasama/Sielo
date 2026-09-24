@@ -140,7 +140,8 @@ import com.sielo.music.ui.theme.UrbanistFontFamily
  */
 enum class ArtistProfileTab(val label: String) {
     MUSIC("MUSIC"),
-    ABOUT("ABOUT")
+    ABOUT("ABOUT"),
+    RELATED("RELATED")
 }
 
 /**
@@ -213,6 +214,13 @@ fun ArtistProfileScreen(
         derivedStateOf { headerAlpha > 0.65f }
     }
 
+    val availableTabs = remember(artist.similarArtists) {
+        if (artist.similarArtists.isNotEmpty()) {
+            listOf(ArtistProfileTab.MUSIC, ArtistProfileTab.ABOUT, ArtistProfileTab.RELATED)
+        } else {
+            listOf(ArtistProfileTab.MUSIC, ArtistProfileTab.ABOUT)
+        }
+    }
     var selectedTab by remember(artist.id) { mutableStateOf(ArtistProfileTab.MUSIC) }
     var isFollowingState by remember(isFollowed, artist.name) { mutableStateOf(isFollowed) }
     var showMoreDropdown by remember { mutableStateOf(false) }
@@ -289,13 +297,10 @@ fun ArtistProfileScreen(
                 // 3. DYNAMIC STATS ROW (Real metrics only, discography removed)
                 // Count only actual studio albums. Featured/soundtrack releases and
                 // singles/EPs must not inflate the studio-album metric.
-                val studioAlbums = (artist.originalAlbums + artist.pastAlbums)
-                    .filter { album ->
-                        !TrackMatchValidator.isCompilationAlbum(album.title, artist.name) &&
-                                album.type != "Soundtrack" &&
-                                album.type != "EP" &&
-                                album.tracks.size >= 2
-                    }
+                val studioAlbums = (artist.originalAlbums + artist.pastAlbums.filter {
+                    it.type != "Single" && it.type != "EP" && it.type != "Soundtrack"
+                })
+                    .filterNot { TrackMatchValidator.isCompilationAlbum(it.title, artist.name) }
                     .distinctBy { it.title.trim().lowercase() }
                 val totalAlbumsCount = studioAlbums.size
                 val hasAnyStats = cleanFollowers != null || cleanListeners != null ||
@@ -314,10 +319,11 @@ fun ArtistProfileScreen(
                     }
                 }
 
-                // 4. SEGMENTED TABS: MUSIC & ABOUT (discography removed)
+                // 4. SEGMENTED TABS: MUSIC, ABOUT, RELATED
                 item {
                     ArtistSegmentedTabs(
                         selectedTab = selectedTab,
+                        availableTabs = availableTabs,
                         onTabSelected = { selectedTab = it }
                     )
                 }
@@ -398,24 +404,13 @@ fun ArtistProfileScreen(
                             }
                         }
 
-                        // 1. ALBUMS BY [ARTIST] (Solo studio albums created by the artist)
-                        // Use the backend's Album classification first. If the
-                        // backend did not populate originalAlbums, recover studio
-                        // albums from pastAlbums without allowing singles, EPs or
-                        // soundtracks into this section.
-                        val originalList = (artist.originalAlbums + artist.pastAlbums)
-                            .filter { album ->
-                                !TrackMatchValidator.isCompilationAlbum(album.title, artist.name) &&
-                                        album.type != "Soundtrack" &&
-                                        album.type != "EP" &&
-                                        album.tracks.size >= 2
-                            }
-                            .distinctBy { it.title.trim().lowercase() }
+                                                // 1. ARTIST SOLO ALBUM (Solo studio albums created by the artist)
+                        val originalList = artist.originalAlbums.filterNot { TrackMatchValidator.isCompilationAlbum(it.title, artist.name) }
                         if (originalList.isNotEmpty()) {
                             item {
                                 Spacer(modifier = Modifier.height(20.dp))
                                 Text(
-                                    text = "ALBUMS BY ${artist.name.uppercase()}",
+                                    text = "ARTIST SOLO ALBUM",
                                     color = PaletteCream,
                                     fontFamily = SoraFontFamily,
                                     fontWeight = FontWeight.Bold,
@@ -440,21 +435,13 @@ fun ArtistProfileScreen(
                             }
                         }
 
-                        // 2. APPEARS ON & SOUNDTRACKS (Movie Albums & Soundtracks the artist has been in)
-                        val featuredList = (artist.featuredAlbums + artist.pastAlbums.filter {
-                            it.type == "Soundtrack" ||
-                                    it.title.contains("soundtrack", ignoreCase = true) ||
-                                    it.title.contains("movie", ignoreCase = true) ||
-                                    it.title.contains(" ost", ignoreCase = true) ||
-                                    it.title.contains("(ost)", ignoreCase = true)
-                        })
-                            .distinctBy { it.id }
-                            .filterNot { TrackMatchValidator.isCompilationAlbum(it.title, artist.name) }
+                        // 2. ALBUMS ARTIST HAS BEEN IN (Movie Albums & Soundtracks the artist has been in)
+                        val featuredList = artist.featuredAlbums.filterNot { TrackMatchValidator.isCompilationAlbum(it.title, artist.name) }
                         if (featuredList.isNotEmpty()) {
                             item {
                                 Spacer(modifier = Modifier.height(20.dp))
                                 Text(
-                                    text = "APPEARS ON & SOUNDTRACKS",
+                                    text = "ALBUMS ARTIST HAS BEEN IN",
                                     color = PaletteCream,
                                     fontFamily = SoraFontFamily,
                                     fontWeight = FontWeight.Bold,
@@ -479,19 +466,13 @@ fun ArtistProfileScreen(
                             }
                         }
 
-                        // 3. SINGLES & EPS (Singles and EPs)
-                        val singlesList = (artist.singles + artist.pastAlbums.filter { album ->
-                            album.type == "Single" ||
-                                    album.type == "EP" ||
-                                    album.tracks.size == 1
-                        })
-                            .distinctBy { it.id }
-                            .filterNot { TrackMatchValidator.isCompilationAlbum(it.title, artist.name) }
+                        // 3. SINGLES AND EPS (Singles and EPs)
+                        val singlesList = artist.singles.filterNot { TrackMatchValidator.isCompilationAlbum(it.title, artist.name) }
                         if (singlesList.isNotEmpty()) {
                             item {
                                 Spacer(modifier = Modifier.height(20.dp))
                                 Text(
-                                    text = "SINGLES & EPS",
+                                    text = "SINGLES AND EPS",
                                     color = PaletteCream,
                                     fontFamily = SoraFontFamily,
                                     fontWeight = FontWeight.Bold,
@@ -561,6 +542,18 @@ fun ArtistProfileScreen(
                                     }
                                 }
                             )
+                        }
+                    }
+
+                    ArtistProfileTab.RELATED -> {
+                        // Dedicated Related Artists & Influences View
+                        if (artist.similarArtists.isNotEmpty()) {
+                            item {
+                                ArtistRelatedTabContent(
+                                    similarArtists = artist.similarArtists,
+                                    onOpenArtist = onOpenArtist
+                                )
+                            }
                         }
                     }
                 }
@@ -1229,12 +1222,12 @@ private fun ArtistPrimaryActionRow(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // PLAY ALL BUTTON
+            // PLAY ALL BUTTON (Premium Cream container with Dark Navy text/icon)
             Button(
                 onClick = onPlayAll,
                 enabled = artist.topSongs.isNotEmpty(),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = PaletteSand,
+                    containerColor = PaletteCream,
                     contentColor = PaletteDarkNavy,
                     disabledContainerColor = PaletteSlateBlue.copy(alpha = 0.3f),
                     disabledContentColor = TextMuted
@@ -1268,7 +1261,7 @@ private fun ArtistPrimaryActionRow(
                 }
             }
 
-            // RADIO BUTTON
+            // SHUFFLE BUTTON (Dark translucent surface with AnimatedShuffleIcon)
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -1284,15 +1277,13 @@ private fun ArtistPrimaryActionRow(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Center
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Radio,
-                        contentDescription = "Radio",
+                    AnimatedShuffleIcon(
                         tint = if (artist.topSongs.isNotEmpty()) PaletteCream else TextMuted,
                         modifier = Modifier.size(20.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "RADIO",
+                        text = "SHUFFLE",
                         color = if (artist.topSongs.isNotEmpty()) PaletteCream else TextMuted,
                         fontFamily = SoraFontFamily,
                         fontWeight = FontWeight.Bold,
@@ -1452,11 +1443,12 @@ private fun ArtistMetricItem(value: String, label: String) {
 }
 
 /**
- * Segmented Tab Indicator for Switching Views: MUSIC and ABOUT.
+ * Segmented Tab Indicator for Switching Views: MUSIC, ABOUT, and RELATED.
  */
 @Composable
 private fun ArtistSegmentedTabs(
     selectedTab: ArtistProfileTab,
+    availableTabs: List<ArtistProfileTab>,
     onTabSelected: (ArtistProfileTab) -> Unit
 ) {
     Row(
@@ -1469,7 +1461,7 @@ private fun ArtistSegmentedTabs(
             .padding(4.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        ArtistProfileTab.entries.forEach { tab ->
+        availableTabs.forEach { tab ->
             val isSelected = tab == selectedTab
             val bg = if (isSelected) PaletteSand else Color.Transparent
             val textColor = if (isSelected) PaletteDarkNavy else PaletteCream.copy(alpha = 0.7f)
@@ -2840,4 +2832,104 @@ private fun copyArtistLinkToClipboard(context: Context, artist: ArtistDetails) {
     val clip = ClipData.newPlainText("Sielo Artist Link", "sielo://artist?name=${Uri.encode(artist.name)}")
     clipboard.setPrimaryClip(clip)
     Toast.makeText(context, "Sielo link copied to clipboard!", Toast.LENGTH_SHORT).show()
+}
+
+
+
+
+/**
+ * Dedicated Related Artists & Influences tab content.
+ */
+@Composable
+private fun ArtistRelatedTabContent(
+    similarArtists: List<SieloArtist>,
+    onOpenArtist: (SieloArtist) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 8.dp)
+    ) {
+        Text(
+            text = "RELATED ARTISTS & INFLUENCES",
+            color = PaletteSageGreen,
+            fontFamily = SoraFontFamily,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.sp,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            similarArtists.forEach { similar ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(PaletteOxfordBlue)
+                        .border(1.dp, BorderGlass, RoundedCornerShape(14.dp))
+                        .clickable { onOpenArtist(similar) }
+                        .padding(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(CircleShape)
+                                .background(PaletteDarkNavy)
+                                .border(1.dp, BorderGlass, CircleShape)
+                        ) {
+                            SieloArtistPhoto(
+                                imageUrl = similar.imageUrl,
+                                name = similar.name,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .clip(CircleShape)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(14.dp))
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = similar.name,
+                                color = PaletteCream,
+                                fontFamily = SoraFontFamily,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.5.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = similar.role ?: "Artist",
+                                color = PaletteSageGreen,
+                                fontFamily = UrbanistFontFamily,
+                                fontSize = 12.sp
+                            )
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(PaletteOxfordBlue.copy(alpha = 0.8f))
+                                .border(1.dp, BorderGlass, CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                                contentDescription = "Open Profile",
+                                tint = PaletteSand,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

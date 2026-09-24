@@ -1,6 +1,5 @@
 package com.sielo.music.ui.components
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -29,19 +28,17 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -61,6 +58,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -69,8 +67,8 @@ import coil.compose.SubcomposeAsyncImage
 import coil.compose.SubcomposeAsyncImageContent
 import coil.request.ImageRequest
 import com.sielo.music.core.network.models.SieloAlbum
+import com.sielo.music.core.network.models.SieloTrack
 import com.sielo.music.ui.theme.BorderGlass
-import com.sielo.music.ui.theme.BorderSubtle
 import com.sielo.music.ui.theme.PaletteCream
 import com.sielo.music.ui.theme.PaletteDarkNavy
 import com.sielo.music.ui.theme.PaletteOxfordBlue
@@ -105,8 +103,8 @@ fun AlbumHero(
     val configuration = LocalConfiguration.current
     val screenWidth = configuration.screenWidthDp.dp
     // Responsive artwork sizing: adapts smoothly across 360dp to 430dp+
-    val artworkSize = (screenWidth * 0.54f).coerceIn(180.dp, 240.dp)
-    val hasTracks = true
+    val artworkSize = (screenWidth * 0.52f).coerceIn(175.dp, 235.dp)
+    val hasTracks = album.tracks.isNotEmpty() || album.songCount > 0
 
     Box(
         modifier = modifier
@@ -156,7 +154,7 @@ fun AlbumHero(
                     )
                 }
 
-                // Top Right Action Buttons (Favorite & More)
+                // Top Right Action Buttons (Favorite, Save as Playlist, More)
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -171,7 +169,7 @@ fun AlbumHero(
                                 .clickable(
                                     interactionSource = remember { MutableInteractionSource() },
                                     indication = null
-                                ) { onFavorite() },
+                               ) { onFavorite() },
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
@@ -197,7 +195,7 @@ fun AlbumHero(
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
-                                imageVector = Icons.Default.PlaylistAdd,
+                                imageVector = Icons.AutoMirrored.Filled.PlaylistAdd,
                                 contentDescription = "Save as Playlist",
                                 tint = PaletteSand,
                                 modifier = Modifier.size(20.dp)
@@ -229,7 +227,7 @@ fun AlbumHero(
                 }
             }
 
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(4.dp))
 
             // 3. Central Album Artwork
             AlbumArtwork(
@@ -238,7 +236,7 @@ fun AlbumHero(
                 size = artworkSize
             )
 
-            Spacer(modifier = Modifier.height(18.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             // 4. Album Metadata (Badge, Title, Artists, Year, Tracks, Quality)
             AlbumMetadata(
@@ -249,7 +247,7 @@ fun AlbumHero(
                     .padding(horizontal = 24.dp)
             )
 
-            // 5. Album Description (Expandable, hidden if null/empty)
+            // 5. Album Description (Expandable, hidden if null/blank)
             val albumDesc = album.description
             if (!albumDesc.isNullOrBlank()) {
                 Spacer(modifier = Modifier.height(10.dp))
@@ -261,9 +259,9 @@ fun AlbumHero(
                 )
             }
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(18.dp))
 
-            // 6. Action Buttons (Play Album, Shuffle, Favorite, Download, More)
+            // 6. Action Buttons (Play Album, Shuffle, Download)
             AlbumActions(
                 onPlay = onPlay,
                 onShuffle = onShuffle,
@@ -283,7 +281,7 @@ fun AlbumHero(
 
 /**
  * Dynamic Blurred Artwork Background.
- * Renders the album art with heavy blur and a multi-stop gradient overlay fading into
+ * Renders the album art with heavy blur, dark scrim, and a multi-stop gradient overlay fading into
  * PaletteDarkNavy (#0D1B2A) and PaletteOxfordBlue (#1B263B).
  */
 @Composable
@@ -299,13 +297,13 @@ fun AlbumHeroBackground(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
                     .fillMaxSize()
-                    .blur(40.dp)
+                    .blur(45.dp)
             )
             // Dark scrim to prevent light backgrounds from blowing out contrast
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.48f))
+                    .background(Color.Black.copy(alpha = 0.50f))
             )
         }
 
@@ -419,9 +417,9 @@ fun AlbumArtwork(
  * Elegant Sielo artwork fallback with deep navy & subtle slate gradient and music icon.
  */
 @Composable
-private fun AlbumArtworkFallback() {
+fun AlbumArtworkFallback(modifier: Modifier = Modifier) {
     Box(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxSize()
             .background(
                 Brush.linearGradient(
@@ -458,7 +456,7 @@ private fun AlbumArtworkFallback() {
  * - Dynamic album type badge (ALBUM, EP, SINGLE, COMPILATION, SOUNDTRACK)
  * - Large, bold typography for title (maxLines = 2, text ellipsize)
  * - Single or multiple artist names
- * - Release Info (year • tracks • audio quality badge if available)
+ * - Release Info (year · tracks · audio quality badge if available)
  */
 @Composable
 fun AlbumMetadata(
@@ -466,27 +464,45 @@ fun AlbumMetadata(
     onArtistClick: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val displayType = remember(album.type, album.tracks.size, album.songCount) {
+    val displayType = remember(album.type, album.title, album.tracks.size, album.songCount) {
         val raw = album.type?.trim()?.uppercase()
-        if (!raw.isNullOrBlank() && raw != "UNKNOWN") {
-            raw
-        } else {
-            val count = if (album.songCount > 0) album.songCount else album.tracks.size
-            when {
-                count <= 1 -> "SINGLE"
-                count in 2..6 -> "EP"
-                else -> "ALBUM"
+        val titleUpper = album.title.uppercase()
+        when {
+            titleUpper.contains("SOUNDTRACK") || titleUpper.contains("ORIGINAL MOTION PICTURE") || titleUpper.contains("OST") -> "SOUNDTRACK"
+            titleUpper.contains("GREATEST HITS") || titleUpper.contains("BEST OF") || titleUpper.contains("ANTHOLOGY") -> "COMPILATION"
+            !raw.isNullOrBlank() && raw != "UNKNOWN" && raw != "ALBUM" -> {
+                when (raw) {
+                    "SINGLE", "SINGLES" -> "SINGLE"
+                    "EP", "EXTENDED PLAY" -> "EP"
+                    "COMPILATION" -> "COMPILATION"
+                    "SOUNDTRACK", "OST", "ORIGINAL SOUNDTRACK" -> "SOUNDTRACK"
+                    else -> raw
+                }
+            }
+            else -> {
+                val count = if (album.songCount > 0) album.songCount else album.tracks.size
+                when {
+                    count == 1 -> "SINGLE"
+                    count in 2..6 -> "EP"
+                    else -> "ALBUM"
+                }
             }
         }
     }
 
     val trackCount = if (album.songCount > 0) album.songCount else album.tracks.size
     val trackCountText = if (trackCount > 0) {
-        "$trackCount ${if (trackCount == 1) "song" else "songs"}"
+        "$trackCount ${if (trackCount == 1) "track" else "tracks"}"
     } else null
 
-    val releaseYear = album.year?.takeIf { it.isNotBlank() }
-        ?: album.releaseDate?.takeIf { it.isNotBlank() }
+    val releaseYear = remember(album.year, album.releaseDate) {
+        val rawYear = album.year?.takeIf { it.isNotBlank() }
+            ?: album.releaseDate?.takeIf { it.isNotBlank() }
+        if (rawYear != null) {
+            val yearRegex = Regex("""\b(19\d\d|20\d\d)\b""")
+            yearRegex.find(rawYear)?.value ?: rawYear
+        } else null
+    }
 
     val releaseInfoParts = remember(releaseYear, trackCountText) {
         listOfNotNull(releaseYear, trackCountText)
@@ -516,13 +532,17 @@ fun AlbumMetadata(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Dynamic Album Title
+        // Dynamic Album Title (responsive font sizing based on length)
+        val titleFontSize = if (album.title.length > 28) 20.sp else 23.sp
+        val titleLineHeight = if (album.title.length > 28) 25.sp else 29.sp
+
         Text(
             text = album.title,
             color = PaletteCream,
             fontFamily = SoraFontFamily,
             fontWeight = FontWeight.ExtraBold,
-            fontSize = 22.sp,
+            fontSize = titleFontSize,
+            lineHeight = titleLineHeight,
             textAlign = TextAlign.Center,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
@@ -538,7 +558,7 @@ fun AlbumMetadata(
             fontWeight = FontWeight.SemiBold,
             fontSize = 15.sp,
             textAlign = TextAlign.Center,
-            maxLines = 1,
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis,
             modifier = if (onArtistClick != null) {
                 Modifier.clickable(
@@ -550,14 +570,14 @@ fun AlbumMetadata(
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // Release Info Row: {year} • {trackCount} • {quality badge}
+        // Release Info Row: {year} · {trackCount} · {quality badge}
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center
         ) {
             if (releaseInfoParts.isNotEmpty()) {
                 Text(
-                    text = releaseInfoParts.joinToString(" • "),
+                    text = releaseInfoParts.joinToString(" · "),
                     color = TextSecondary,
                     fontFamily = UrbanistFontFamily,
                     fontSize = 13.sp
@@ -569,7 +589,7 @@ fun AlbumMetadata(
             if (!quality.isNullOrBlank()) {
                 if (releaseInfoParts.isNotEmpty()) {
                     Text(
-                        text = " • ",
+                        text = " · ",
                         color = TextSecondary,
                         fontFamily = UrbanistFontFamily,
                         fontSize = 13.sp
@@ -597,7 +617,7 @@ fun AlbumMetadata(
 }
 
 /**
- * Expandable / collapsible Album Description with "more" / "less" toggle.
+ * Expandable / collapsible Album Description with "Read more" / "Show less" toggle.
  * Completely hidden if description is null or empty.
  */
 @Composable
@@ -642,7 +662,7 @@ fun AlbumDescription(
  * Action Buttons for Album:
  * - Primary: PLAY / PLAY ALBUM
  * - Secondary: SHUFFLE
- * - Auxiliary action buttons: Favorite toggle, Download, More
+ * - Auxiliary action buttons: Favorite toggle, Download, Save as Playlist
  */
 @Composable
 fun AlbumActions(
@@ -749,7 +769,7 @@ fun AlbumActions(
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = Icons.Default.PlaylistAdd,
+                    imageVector = Icons.AutoMirrored.Filled.PlaylistAdd,
                     contentDescription = "Save as Playlist",
                     tint = PaletteSand,
                     modifier = Modifier.size(20.dp)
@@ -890,4 +910,86 @@ fun AlbumHeroSkeleton(
             )
         }
     }
+}
+
+// ==========================================
+// PREVIEWS FOR VARIOUS ALBUM SCENARIOS
+// ==========================================
+
+@Preview(name = "Standard Studio Album", showBackground = true)
+@Composable
+private fun PreviewStandardAlbum() {
+    val album = SieloAlbum(
+        id = "alb_1",
+        title = "After Hours",
+        artist = "The Weeknd",
+        year = "2020",
+        songCount = 14,
+        type = "Album",
+        audioQuality = "Lossless Audio",
+        description = "After Hours is the fourth studio album by Canadian singer the Weeknd, exploring themes of heartbreak, loneliness, and overindulgence.",
+        isFavorite = true
+    )
+    AlbumHero(
+        album = album,
+        onBack = {},
+        onPlay = {},
+        onShuffle = {},
+        onFavorite = {},
+        onDownload = {},
+        onMore = {},
+        onSaveAsPlaylist = {}
+    )
+}
+
+@Preview(name = "Single with No Description", showBackground = true)
+@Composable
+private fun PreviewSingleNoDescription() {
+    val single = SieloAlbum(
+        id = "single_1",
+        title = "Starboy",
+        artist = "The Weeknd feat. Daft Punk",
+        year = "2016",
+        songCount = 1,
+        type = "Single",
+        audioQuality = "Hi-Res"
+    )
+    AlbumHero(
+        album = single,
+        onBack = {},
+        onPlay = {},
+        onShuffle = {},
+        onFavorite = {},
+        onMore = {}
+    )
+}
+
+@Preview(name = "Soundtrack with Long Title and Multiple Artists", showBackground = true)
+@Composable
+private fun PreviewSoundtrackLongTitle() {
+    val soundtrack = SieloAlbum(
+        id = "ost_1",
+        title = "Black Panther: The Album - Music From And Inspired By",
+        artist = "Kendrick Lamar, SZA, The Weeknd, Travis Scott",
+        year = "2018",
+        songCount = 14,
+        type = "Soundtrack",
+        audioQuality = "Lossless Audio",
+        description = "Curated and produced by Kendrick Lamar, featuring music from and inspired by the Marvel Studios motion picture."
+    )
+    AlbumHero(
+        album = soundtrack,
+        onBack = {},
+        onPlay = {},
+        onShuffle = {},
+        onFavorite = {},
+        onDownload = {},
+        onMore = {}
+    )
+}
+
+@Preview(name = "Album Skeleton Loading", showBackground = true)
+@Composable
+private fun PreviewAlbumSkeleton() {
+    AlbumHeroSkeleton()
 }

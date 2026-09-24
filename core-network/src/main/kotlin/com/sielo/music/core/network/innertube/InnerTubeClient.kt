@@ -644,11 +644,7 @@ class InnerTubeClient @Inject constructor(
         }
 
         try {
-            val ytPhoto = if (artistImageUrl.isNullOrBlank()) {
-                YouTubeArtistImageResolver.resolveArtistImageUrl(artistIdOrName)
-            } else {
-                artistImageUrl
-            }
+                        val ytPhoto = YouTubeArtistImageResolver.resolveArtistImageUrl(artistIdOrName) ?: artistImageUrl
 
             val artistId = if (artistIdOrName.all { it.isDigit() }) {
                 artistIdOrName
@@ -795,7 +791,7 @@ class InnerTubeClient @Inject constructor(
                 // search result never becomes its own one-song album card.
                 val grouped = combinedSongs.groupBy { track ->
                     val rawAlbum = track.album?.trim().orEmpty()
-                    if (rawAlbum.isBlank() || normalizeAlbumKey(rawAlbum) == normalizeAlbumKey(track.title)) {
+                    if (rawAlbum.isBlank() || normalizeAlbumKey(rawAlbum) == normalizeAlbumKey(track.title) || TrackMatchValidator.isCompilationAlbum(rawAlbum, name)) {
                         "$name Essentials"
                     } else {
                         rawAlbum
@@ -843,17 +839,18 @@ class InnerTubeClient @Inject constructor(
                 name
             )
 
-            val origList = allArtistAlbums.filter {
-                it.type == "Album" && !TrackMatchValidator.isCompilationAlbum(it.title, name)
-            }
-            val featList = allArtistAlbums.filter {
-                it.type == "Soundtrack" || it.title.lowercase().contains("soundtrack") || it.title.lowercase().contains("movie") || it.title.lowercase().contains(" ost") || it.title.lowercase().contains("(ost)")
+                        val featList = allArtistAlbums.filter {
+                it.type.equals("Soundtrack", true) || it.title.lowercase().contains("soundtrack") || it.title.lowercase().contains("movie") || it.title.lowercase().contains(" ost") || it.title.lowercase().contains("(ost)")
             }
             val singList = allArtistAlbums.filter {
-                it.type == "Single" || it.type == "EP" || it.songCount == 1
+                !featList.contains(it) && (it.type.equals("Single", true) || it.type.equals("EP", true) || (it.songCount == 1 && !it.type.equals("Album", true)))
+            }
+            val origList = allArtistAlbums.filter {
+                !featList.contains(it) && !singList.contains(it) && !TrackMatchValidator.isCompilationAlbum(it.title, name)
             }
 
-            val latestAlbum = allArtistAlbums.maxByOrNull { it.year?.toIntOrNull() ?: 0 } ?: pastAlbums.firstOrNull()
+                        val eligibleForLatest = (origList + singList).ifEmpty { featList }.filter { !TrackMatchValidator.isCompilationAlbum(it.title, name) }
+            val latestAlbum = eligibleForLatest.maxByOrNull { it.year?.toIntOrNull() ?: 0 } ?: allArtistAlbums.firstOrNull()
 
             val details = ArtistDetails(
                 id = artistId,
@@ -1153,6 +1150,8 @@ class InnerTubeClient @Inject constructor(
             .replace(Regex("\\s+"), " ")
     }
 
+    
+
     private suspend fun createGuaranteedArtistProfile(artistName: String, imageUrl: String?): ArtistDetails {
         val cleanName = if (artistName.equals("Artist", ignoreCase = true) || artistName.isBlank()) "Official Artist" else artistName.trim()
         val photo = imageUrl ?: YouTubeArtistImageResolver.resolveArtistImageUrl(cleanName)
@@ -1166,13 +1165,20 @@ class InnerTubeClient @Inject constructor(
         val ytAlbums = searchYouTubeArtistAlbums(cleanName)
         val allAlbums = mergeArtistAlbums(jioAlbums + ytAlbums, cleanName)
 
-        val origAlbums = allAlbums.filter { it.type == "Album" }
-        val featuredAlbums = allAlbums.filter { it.type == "Soundtrack" }
-        val singlesList = allAlbums.filter { it.type == "Single" || it.type == "EP" }
+                        val featuredAlbums = allAlbums.filter {
+            it.type.equals("Soundtrack", true) || it.title.lowercase().contains("soundtrack") || it.title.lowercase().contains("movie") || it.title.lowercase().contains(" ost") || it.title.lowercase().contains("(ost)")
+        }
+        val singlesList = allAlbums.filter {
+            !featuredAlbums.contains(it) && (it.type.equals("Single", true) || it.type.equals("EP", true) || (it.songCount == 1 && !it.type.equals("Album", true)))
+        }
+        val origAlbums = allAlbums.filter {
+            !featuredAlbums.contains(it) && !singlesList.contains(it) && !TrackMatchValidator.isCompilationAlbum(it.title, cleanName)
+        }
 
         val mainImage = photo ?: topTracks.firstOrNull()?.thumbnailUrl ?: "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=500&auto=format&fit=crop&q=80"
 
-        val defaultAlbum = if (origAlbums.isNotEmpty()) origAlbums.first() else SieloAlbum(
+                val eligibleForLatest = (origAlbums + singlesList).ifEmpty { featuredAlbums }.filter { !TrackMatchValidator.isCompilationAlbum(it.title, cleanName) }
+        val defaultAlbum = eligibleForLatest.maxByOrNull { it.year?.toIntOrNull() ?: 0 } ?: SieloAlbum(
             id = "alb_${abs(cleanName.hashCode())}",
             title = "$cleanName Essentials",
             artist = cleanName,
@@ -1561,3 +1567,10 @@ class InnerTubeClient @Inject constructor(
             .replace("&gt;", ">")
     }
 }
+
+
+
+
+
+
+

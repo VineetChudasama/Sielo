@@ -81,3 +81,4 @@ data class ArtistDetails(
     val isVerified: Boolean = true,
     val wikiUrl: String? = null
 )
+

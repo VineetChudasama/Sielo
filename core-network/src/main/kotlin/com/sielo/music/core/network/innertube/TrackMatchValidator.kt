@@ -77,36 +77,38 @@ object TrackMatchValidator {
             .trim()
     }
 
-    val COMPILATION_KEYWORDS = listOf(
-        "hits", "hit songs", "best of", "collection", "compilation", "greatest hits",
-        "love hits", "romantic hits", "classic hits", "top hits", "hot hits", "super hits",
-        "special", "valentines", "wedding", "heartbeats", "chillout", "feel good",
-        "happy vibes", "vibes", "through the years", "jukebox", "party songs", "dance hits",
-        "essentials", "non stop", "nonstop", "mashup", "unplugged collection", "bollywood",
-        "film hits", "movie hits", "radio hits",
-        // Extended keywords for authentic album filtering
-        "old hindi songs", "hindi songs", "old is gold", "romantic songs", "love songs", "sad songs",
-        "gold songs", "golden songs", "golden collection", "all time hits", "evergreen",
-        "retro", "nostalgia", "melodies", "superhit", "superhits", "blockbuster",
-        "anthology", "timeless", "gems", "favorites", "favourites", "classics",
-        "vol.", "vol ", "volume", "chapter", "jhankar", "remix", "party", "dance",
-        "unforgettable", "sentimental", "magical", "tribute", "dedication", "remembering",
-        "memorial", "legends", "legend", "top 10", "top 20", "top 50", "top 100",
-        "songs by", "songs of", "music by", "greatest", "all-time",
-        "karaoke", "karaoke picks", "sing-along", "sing along", "instrumental", "tribute",
-        "tribute to", "cover", "piano", "acoustic cover", "ringtone", "backing track", "prosortc"
+        val COMPILATION_KEYWORDS = listOf(
+        "best of", "greatest hits", "compilation", "the ultimate collection", "essential hits",
+        "the very best of", "unplugged collection", "non stop hits", "mashup",
+        "old hindi songs", "old is gold", "all time hits", "superhits", "blockbuster hits",
+        "chillout", "heartbeats", "hot hits", "collection", "collections", "bollywood chillout",
+        "heartbeats bollywood", "hot hits bollywood", "party hits", "dance hits", "love hits",
+        "top 10", "top 20", "top 50", "top 100", "karaoke", "instrumental", "tribute", "cover",
+        "jukebox", "audio jukebox", "video jukebox", "songs collection", "best romantic"
     )
 
     fun isCompilationAlbum(album: String?, artist: String? = null): Boolean {
         if (album.isNullOrBlank()) return false
         val lower = album.lowercase().trim()
+
+        if (lower == "hits" || lower == "essentials" || lower == "collection" || lower == "classics") {
+            return true
+        }
+
+        if (lower.contains("chillout") || lower.contains("heartbeats") || lower.contains("hot hits") ||
+            lower.contains("best of") || lower.contains("greatest hits") || lower.contains("collection") ||
+            lower.contains("jukebox") || lower.contains("non stop") || lower.contains("nonstop") ||
+            lower.contains("mashup") || lower.contains("superhits") || lower.contains("blockbuster")
+        ) {
+            return true
+        }
+
         if (!artist.isNullOrBlank()) {
             val aLower = artist.lowercase().trim()
             if (lower.contains(aLower) && (
                 lower.contains("hits") || lower.contains("best") ||
-                lower.contains("collection") || lower.contains("love") ||
-                lower.contains("romantic") || lower.contains("songs") ||
-                lower.contains("special") || lower.contains("classics")
+                lower.contains("collection") || lower.contains("essentials") ||
+                lower.contains("songs") || lower.contains("melodies")
             )) {
                 return true
             }
@@ -269,3 +271,4 @@ object TrackMatchValidator {
         return false
     }
 }
+
