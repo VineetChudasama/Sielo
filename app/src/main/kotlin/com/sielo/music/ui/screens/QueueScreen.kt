@@ -381,60 +381,78 @@ fun QueueScreen(
 
                 Spacer(modifier = Modifier.height(24.dp))
 
-                // 2. UP NEXT SECTION
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 4.dp, bottom = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = if (playbackState.playNextCount > 0) "PLAY NEXT" else "UP NEXT • TUNED TO YOUR TASTE (${upcomingTracks.size})",
-                        color = TextSecondary,
-                        fontFamily = SoraFontFamily,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.sp
-                    )
-
+                // 2. UP NEXT / PLAY NEXT SECTION HEADER
+                if (playbackState.playNextCount > 0) {
                     Row(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(
-                                if (shuffleAnimState.highlight.value > 0.05f) AccentCoral.copy(alpha = 0.2f * shuffleAnimState.highlight.value)
-                                else SurfaceDark
-                            )
-                            .border(
-                                1.dp,
-                                if (shuffleAnimState.highlight.value > 0.05f) AccentCoral.copy(alpha = 0.7f * shuffleAnimState.highlight.value)
-                                else BorderGlass,
-                                RoundedCornerShape(12.dp)
-                            )
-                            .clickable {
-                                coroutineScope.launch {
-                                    viewModel.shuffleQueue()
-                                    shuffleAnimState.playAnimation(durationMs = 1150)
-                                    queueListState.animateScrollToItem(0)
-                                }
-                            }
-                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                            .fillMaxWidth()
+                            .padding(start = 4.dp, bottom = 12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        val activeColor = androidx.compose.ui.graphics.lerp(TextSecondary, AccentCoral, shuffleAnimState.highlight.value)
-                        AnimatedShuffleIcon(
-                            size = 18.dp,
-                            tint = activeColor,
-                            progress = shuffleAnimState.progress.value
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Shuffle",
-                            color = activeColor,
+                            text = "PLAY NEXT (${playbackState.playNextCount.coerceAtMost(upcomingTracks.size)})",
+                            color = TextSecondary,
                             fontFamily = SoraFontFamily,
                             fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp
                         )
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 4.dp, bottom = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "UP NEXT • TUNED TO YOUR TASTE (${upcomingTracks.size})",
+                            color = TextSecondary,
+                            fontFamily = SoraFontFamily,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp
+                        )
+
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(
+                                    if (shuffleAnimState.highlight.value > 0.05f) AccentCoral.copy(alpha = 0.2f * shuffleAnimState.highlight.value)
+                                    else SurfaceDark
+                                )
+                                .border(
+                                    1.dp,
+                                    if (shuffleAnimState.highlight.value > 0.05f) AccentCoral.copy(alpha = 0.7f * shuffleAnimState.highlight.value)
+                                    else BorderGlass,
+                                    RoundedCornerShape(12.dp)
+                                )
+                                .clickable {
+                                    coroutineScope.launch {
+                                        viewModel.shuffleQueue()
+                                        shuffleAnimState.playAnimation(durationMs = 1150)
+                                        queueListState.animateScrollToItem(0)
+                                    }
+                                }
+                                .padding(horizontal = 10.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val activeColor = androidx.compose.ui.graphics.lerp(TextSecondary, AccentCoral, shuffleAnimState.highlight.value)
+                            AnimatedShuffleIcon(
+                                size = 18.dp,
+                                tint = activeColor,
+                                progress = shuffleAnimState.progress.value
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Shuffle",
+                                color = activeColor,
+                                fontFamily = SoraFontFamily,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
                 }
             }
@@ -533,15 +551,61 @@ fun QueueScreen(
 
                         Column(modifier = Modifier.animateItem()) {
                             if (playbackState.playNextCount > 0 && offsetIndex == playbackState.playNextCount) {
-                                Text(
-                                    text = "UP NEXT • TUNED TO YOUR TASTE (${upcomingTracks.size - playbackState.playNextCount})",
-                                    color = TextSecondary,
-                                    fontFamily = SoraFontFamily,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    letterSpacing = 1.sp,
-                                    modifier = Modifier.padding(start = 4.dp, top = 16.dp, bottom = 12.dp)
-                                )
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(start = 4.dp, top = 16.dp, bottom = 12.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "UP NEXT • TUNED TO YOUR TASTE (${(upcomingTracks.size - playbackState.playNextCount).coerceAtLeast(0)})",
+                                        color = TextSecondary,
+                                        fontFamily = SoraFontFamily,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        letterSpacing = 1.sp
+                                    )
+
+                                    Row(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(
+                                                if (shuffleAnimState.highlight.value > 0.05f) AccentCoral.copy(alpha = 0.2f * shuffleAnimState.highlight.value)
+                                                else SurfaceDark
+                                            )
+                                            .border(
+                                                1.dp,
+                                                if (shuffleAnimState.highlight.value > 0.05f) AccentCoral.copy(alpha = 0.7f * shuffleAnimState.highlight.value)
+                                                else BorderGlass,
+                                                RoundedCornerShape(12.dp)
+                                            )
+                                            .clickable {
+                                                coroutineScope.launch {
+                                                    viewModel.shuffleQueue()
+                                                    shuffleAnimState.playAnimation(durationMs = 1150)
+                                                    queueListState.animateScrollToItem(playbackState.playNextCount)
+                                                }
+                                            }
+                                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        val activeColor = androidx.compose.ui.graphics.lerp(TextSecondary, AccentCoral, shuffleAnimState.highlight.value)
+                                        AnimatedShuffleIcon(
+                                            size = 18.dp,
+                                            tint = activeColor,
+                                            progress = shuffleAnimState.progress.value
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Shuffle",
+                                            color = activeColor,
+                                            fontFamily = SoraFontFamily,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                }
                             }
                             
                             SwipeToDismissBox(
@@ -564,6 +628,7 @@ fun QueueScreen(
                             enableDismissFromEndToStart = false,
                             gesturesEnabled = (draggingIndex == null),
                             backgroundContent = {
+                                val isSwiping = dismissState.targetValue == SwipeToDismissBoxValue.StartToEnd
                                 val color by animateColorAsState(
                                     when (dismissState.targetValue) {
                                         SwipeToDismissBoxValue.StartToEnd -> Color(0xFFE53935)
@@ -572,35 +637,37 @@ fun QueueScreen(
                                     label = "dismissBgColor"
                                 )
                                 val iconScale by animateFloatAsState(
-                                    if (dismissState.targetValue == SwipeToDismissBoxValue.StartToEnd) 1.2f else 0.8f,
+                                    if (isSwiping) 1.2f else 0.8f,
                                     label = "dismissIconScale"
                                 )
 
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(color)
-                                        .padding(horizontal = 20.dp),
-                                    contentAlignment = Alignment.CenterStart
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(
-                                            imageVector = Icons.Default.Delete,
-                                            contentDescription = "Remove",
-                                            tint = PaletteCream,
-                                            modifier = Modifier
-                                                .size(22.dp)
-                                                .scale(iconScale)
-                                        )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text(
-                                            text = "Remove",
-                                            color = PaletteCream,
-                                            fontFamily = SoraFontFamily,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 13.sp
-                                        )
+                                if (isSwiping || dismissState.progress > 0.05f) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(color)
+                                            .padding(horizontal = 20.dp),
+                                        contentAlignment = Alignment.CenterStart
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = Icons.Default.Delete,
+                                                contentDescription = "Remove",
+                                                tint = PaletteCream,
+                                                modifier = Modifier
+                                                    .size(22.dp)
+                                                    .scale(iconScale)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = "Remove",
+                                                color = PaletteCream,
+                                                fontFamily = SoraFontFamily,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 13.sp
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -609,7 +676,7 @@ fun QueueScreen(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(12.dp))
-                                    .background(if (isDragging) PaletteOxfordBlue else SurfaceDark.copy(alpha = 0.6f))
+                                    .background(if (isDragging) PaletteOxfordBlue else SurfaceDark)
                                     .border(
                                         1.dp,
                                         if (isDragging) AccentCoral else BorderGlass,
@@ -682,7 +749,11 @@ fun QueueScreen(
 
                                 Spacer(modifier = Modifier.width(14.dp))
 
-                                Column(modifier = Modifier.weight(1f)) {
+                                Column(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(end = 12.dp)
+                                ) {
                                     Text(
                                         text = qTrack.title,
                                         color = TextPrimary,
@@ -709,7 +780,8 @@ fun QueueScreen(
                                     color = TextMuted,
                                     fontFamily = UrbanistFontFamily,
                                     fontSize = 12.sp,
-                                    fontWeight = FontWeight.Normal
+                                    fontWeight = FontWeight.Normal,
+                                    modifier = Modifier.padding(end = 8.dp)
                                 )
 
                                 Spacer(modifier = Modifier.width(12.dp))

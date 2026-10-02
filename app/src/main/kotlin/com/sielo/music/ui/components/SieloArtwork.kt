@@ -313,7 +313,9 @@ fun SieloArtistPhoto(
     }
 
     val cachedPhoto = YouTubeArtistImageResolver.getCachedArtistImageUrl(name)
-    val isDirectPhoto = raw.isNotBlank() && (raw.contains("saavncdn.com/") || raw.contains("googleusercontent.com") || raw.contains("ggpht.com")) && !raw.contains("default") && !raw.contains("film") && !raw.contains("music")
+    val isDirectPhoto = raw.isNotBlank() && (raw.startsWith("http://") || raw.startsWith("https://")) &&
+            !raw.contains("default-artist") && !raw.contains("default-music") && !raw.contains("default-film") &&
+            !raw.contains("artist-default") && !raw.contains("default")
 
     val initialPhoto = cachedPhoto ?: fallbackUrl ?: if (isDirectPhoto && !didErrorOccur) raw else null
 
@@ -325,10 +327,11 @@ fun SieloArtistPhoto(
         fallbackUrl,
         didErrorOccur
     ) {
-        if (!cachedPhoto.isNullOrBlank()) {
+        val fb = fallbackUrl
+        if (!cachedPhoto.isNullOrBlank() && !cachedPhoto.contains("default")) {
             this.value = cachedPhoto
-        } else if (!fallbackUrl.isNullOrBlank()) {
-            this.value = fallbackUrl
+        } else if (!fb.isNullOrBlank() && !fb.contains("default")) {
+            this.value = fb
         } else if (isDirectPhoto && !didErrorOccur) {
             this.value = raw
         } else if (name.isNotBlank()) {

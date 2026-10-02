@@ -42,7 +42,8 @@ class ProfileViewModel @Inject constructor(
     private val listeningHistoryDao: ListeningHistoryDao,
     val userManager: com.sielo.music.core.auth.UserManager,
     private val playerManager: PlayerManager,
-    private val innerTubeClient: InnerTubeClient
+    private val innerTubeClient: InnerTubeClient,
+    private val musicMetadataRepository: com.sielo.music.core.network.metadata.MusicMetadataRepository
 ) : ViewModel() {
 
     val currentUser = userManager.currentUser
@@ -149,7 +150,7 @@ class ProfileViewModel @Inject constructor(
                 name = artistName,
                 imageUrl = imageUrl
             )
-            val full = innerTubeClient.getArtistDetails(artistName, imageUrl, artistId)
+            val full = musicMetadataRepository.getArtistDetails(artistName, imageUrl, artistId)
             if (full != null) {
                 _selectedArtist.value = full
             }
@@ -162,8 +163,7 @@ class ProfileViewModel @Inject constructor(
     }
 
     suspend fun getAlbumSongs(album: SieloAlbum): List<SieloTrack> {
-        if (album.tracks.isNotEmpty()) return album.tracks
-        return innerTubeClient.getAlbumSongs(album.id, album.title, album.artist)
+        return musicMetadataRepository.getAlbumTracks(album)
     }
 
     fun playAlbum(track: SieloTrack, queue: List<SieloTrack>) {

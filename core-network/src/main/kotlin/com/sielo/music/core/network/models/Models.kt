@@ -11,7 +11,10 @@ data class SieloTrack(
     val durationText: String? = null,
     val durationSeconds: Long = 0,
     val thumbnailUrl: String? = null,
-    val streamUrl: String? = null
+    val streamUrl: String? = null,
+    val musicBrainzRecordingId: String? = null,
+    val isrc: String? = null,
+    val albumId: String? = null
 ) {
     val formattedDuration: String
         get() {
@@ -49,7 +52,9 @@ data class SieloAlbum(
     val description: String? = null,
     val audioQuality: String? = null,
     val isFavorite: Boolean = false,
-    val releaseDate: String? = null
+    val releaseDate: String? = null,
+    val musicBrainzId: String? = null,
+    val releaseType: String? = null
 )
 
 @Serializable
@@ -79,6 +84,12 @@ data class ArtistDetails(
     val dominantLanguage: String? = null,
     val dominantType: String? = null,
     val isVerified: Boolean = true,
-    val wikiUrl: String? = null
+    val wikiUrl: String? = null,
+    val genres: List<String> = emptyList(),
+    val origin: String? = null,
+    val activeYears: String? = null,
+    val recordLabel: String? = null,
+    val description: String? = null,
+    val musicBrainzId: String? = null
 )
 

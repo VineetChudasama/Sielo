@@ -28,6 +28,11 @@ class FakeRecommendationHistoryDao : RecommendationHistoryDao {
     override suspend fun upsertAll(entities: List<RecommendationHistoryEntity>) {
         recorded.addAll(entities)
     }
+
+    override suspend fun clearAll() {
+        recorded.clear()
+        ineligibleIds.clear()
+    }
 }
 
 class FakeCandidatePoolBuilder : CandidatePoolBuilder(
@@ -44,6 +49,8 @@ class FakeCandidatePoolBuilder : CandidatePoolBuilder(
         override fun getHourlyDistribution(sinceMs: Long) = kotlinx.coroutines.flow.emptyFlow<List<com.sielo.music.core.database.dao.HourCount>>()
         override fun getRediscoveredFavorites(twoDaysAgoMs: Long, limit: Int) = kotlinx.coroutines.flow.emptyFlow<List<com.sielo.music.core.database.entity.ListeningEventEntity>>()
         override suspend fun updateDurationPlayed(eventId: Long, durationMs: Long) {}
+        override suspend fun updateSongDuration(eventId: Long, songDurationMs: Long) {}
+        override suspend fun updateSongDurationBySongId(songId: String, songDurationMs: Long) {}
         override suspend fun incrementDurationPlayed(eventId: Long, deltaMs: Long) {}
         override fun getStreamHistory(sinceMs: Long, limit: Int) = kotlinx.coroutines.flow.emptyFlow<List<com.sielo.music.core.database.entity.ListeningEventEntity>>()
         override fun getTotalStreamCount(sinceMs: Long) = kotlinx.coroutines.flow.emptyFlow<Int>()
@@ -52,6 +59,7 @@ class FakeCandidatePoolBuilder : CandidatePoolBuilder(
         override suspend fun getSongsByArtists(artistNames: List<String>) = emptyList<com.sielo.music.core.database.dao.CandidateSongStat>()
         override suspend fun getSongsByPlayCountRange(sinceMs: Long, minPlays: Int, maxPlays: Int) = emptyList<com.sielo.music.core.database.dao.CandidateSongStat>()
         override suspend fun getTopArtistsSnapshot(sinceMs: Long, limit: Int) = emptyList<com.sielo.music.core.database.dao.ArtistStat>()
+        override suspend fun clearAll() {}
     },
     recommendationHistoryDao = FakeRecommendationHistoryDao(),
     similarArtistsRepository = FakeSimilarArtistsRepository(),

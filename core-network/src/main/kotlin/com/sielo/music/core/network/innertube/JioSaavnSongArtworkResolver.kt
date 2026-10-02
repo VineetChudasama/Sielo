@@ -65,15 +65,68 @@ object JioSaavnSongArtworkResolver {
 
         val query = if (cleanArtist.isNotBlank()) "$filteredTitle $cleanArtist".trim() else filteredTitle.trim()
 
-        val resolved = fetchArtworkForQuery(
+        var resolved = fetchArtworkForQuery(
             query = query,
             expectedTitle = filteredTitle,
             expectedArtist = cleanArtist.ifBlank { null }
         )
+
+        // iTunes 600x600 Cover Fallback
+        if (resolved.isNullOrBlank()) {
+            resolved = fetchFromITunes(filteredTitle, cleanArtist)
+        }
+
+        // Deezer 1000x1000 Cover Fallback
+        if (resolved.isNullOrBlank()) {
+            resolved = fetchFromDeezer(filteredTitle, cleanArtist)
+        }
+
         if (!resolved.isNullOrBlank()) {
             memoryCache[key] = resolved
         }
         resolved
+    }
+
+    private fun fetchFromITunes(title: String, artist: String): String? {
+        return try {
+            val q = if (artist.isNotBlank()) "$title $artist" else title
+            val encoded = URLEncoder.encode(q, "UTF-8")
+            val url = "https://itunes.apple.com/search?term=$encoded&entity=song&limit=5"
+            val req = Request.Builder().url(url).addHeader("User-Agent", "Mozilla/5.0").build()
+            val resp = client.newCall(req).execute()
+            val body = resp.body?.string().orEmpty()
+            if (body.isNotBlank()) {
+                val root = json.parseToJsonElement(body).jsonObject
+                val results = root["results"]?.jsonArray
+                val first = results?.firstOrNull()?.jsonObject
+                val artwork = first?.get("artworkUrl100")?.jsonPrimitive?.content
+                artwork?.replace("100x100bb.jpg", "600x600bb.jpg")
+                    ?.replace("100x100", "600x600")
+            } else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun fetchFromDeezer(title: String, artist: String): String? {
+        return try {
+            val q = if (artist.isNotBlank()) "$title $artist" else title
+            val encoded = URLEncoder.encode(q, "UTF-8")
+            val url = "https://api.deezer.com/search?q=$encoded&limit=5"
+            val req = Request.Builder().url(url).addHeader("User-Agent", "Mozilla/5.0").build()
+            val resp = client.newCall(req).execute()
+            val body = resp.body?.string().orEmpty()
+            if (body.isNotBlank()) {
+                val root = json.parseToJsonElement(body).jsonObject
+                val data = root["data"]?.jsonArray
+                val first = data?.firstOrNull()?.jsonObject
+                val album = first?.get("album")?.jsonObject
+                album?.get("cover_xl")?.jsonPrimitive?.content
+                    ?: album?.get("cover_big")?.jsonPrimitive?.content
+            } else null
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun fetchArtworkForQuery(

@@ -476,6 +476,7 @@ private fun NowPlayingPageView(
                 // Tactile Center Play/Pause Button
                 TactilePlayButton(
                     isPlaying = playbackState.isPlaying,
+                    isBuffering = playbackState.isBuffering,
                     onClick = { viewModel.togglePlayPause() },
                     size = 72
                 )

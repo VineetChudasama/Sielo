@@ -28,6 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -111,7 +112,8 @@ fun TactilePlayButton(
     isPlaying: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    size: Int = 72
+    size: Int = 72,
+    isBuffering: Boolean = false
 ) {
     Box(
         modifier = modifier
@@ -122,12 +124,20 @@ fun TactilePlayButton(
             .clickable { onClick() },
         contentAlignment = Alignment.Center
     ) {
-        Icon(
-            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-            contentDescription = if (isPlaying) "Pause" else "Play",
-            tint = if (isPlaying) ObsidianBlack else TextPrimary,
-            modifier = Modifier.size((size * 0.45).dp)
-        )
+        if (isBuffering) {
+            CircularProgressIndicator(
+                modifier = Modifier.size((size * 0.45).dp),
+                color = if (isPlaying) ObsidianBlack else AccentCoral,
+                strokeWidth = 3.dp
+            )
+        } else {
+            Icon(
+                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                contentDescription = if (isPlaying) "Pause" else "Play",
+                tint = if (isPlaying) ObsidianBlack else TextPrimary,
+                modifier = Modifier.size((size * 0.45).dp)
+            )
+        }
     }
 }
 
@@ -251,6 +261,13 @@ fun RotatingVinylCard(
         label = "tonearmProgress"
     )
 
+    // Smooth disc glow transition: fades out slightly when paused, blooms back smoothly when playing
+    val discGlowFactor by animateFloatAsState(
+        targetValue = if (isPlaying) 1f else 0.22f,
+        animationSpec = tween(durationMillis = 750, easing = FastOutSlowInEasing),
+        label = "discGlowFactor"
+    )
+
     val artworkSize = 120.dp
 
     Box(
@@ -270,9 +287,9 @@ fun RotatingVinylCard(
             // 1. Ambient Atmospheric Glow behind the disc (vibrant artwork color)
             drawCircle(
                 brush = Brush.radialGradient(
-                    0.0f to dynamicGlowColor.copy(alpha = 0.50f),
-                    0.55f to dynamicGlowColor.copy(alpha = 0.28f),
-                    0.80f to dynamicGlowColor.copy(alpha = 0.10f),
+                    0.0f to dynamicGlowColor.copy(alpha = 0.50f * discGlowFactor),
+                    0.55f to dynamicGlowColor.copy(alpha = 0.28f * discGlowFactor),
+                    0.80f to dynamicGlowColor.copy(alpha = 0.10f * discGlowFactor),
                     1.0f to Color.Transparent,
                     center = discCenter,
                     radius = discRadius * 1.45f
@@ -347,21 +364,21 @@ fun RotatingVinylCard(
             // 5. Glowing Border in the Color of the Music Artwork (Enhanced vibrant multi-layer edge glow)
             // Outer wide soft halo
             drawCircle(
-                color = dynamicGlowColor.copy(alpha = 0.25f),
+                color = dynamicGlowColor.copy(alpha = 0.25f * discGlowFactor),
                 radius = discRadius + 4.dp.toPx(),
                 center = discCenter,
                 style = Stroke(width = 8.dp.toPx())
             )
             // Mid diffused rim bloom
             drawCircle(
-                color = dynamicGlowColor.copy(alpha = 0.55f),
+                color = dynamicGlowColor.copy(alpha = 0.55f * discGlowFactor),
                 radius = discRadius + 1.5.dp.toPx(),
                 center = discCenter,
                 style = Stroke(width = 4.5.dp.toPx())
             )
             // Crisp glowing border stroke with specular highlight
             drawCircle(
-                color = dynamicGlowColor.copy(alpha = 0.95f),
+                color = dynamicGlowColor.copy(alpha = 0.35f + 0.60f * discGlowFactor),
                 radius = discRadius,
                 center = discCenter,
                 style = Stroke(width = 2.5.dp.toPx())

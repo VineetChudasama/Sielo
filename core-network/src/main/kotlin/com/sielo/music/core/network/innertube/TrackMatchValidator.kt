@@ -77,38 +77,122 @@ object TrackMatchValidator {
             .trim()
     }
 
-        val COMPILATION_KEYWORDS = listOf(
+    val COMPILATION_KEYWORDS = listOf(
         "best of", "greatest hits", "compilation", "the ultimate collection", "essential hits",
         "the very best of", "unplugged collection", "non stop hits", "mashup",
         "old hindi songs", "old is gold", "all time hits", "superhits", "blockbuster hits",
         "chillout", "heartbeats", "hot hits", "collection", "collections", "bollywood chillout",
         "heartbeats bollywood", "hot hits bollywood", "party hits", "dance hits", "love hits",
         "top 10", "top 20", "top 50", "top 100", "karaoke", "instrumental", "tribute", "cover",
-        "jukebox", "audio jukebox", "video jukebox", "songs collection", "best romantic"
+        "cover version", "jukebox", "audio jukebox", "video jukebox", "songs collection", "best romantic",
+        "mix", "bollywood mix", "long drive", "heart touching", "romantic songs", "love songs",
+        "sad songs", "party songs", "driving mix", "drive mix", "workout mix", "gym songs",
+        "hits of", "voice of", "magic of", "selected songs", "golden hits", "evergreen hits",
+        "all time favorite", "all time favourite", "lo-fi mix", "lofi mix", "lo-fi", "lofi",
+        "slowed + reverb", "slowed and reverb", "club mix", "dj mix", "remix collection",
+        "dance mix", "playlist", "top songs", "audio songs", "video songs", "non-stop", "non stop",
+        "type beat", "type-beat", "reprod", "prod by", "produced by", "self-titled", "self titled",
+        "popular songs", "popular hits", "top tracks", "all songs", "super hit songs",
+        "ringtone", "status video", "status song", "speed up", "sped up", "nightcore",
+        "unheard", "gems", "unheard gems", "yours truly", "your's truly",
+        "through the years", "over the years", "across the years", "down the years",
+        "tour hits", "sad love songs", "romantic hits", "chartbusters",
+        "fan favorites", "fan favourites", "anthology", "retrospective", "the collection",
+        "definitive collection", "ultimate collection", "anniversary edition", "anniversary collection",
+        "platinum collection", "gold collection", "celebration", "spotlight"
     )
+
+    fun isSoundtrackRelease(title: String, type: String? = null): Boolean {
+        if (type?.equals("Soundtrack", ignoreCase = true) == true) return true
+        val lower = title.lowercase().trim()
+        return lower.contains("original motion picture") ||
+                lower.contains("motion picture") ||
+                lower.contains("soundtrack") ||
+                lower.contains(" ost") ||
+                lower.contains("(ost)") ||
+                lower.contains("film score") ||
+                lower.contains("original score") ||
+                lower.contains("from \"") ||
+                lower.contains("from '") ||
+                lower.contains("movie songs")
+    }
 
     fun isCompilationAlbum(album: String?, artist: String? = null): Boolean {
         if (album.isNullOrBlank()) return false
         val lower = album.lowercase().trim()
 
-        if (lower == "hits" || lower == "essentials" || lower == "collection" || lower == "classics") {
+        // 1. Definite bootleg / beat / instrumental / karaoke markers
+        if (lower.contains("type beat") || lower.contains("type-beat") ||
+            lower.endsWith(" beat") || lower.contains(" beat ") || lower.endsWith(" beats") ||
+            lower.contains("prod by") || lower.contains("reprod") ||
+            lower.contains("karaoke") || lower.contains("instrumental") ||
+            lower.contains("tribute") || lower.contains("cover version") ||
+            lower.contains("slowed") || lower.contains("reverb") ||
+            lower.contains("nightcore") || lower.contains("sped up") || lower.contains("speed up") ||
+            lower.contains("ringtone") || lower.contains("status video") || lower.contains("status song") ||
+            lower.contains("self-titled") || lower.contains("self titled")
+        ) {
+            return true
+        }
+
+        // 2. Compilation / playlist keywords
+        if (lower == "hits" || lower == "essentials" || lower == "collection" || lower == "classics" ||
+            lower == "popular songs" || lower == "popular hits" || lower == "top songs" ||
+            lower == "best songs" || lower == "all songs" ||
+            lower == "heart touching songs" || lower.startsWith("heart touching") ||
+            lower.contains("long drive") || lower.contains("bollywood mix") || lower.contains(" dj ") ||
+            lower.endsWith(" mix") || lower.endsWith(" - mix") || lower.contains(" mix - ")
+        ) {
             return true
         }
 
         if (lower.contains("chillout") || lower.contains("heartbeats") || lower.contains("hot hits") ||
             lower.contains("best of") || lower.contains("greatest hits") || lower.contains("collection") ||
             lower.contains("jukebox") || lower.contains("non stop") || lower.contains("nonstop") ||
-            lower.contains("mashup") || lower.contains("superhits") || lower.contains("blockbuster")
+            lower.contains("mashup") || lower.contains("superhits") || lower.contains("blockbuster") ||
+            lower.contains("heart touching") || lower.contains("romantic songs") || lower.contains("sad songs") ||
+            lower.contains("party hits") || lower.contains("selected songs") ||
+            lower.contains("popular songs") || lower.contains("popular hits") ||
+            lower.contains("audio songs") || lower.contains("video songs") ||
+            lower.contains("unheard") || lower.contains("gems") || lower.contains("yours truly") ||
+            lower.contains("your's truly") || lower.contains("through the years") ||
+            lower.contains("tour hits") || lower.contains("sad love songs")
         ) {
             return true
         }
 
+        // 3. Artist-specific compilation and bootleg checks
         if (!artist.isNullOrBlank()) {
             val aLower = artist.lowercase().trim()
+            val tokens = aLower.split(Regex("[^a-z0-9]+")).filter { it.length >= 2 }
+
+            // Common generic words that form bootlegs/compilations when combined with an artist name
+            // e.g., "Desi Arijit Singh", "Emotional Arijit", "Arijit Singh Hits", "Your's Truly Arijit", "Arijit Singh - Unheard Gems"
+            val genericWords = listOf(
+                "desi", "emotional", "romantic", "sad", "party", "hits", "popular", "best", "golden",
+                "essential", "essentials", "classics", "collection", "tribute", "unplugged", "melodies",
+                "voice of", "magic of", "superhit", "superhits", "all time", "evergreen", "favorite", "favourite",
+                "nonstop", "non-stop", "jukebox", "compilation", "mashup", "special", "drive", "touching",
+                "self-titled", "self titled", "gems", "unheard", "truly", "years", "tour", "vault",
+                "unheard gems", "yours truly", "your's truly"
+            )
+
+            for (w in genericWords) {
+                if (lower.contains(w)) {
+                    if (lower.contains(aLower) || (tokens.isNotEmpty() && tokens.all { lower.contains(it) }) || (tokens.size >= 2 && tokens.any { lower.contains(it) && it.length >= 4 })) {
+                        return true
+                    }
+                }
+            }
+
             if (lower.contains(aLower) && (
                 lower.contains("hits") || lower.contains("best") ||
                 lower.contains("collection") || lower.contains("essentials") ||
-                lower.contains("songs") || lower.contains("melodies")
+                lower.contains("songs") || lower.contains("melodies") ||
+                lower.contains("mix") || lower.contains("drive") || lower.contains("touching") ||
+                lower.contains("self-titled") || lower.contains("self titled") ||
+                lower.contains("popular") || lower.contains("gems") || lower.contains("unheard") ||
+                lower.contains("truly") || lower.contains("years") || lower.contains("tour")
             )) {
                 return true
             }
@@ -118,7 +202,7 @@ object TrackMatchValidator {
 
     /**
      * Strictly verifies whether an album was authentically made by the artist.
-     * Rejects compilations, playlists, tribute collections, and albums created by other artists.
+     * Rejects compilations, playlists, tribute collections, type beats, and albums created by other artists.
      */
     fun isAlbumMadeByArtist(
         albumTitle: String,
@@ -141,7 +225,16 @@ object TrackMatchValidator {
             return false
         }
 
-        // 3. Check JioSaavn structured artist fields if provided
+        // 3. Reject beats, instrumentals, or cover songs passed off as albums
+        if (titleLower.contains("type beat") || titleLower.contains("type-beat") ||
+            titleLower.endsWith(" beat") || titleLower.contains(" beat ") ||
+            titleLower.contains("instrumental") || titleLower.contains("karaoke") ||
+            titleLower.contains("tribute") || titleLower.contains("cover")
+        ) {
+            return false
+        }
+
+        // 4. Check JioSaavn structured artist fields if provided
         val hasStructuredArtists = !primaryArtists.isNullOrBlank() || !singers.isNullOrBlank() || !music.isNullOrBlank()
         if (hasStructuredArtists) {
             val inPrimary = primaryArtists?.contains(artistLower, ignoreCase = true) == true
@@ -154,7 +247,7 @@ object TrackMatchValidator {
             }
         }
 
-        // 4. If album artist string is provided (e.g. from YouTube Music)
+        // 5. If album artist string is provided (e.g. from YouTube Music, iTunes, Deezer)
         if (!albumArtist.isNullOrBlank()) {
             val albumArtistLower = albumArtist.lowercase().trim()
             if (albumArtistLower.contains("various artists", ignoreCase = true) ||
@@ -162,8 +255,11 @@ object TrackMatchValidator {
             ) {
                 return false
             }
-            // If the albumArtist does not match target artist and does not contain it
-            if (!albumArtistLower.contains(artistLower) && !artistLower.contains(albumArtistLower)) {
+            // Strict matching: albumArtist MUST contain targetArtist or vice versa, OR one of the split artists matches
+            val splitArtists = albumArtistLower.split(Regex("[,&/]|\\b(ft|feat|featuring)\\b")).map { it.trim() }
+            val matchesArtist = albumArtistLower.contains(artistLower) || artistLower.contains(albumArtistLower) ||
+                    splitArtists.any { it.contains(artistLower) || artistLower.contains(it) }
+            if (!matchesArtist) {
                 return false
             }
         }

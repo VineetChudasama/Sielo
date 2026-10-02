@@ -314,11 +314,6 @@ class UserManager @Inject constructor(
             } catch (e: Exception) {
                 e.printStackTrace()
             }
-            try {
-                databaseCleaner.clearAll()
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
         }
     }
 

@@ -29,6 +29,7 @@ import androidx.media3.session.SessionResult
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.sielo.music.core.audio.PlayerManager
+import com.sielo.music.core.network.innertube.StreamClientUtils
 import dagger.hilt.android.AndroidEntryPoint
 import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
@@ -101,21 +102,39 @@ class MusicPlaybackService : MediaSessionService() {
             .setUsage(C.USAGE_MEDIA)
             .build()
 
-        // 2. High-Performance OkHttpClient with Connection Pooling & HTTP 1.1 for uninterrupted streaming
+        // 2. High-Performance OkHttpClient with Connection Pooling & Keep-Alive + Dynamic Stream Header Interceptor
         val okHttpClient = OkHttpClient.Builder()
-            .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
+            .connectionPool(ConnectionPool(10, 5, TimeUnit.MINUTES))
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(25, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .followRedirects(true)
             .followSslRedirects(true)
-            .protocols(listOf(Protocol.HTTP_1_1))
+            .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
+            .addInterceptor { chain ->
+                val request = chain.request()
+                val host = request.url.host
+                val isYouTubeMediaHost =
+                    host.endsWith("googlevideo.com") ||
+                        host.endsWith("youtube-nocookie.com") ||
+                        host.endsWith("ytimg.com")
+
+                if (!isYouTubeMediaHost) return@addInterceptor chain.proceed(request)
+
+                val clientParam = request.url.queryParameter("c")?.trim().orEmpty()
+                val userAgent = StreamClientUtils.resolveUserAgent(clientParam)
+                val originReferer = StreamClientUtils.resolveOriginReferer(clientParam)
+
+                val builder = request.newBuilder().header("User-Agent", userAgent)
+                originReferer.origin?.let { builder.header("Origin", it) }
+                originReferer.referer?.let { builder.header("Referer", it) }
+                chain.proceed(builder.build())
+            }
             .build()
 
         val httpDataSourceFactory = OkHttpDataSource.Factory(okHttpClient)
-            .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
 
-        // 3. CacheDataSourceFactory - ensures buffered chunks are served instantly and smoothly
+        // 3. CacheDataSourceFactory - ensures buffered chunks are cached to disk and served instantly
         val cache = getCache(this)
         val cacheDataSourceFactory = CacheDataSource.Factory()
             .setCache(cache)
@@ -127,22 +146,24 @@ class MusicPlaybackService : MediaSessionService() {
         val mediaSourceFactory = DefaultMediaSourceFactory(this)
             .setDataSourceFactory(defaultDataSourceFactory)
 
-        // 4. Custom LoadControl - Smooth High-Fidelity Audio Buffering
+        // 4. Custom LoadControl - Fast-Start High-Fidelity Audio Buffering
+        // 800ms initial buffer starts audio playback virtually instantly.
+        // 60s max buffer prevents network-induced audio stuttering.
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                /* minBufferMs = */ 20_000,
+                /* minBufferMs = */ 15_000,
                 /* maxBufferMs = */ 60_000,
-                /* bufferForPlaybackMs = */ 1_500,
-                /* bufferForPlaybackAfterRebufferMs = */ 3_000
+                /* bufferForPlaybackMs = */ 800,
+                /* bufferForPlaybackAfterRebufferMs = */ 1_500
             )
             .setBackBuffer(
-                /* backBufferDurationMs = */ 20_000,
+                /* backBufferDurationMs = */ 30_000,
                 /* retainBackBufferFromKeyframe = */ true
             )
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
-        // 5. RenderersFactory with clean AudioSink & Hardware Audio Clock sync (eliminates Sonic time-stretch speed-ups)
+        // 5. RenderersFactory with clean AudioSink (no float distortion/resampling glitches)
         val renderersFactory = object : DefaultRenderersFactory(this) {
             override fun buildAudioSink(
                 context: Context,
@@ -150,8 +171,9 @@ class MusicPlaybackService : MediaSessionService() {
                 enableAudioTrackPlaybackParams: Boolean
             ): AudioSink {
                 return DefaultAudioSink.Builder(context)
-                    .setEnableFloatOutput(false)
+                    .setEnableFloatOutput(false) // Standard 16-bit PCM avoids driver resampling crackle
                     .setEnableAudioTrackPlaybackParams(true)
+                    .setAudioProcessorChain(DefaultAudioSink.DefaultAudioProcessorChain())
                     .build()
             }
         }.apply {

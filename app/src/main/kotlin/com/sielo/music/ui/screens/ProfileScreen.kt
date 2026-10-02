@@ -99,6 +99,7 @@ import com.sielo.music.core.database.entity.FavoriteTrackEntity
 import com.sielo.music.core.database.entity.ListeningEventEntity
 import com.sielo.music.core.network.models.SieloArtist
 import com.sielo.music.core.network.models.SieloTrack
+import com.sielo.music.ui.components.SieloArtistPhoto
 import com.sielo.music.ui.theme.BorderGlass
 import com.sielo.music.ui.theme.BorderHighlight
 import com.sielo.music.ui.theme.BorderSubtle
@@ -772,23 +773,11 @@ private fun FavoriteArtistsHorizontalList(
                         .shadow(4.dp, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (!artist.imageUrl.isNullOrBlank()) {
-                        AsyncImage(
-                            model = artist.imageUrl,
-                            contentDescription = artist.name,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
-                    } else {
-                        val initial = artist.name.firstOrNull()?.uppercase() ?: "A"
-                        Text(
-                            text = initial,
-                            color = PaletteSand,
-                            fontFamily = SoraFontFamily,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 26.sp
-                        )
-                    }
+                    SieloArtistPhoto(
+                        imageUrl = artist.imageUrl,
+                        name = artist.name,
+                        modifier = Modifier.fillMaxSize()
+                    )
                 }
 
                 Spacer(modifier = Modifier.height(6.dp))

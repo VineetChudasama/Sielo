@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.Dispatchers
+import com.sielo.music.core.network.metadata.MusicMetadataRepository
 import kotlinx.coroutines.launch
 import java.util.Calendar
 import javax.inject.Inject
@@ -34,6 +35,7 @@ import javax.inject.Inject
 @HiltViewModel
 class HomeViewModel @Inject constructor(
     private val innerTubeClient: InnerTubeClient,
+    private val musicMetadataRepository: MusicMetadataRepository,
     private val playerManager: PlayerManager,
     private val favoriteTrackDao: FavoriteTrackDao,
     private val listeningHistoryDao: ListeningHistoryDao,
@@ -153,7 +155,7 @@ class HomeViewModel @Inject constructor(
             val deferredTracks = artistsToQuery.map { artist ->
                 async {
                     try {
-                        val details = innerTubeClient.getArtistDetails(artist)
+                        val details = musicMetadataRepository.getArtistDetails(artist)
                         val topSongs = details?.topSongs?.take(5) ?: innerTubeClient.search("$artist top hits").take(5)
                         // Strictly filter to ensure songs belong to the chosen artist
                         topSongs.filter { song ->
@@ -200,7 +202,7 @@ class HomeViewModel @Inject constructor(
             val deferredTracks = candidateArtists.map { artist ->
                 async {
                     try {
-                        val details = innerTubeClient.getArtistDetails(artist)
+                        val details = musicMetadataRepository.getArtistDetails(artist)
                         val songs = details?.topSongs?.take(6) ?: innerTubeClient.search("$artist hits").take(6)
                         // Strictly filter out any song the user has already listened to
                         songs.filter { song ->
@@ -447,7 +449,7 @@ class HomeViewModel @Inject constructor(
                 val title = "Since you like $selectedArtist, here are similar songs you might like :"
                 _sinceYouLikeTitle.value = title
 
-                val details = innerTubeClient.getArtistDetails(selectedArtist)
+                val details = musicMetadataRepository.getArtistDetails(selectedArtist)
                 val topSongs = details?.topSongs ?: innerTubeClient.search("$selectedArtist top hits")
                 if (topSongs.isNotEmpty()) {
                     _sinceYouLikeTracks.value = topSongs.distinctBy { it.id }.take(8)
@@ -518,7 +520,7 @@ class HomeViewModel @Inject constructor(
                 name = artistName,
                 imageUrl = imageUrl
             )
-            val full = innerTubeClient.getArtistDetails(artistName, imageUrl, artistId)
+            val full = musicMetadataRepository.getArtistDetails(artistName, imageUrl, artistId)
             if (full != null) {
                 _selectedArtist.value = full
             }
@@ -537,8 +539,7 @@ class HomeViewModel @Inject constructor(
     }
 
     suspend fun getAlbumSongs(album: com.sielo.music.core.network.models.SieloAlbum): List<SieloTrack> {
-        if (album.tracks.isNotEmpty()) return album.tracks
-        return innerTubeClient.getAlbumSongs(album.id, album.title, album.artist)
+        return musicMetadataRepository.getAlbumTracks(album)
     }
 
     private fun computeGreeting(): String {
