@@ -21,6 +21,8 @@
     import kotlinx.coroutines.Dispatchers
     import kotlinx.coroutines.Job
     import kotlinx.coroutines.delay
+    import kotlinx.coroutines.async
+    import kotlinx.coroutines.coroutineScope
     import kotlinx.coroutines.flow.first
     import com.sielo.music.core.network.metadata.MusicMetadataRepository
     import kotlinx.coroutines.flow.MutableStateFlow
@@ -217,11 +219,22 @@
             try {
                 when (category) {
                     "Artists" -> {
-                        val artists = innerTubeClient.searchArtists(trimmed)
-                        // Guard against race condition if user typed new characters while search was running
-                        if (_searchQuery.value.trim().equals(trimmed, ignoreCase = true)) {
-                            _artistResults.value = rankArtists(artists, trimmed)
-                            _searchResults.value = emptyList()
+                        coroutineScope {
+                            val ytArtistsDeferred = async { innerTubeClient.searchArtists(trimmed) }
+                            val mbArtistsDeferred = async {
+                                try {
+                                    musicMetadataRepository.searchArtist(trimmed)
+                                } catch (_: Exception) {
+                                    emptyList()
+                                }
+                            }
+                            val artists = ytArtistsDeferred.await()
+                            val mbArtists = mbArtistsDeferred.await()
+                            val combined = mergeArtists(artists, mbArtists)
+                            if (_searchQuery.value.trim().equals(trimmed, ignoreCase = true)) {
+                                _artistResults.value = rankArtists(combined, trimmed)
+                                _searchResults.value = emptyList()
+                            }
                         }
                     }
                     "Songs" -> {
@@ -235,14 +248,33 @@
                         }
                     }
                     else -> { // "All" or other
-                        val primaryTracks = innerTubeClient.search(trimmed)
-                        val additionalTracks = if (normalized != trimmed) innerTubeClient.search(normalized) else emptyList()
-                        val allTracks = (primaryTracks + additionalTracks)
-                        val artists = innerTubeClient.searchArtists(trimmed)
-                        val deduplicated = TrackMatchValidator.deduplicateTracks(allTracks).distinctBy { it.id }
-                        if (_searchQuery.value.trim().equals(trimmed, ignoreCase = true)) {
-                            _searchResults.value = rankTracks(deduplicated, trimmed)
-                            _artistResults.value = rankArtists(artists, trimmed)
+                        coroutineScope {
+                            val tracksDeferred = async {
+                                val primaryTracks = innerTubeClient.search(trimmed)
+                                val additionalTracks = if (normalized != trimmed) innerTubeClient.search(normalized) else emptyList()
+                                val allTracks = (primaryTracks + additionalTracks)
+                                TrackMatchValidator.deduplicateTracks(allTracks).distinctBy { it.id }
+                            }
+                            val artistsDeferred = async {
+                                innerTubeClient.searchArtists(trimmed)
+                            }
+                            val mbArtistsDeferred = async {
+                                try {
+                                    musicMetadataRepository.searchArtist(trimmed)
+                                } catch (_: Exception) {
+                                    emptyList()
+                                }
+                            }
+
+                            val tracks = tracksDeferred.await()
+                            val artists = artistsDeferred.await()
+                            val mbArtists = mbArtistsDeferred.await()
+                            val combined = mergeArtists(artists, mbArtists)
+
+                            if (_searchQuery.value.trim().equals(trimmed, ignoreCase = true)) {
+                                _searchResults.value = rankTracks(tracks, trimmed)
+                                _artistResults.value = rankArtists(combined, trimmed)
+                            }
                         }
                     }
                 }
@@ -311,34 +343,124 @@
             return finalSelection.sortedByDescending { it.second.first }.map { it.first }
         }
     
-        private fun rankArtists(artists: List<SieloArtist>, query: String): List<SieloArtist> {
-            val q = query.trim().lowercase()
-            val sorted = if (q.isBlank()) artists else {
-                val words = q.split(Regex("\\s+")).filter { it.isNotBlank() }
-                artists.sortedByDescending { artist ->
-                    val name = artist.name.trim().lowercase()
-                    var score = 0
-    
-                    if (name == q) score += 1000
-                    else if (name.startsWith(q)) score += 700
-                    else if (name.contains(" $q")) score += 500
-                    else if (name.contains(q)) score += 300
-    
-                    for (w in words) {
-                        if (name.startsWith(w)) score += 80
-                        else if (name.contains(w)) score += 40
+        fun refreshArtist() {
+            val current = _selectedArtist.value ?: return
+            viewModelScope.launch {
+                _isArtistLoading.value = true
+                val saavnId = if (current.id.all { it.isDigit() }) current.id else null
+                val fullDetails = musicMetadataRepository.getArtistDetails(
+                    artistName = current.name,
+                    imageUrl = current.imageUrl,
+                    artistId = saavnId,
+                    forceRefresh = true
+                )
+                if (fullDetails != null) {
+                    _selectedArtist.value = fullDetails
+                }
+                _isArtistLoading.value = false
+            }
+        }
+
+        private fun cleanForArtistMatch(name: String): String {
+            return name.trim().lowercase()
+                .replace(Regex("^(the|a|an)\\s+"), "")
+                .replace(Regex("[^a-z0-9]"), "")
+        }
+
+        private fun mergeArtists(primary: List<SieloArtist>, secondary: List<SieloArtist>): List<SieloArtist> {
+            val result = mutableListOf<SieloArtist>()
+            result.addAll(primary)
+            for (sec in secondary) {
+                val secClean = cleanForArtistMatch(sec.name)
+                val existing = result.find { cleanForArtistMatch(it.name) == secClean }
+                if (existing == null) {
+                    if (primary.isEmpty() || !sec.imageUrl.isNullOrBlank()) {
+                        result.add(sec)
                     }
-    
-                    if (!artist.imageUrl.isNullOrBlank()) {
-                        score += 100
+                } else {
+                    val existingHasYtImage = existing.imageUrl?.let {
+                        it.contains("googleusercontent.com") || it.contains("ggpht.com") || it.contains("ytimg.com")
+                    } == true
+                    val secHasVerifiedImage = sec.imageUrl?.let {
+                        it.contains("wikimedia.org") || it.contains("wikipedia.org") || it.contains("saavncdn.com") || it.contains("dzcdn.net")
+                    } == true
+                    if (existing.imageUrl.isNullOrBlank() || (existingHasYtImage && secHasVerifiedImage)) {
+                        val idx = result.indexOf(existing)
+                        result[idx] = existing.copy(imageUrl = sec.imageUrl)
                     }
-                    score
                 }
             }
-    
+            return result
+        }
+
+        private fun rankArtists(artists: List<SieloArtist>, query: String): List<SieloArtist> {
+            val q = query.trim().lowercase()
+            if (q.isBlank()) return emptyList()
+            val qClean = cleanForArtistMatch(q)
+            val words = q.split(Regex("\\s+")).filter { it.isNotBlank() }
+
+            val scored = artists.mapIndexed { index, artist ->
+                val name = artist.name.trim().lowercase()
+                val aClean = cleanForArtistMatch(name)
+                var score = 0
+
+                // 1. Exact match (handles "The Weeknd" for "weeknd", "sombr" for "sombr", "Arijit Singh" for "arijit singh")
+                if (aClean == qClean || name == q) {
+                    score += 100000
+                }
+                // 2. Starts with query (e.g. "Arijit Singh" for "arijit")
+                else if (aClean.startsWith(qClean) || name.startsWith(q)) {
+                    val lenDiff = (aClean.length - qClean.length).coerceAtLeast(0)
+                    score += 50000 - minOf(lenDiff * 100, 10000)
+                }
+                // 3. Distinct word contains
+                else if (name.contains(" $q") || name.contains(" $q ")) {
+                    score += 25000
+                }
+                // 4. Substring contains
+                else if (name.contains(q) || aClean.contains(qClean)) {
+                    score += 15000
+                }
+                else {
+                    // Artists who worked with the searched artist (collaborators returned by YouTube)
+                    // Retain their prominence ordering directly
+                    score += (artists.size - index) * 100
+                }
+
+                // Token match bonus
+                for (w in words) {
+                    if (w.length > 1) {
+                        if (name.startsWith(w) || aClean.startsWith(w)) score += 500
+                        else if (name.contains(w)) score += 200
+                    }
+                }
+
+                // Severe penalty for spam / noise in artist name
+                val spamNoise = listOf(" bar", " party", " stanna", " fan", " cover", " tribute", " remix", " mix", "ai studio")
+                if (spamNoise.any { name.contains(it) }) {
+                    score -= 50000
+                }
+
+                artist to score
+            }
+
+            // Exclude negative scores
+            val valid = scored.filter { it.second > 0 }.sortedByDescending { it.second }.map { it.first }
+
+            // Deduplicate by clean name to ensure no duplicate or spoof accounts
+            val distinctArtists = mutableListOf<SieloArtist>()
+            val seenClean = mutableSetOf<String>()
+            for (a in valid) {
+                val clean = cleanForArtistMatch(a.name)
+                if (clean.isNotBlank() && !seenClean.contains(clean)) {
+                    seenClean.add(clean)
+                    distinctArtists.add(a)
+                }
+            }
+
             // Ensure no two artists share the same profile picture
             val seenImages = mutableSetOf<String>()
-            return sorted.map { artist ->
+            return distinctArtists.map { artist ->
                 if (!artist.imageUrl.isNullOrBlank() && !seenImages.contains(artist.imageUrl)) {
                     seenImages.add(artist.imageUrl!!)
                     artist
@@ -349,9 +471,15 @@
                 }
             }
         }
-    
+
+        private val artistHistoryStack = ArrayDeque<ArtistDetails>()
+
         fun openArtist(artist: SieloArtist) {
             saveSearchQuery(artist.name)
+            val current = _selectedArtist.value
+            if (current != null && !current.name.equals(artist.name, ignoreCase = true)) {
+                artistHistoryStack.addLast(current)
+            }
             viewModelScope.launch {
                 _isArtistLoading.value = true
                 _selectedArtist.value = ArtistDetails(
@@ -378,8 +506,14 @@
     
         fun toggleFollowArtist(artistName: String): Boolean = userManager.toggleFollowArtist(artistName)
     
-        fun closeArtist() {
-            _selectedArtist.value = null
+        fun closeArtist(): Boolean {
+            if (artistHistoryStack.isNotEmpty()) {
+                _selectedArtist.value = artistHistoryStack.removeLast()
+                return true
+            } else {
+                _selectedArtist.value = null
+                return false
+            }
         }
     
         suspend fun getAlbumSongs(album: com.sielo.music.core.network.models.SieloAlbum): List<SieloTrack> {

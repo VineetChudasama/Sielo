@@ -136,6 +136,141 @@ fun rememberArtworkDominantColor(
 }
 
 /**
+ * Top 2 colors extracted from the album artwork for left-to-right gradient cards.
+ */
+data class AlbumGradientColors(
+    val startColor: Color,
+    val endColor: Color
+)
+
+object AlbumGradientCache {
+    private val cache = ConcurrentHashMap<String, AlbumGradientColors>()
+
+    fun get(key: String): AlbumGradientColors? = cache[key]
+    fun put(key: String, colors: AlbumGradientColors) {
+        cache[key] = colors
+    }
+}
+
+fun extractTop2Colors(bitmap: Bitmap): AlbumGradientColors {
+    val palette = try {
+        Palette.from(bitmap).maximumColorCount(16).generate()
+    } catch (_: Exception) {
+        null
+    }
+
+    val swatches = palette?.swatches?.sortedByDescending { it.population } ?: emptyList()
+    val firstSwatch = swatches.firstOrNull() ?: palette?.dominantSwatch
+
+    val secondSwatch = swatches.firstOrNull { swatch ->
+        if (firstSwatch == null) false else {
+            val rDiff = android.graphics.Color.red(firstSwatch.rgb) - android.graphics.Color.red(swatch.rgb)
+            val gDiff = android.graphics.Color.green(firstSwatch.rgb) - android.graphics.Color.green(swatch.rgb)
+            val bDiff = android.graphics.Color.blue(firstSwatch.rgb) - android.graphics.Color.blue(swatch.rgb)
+            val dist = kotlin.math.sqrt((rDiff * rDiff + gDiff * gDiff + bDiff * bDiff).toDouble())
+            dist > 35.0
+        }
+    } ?: palette?.vibrantSwatch?.takeIf { it != firstSwatch }
+      ?: palette?.mutedSwatch?.takeIf { it != firstSwatch }
+      ?: palette?.darkVibrantSwatch?.takeIf { it != firstSwatch }
+      ?: palette?.lightVibrantSwatch?.takeIf { it != firstSwatch }
+
+    val rawColor1 = firstSwatch?.rgb ?: android.graphics.Color.DKGRAY
+    val rawColor2 = secondSwatch?.rgb ?: deriveSecondaryRgb(rawColor1)
+
+    return AlbumGradientColors(
+        startColor = tuneColorForCard(rawColor1, isStart = true),
+        endColor = tuneColorForCard(rawColor2, isStart = false)
+    )
+}
+
+fun deriveSecondaryRgb(rgb: Int): Int {
+    val hsv = FloatArray(3)
+    android.graphics.Color.colorToHSV(rgb, hsv)
+    hsv[0] = (hsv[0] + 30f) % 360f
+    hsv[1] = (hsv[1] * 0.85f).coerceIn(0.25f, 1.0f)
+    hsv[2] = (hsv[2] * 0.70f).coerceIn(0.12f, 0.40f)
+    return android.graphics.Color.HSVToColor(hsv)
+}
+
+fun tuneColorForCard(rgb: Int, isStart: Boolean): Color {
+    val hsv = FloatArray(3)
+    android.graphics.Color.colorToHSV(rgb, hsv)
+    if (hsv[1] > 0.08f) {
+        hsv[1] = hsv[1].coerceIn(0.40f, 0.95f)
+        hsv[2] = if (isStart) hsv[2].coerceIn(0.24f, 0.38f) else hsv[2].coerceIn(0.13f, 0.22f)
+    } else {
+        hsv[2] = if (isStart) 0.22f else 0.12f
+    }
+    return Color(android.graphics.Color.HSVToColor(hsv))
+}
+
+fun getFallbackGradient(title: String, artist: String): AlbumGradientColors {
+    val hash = kotlin.math.abs((title + artist).hashCode())
+    val hue1 = (hash % 360).toFloat()
+    val hue2 = ((hue1 + 35f + (hash % 40)) % 360)
+    val c1 = Color(android.graphics.Color.HSVToColor(floatArrayOf(hue1, 0.65f, 0.28f)))
+    val c2 = Color(android.graphics.Color.HSVToColor(floatArrayOf(hue2, 0.70f, 0.15f)))
+    return AlbumGradientColors(c1, c2)
+}
+
+@Composable
+fun rememberAlbumTopColors(
+    artworkUrl: String?,
+    title: String,
+    artist: String
+): State<AlbumGradientColors> {
+    val context = LocalContext.current
+    val cacheKey = remember(artworkUrl, title, artist) {
+        "top2-${artworkUrl ?: ""}-$title-$artist"
+    }
+
+    val fallback = remember(title, artist) {
+        AlbumGradientCache.get(cacheKey) ?: getFallbackGradient(title, artist)
+    }
+
+    val state = remember(cacheKey) {
+        mutableStateOf(fallback)
+    }
+
+    val effectiveUrl = artworkUrl?.trim()?.takeIf { it.isNotBlank() }
+
+    LaunchedEffect(cacheKey) {
+        val cached = AlbumGradientCache.get(cacheKey)
+        if (cached != null) {
+            state.value = cached
+            return@LaunchedEffect
+        }
+
+        if (!effectiveUrl.isNullOrBlank()) {
+            withContext(Dispatchers.IO) {
+                try {
+                    val request = ImageRequest.Builder(context)
+                        .data(effectiveUrl)
+                        .allowHardware(false)
+                        .memoryCachePolicy(CachePolicy.ENABLED)
+                        .diskCachePolicy(CachePolicy.ENABLED)
+                        .networkCachePolicy(CachePolicy.ENABLED)
+                        .size(120, 120)
+                        .build()
+                    val result = context.imageLoader.execute(request)
+                    if (result is coil.request.SuccessResult) {
+                        val bitmap = result.drawable.toBitmap(120, 120)
+                        val extracted = extractTop2Colors(bitmap)
+                        AlbumGradientCache.put(cacheKey, extracted)
+                        withContext(Dispatchers.Main) {
+                            state.value = extracted
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    return state
+}
+
+/**
  * Universal Album Art Resolver for Sielo Music.
  * Fast inline fallback if a remote URL is already valid.
  */

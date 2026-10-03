@@ -144,10 +144,7 @@ fun ProfileScreen(
     val sonicArchetype by viewModel.sonicArchetype.collectAsState()
     val onHeavyRepeatSongs by viewModel.onHeavyRepeatSongs.collectAsState()
 
-    // System Back Gesture handling if Artist profile is open
-    BackHandler(enabled = selectedArtist != null) {
-        viewModel.closeArtist()
-    }
+    // ArtistProfileScreen handles its own back gestures cleanly when open
 
     if (selectedArtist != null) {
         val artist = selectedArtist!!
@@ -165,6 +162,7 @@ fun ProfileScreen(
             currentTrackId = playbackState.currentTrack?.id,
             isPlaying = playbackState.isPlaying,
             onLoadAlbumTracks = { album -> viewModel.getAlbumSongs(album) },
+            onRefresh = { viewModel.refreshArtist() },
             modifier = modifier
         )
         return

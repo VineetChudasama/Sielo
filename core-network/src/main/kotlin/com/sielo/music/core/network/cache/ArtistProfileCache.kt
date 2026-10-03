@@ -18,6 +18,10 @@ class ArtistProfileCache @Inject constructor() {
         cache[normalize(artistName)] = details
     }
 
+    fun remove(artistName: String) {
+        cache.remove(normalize(artistName))
+    }
+
     fun clear() {
         cache.clear()
     }

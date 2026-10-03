@@ -49,13 +49,21 @@ object ArtistMetadataResolver {
         val cacheKey = cleanName.lowercase()
         bioCache[cacheKey]?.let { return@withContext it }
 
+        fun isValidArtistSummary(extract: String?, desc: String?, type: String?): Boolean {
+            if (extract.isNullOrBlank() || extract.length < 35) return false
+            if (type.equals("disambiguation", ignoreCase = true)) return false
+            val lowerDesc = desc?.lowercase().orEmpty()
+            if (lowerDesc.contains("disambiguation") || lowerDesc.contains("name list") || lowerDesc.contains("given name")) return false
+            return true
+        }
+
         try {
             // 1. Direct Wikipedia REST summary
             val encodedName = URLEncoder.encode(cleanName.replace(" ", "_"), "UTF-8")
             val summaryUrl = "https://en.wikipedia.org/api/rest_v1/page/summary/$encodedName"
             val request = Request.Builder()
                 .url(summaryUrl)
-                .addHeader("User-Agent", "SieloMusicApp/9.0.4 (https://github.com/sielo; support@sielo.app)")
+                .addHeader("User-Agent", "SieloMusicApp/10.1.2 (https://github.com/sielo; support@sielo.app)")
                 .build()
 
             val response = client.newCall(request).execute()
@@ -63,13 +71,14 @@ object ArtistMetadataResolver {
                 val bodyStr = response.body?.string()
                 if (!bodyStr.isNullOrBlank()) {
                     val root = json.parseToJsonElement(bodyStr).jsonObject
+                    val type = root["type"]?.jsonPrimitive?.content
                     val extract = root["extract"]?.jsonPrimitive?.content
                     val desc = root["description"]?.jsonPrimitive?.content
                     val wikiPageUrl = root["content_urls"]?.jsonObject?.get("desktop")?.jsonObject?.get("page")?.jsonPrimitive?.content
                     val thumbUrl = root["originalimage"]?.jsonObject?.get("source")?.jsonPrimitive?.content
                         ?: root["thumbnail"]?.jsonObject?.get("source")?.jsonPrimitive?.content
 
-                    if (!extract.isNullOrBlank() && extract.length > 50) {
+                    if (isValidArtistSummary(extract, desc, type) && !thumbUrl.isNullOrBlank()) {
                         val result = VerifiedArtistBio(
                             bio = extract,
                             description = desc,
@@ -82,34 +91,83 @@ object ArtistMetadataResolver {
                 }
             }
 
-            // 2. Wikipedia Search Fallback
-            val searchUrl = "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${URLEncoder.encode(cleanName + " musician singer", "UTF-8")}&format=json"
-            val searchReq = Request.Builder().url(searchUrl).addHeader("User-Agent", "SieloMusicApp/9.0.4").build()
+            // 2. Direct lookup for (singer), (musician), (band)
+            val candidateTitles = listOf("${cleanName}_(singer)", "${cleanName}_(musician)", "${cleanName}_(band)")
+            for (cand in candidateTitles) {
+                val encCand = URLEncoder.encode(cand.replace(" ", "_"), "UTF-8")
+                val candReq = Request.Builder()
+                    .url("https://en.wikipedia.org/api/rest_v1/page/summary/$encCand")
+                    .addHeader("User-Agent", "SieloMusicApp/10.1.2")
+                    .build()
+                val candResp = client.newCall(candReq).execute()
+                if (candResp.isSuccessful) {
+                    val b = candResp.body?.string()
+                    if (!b.isNullOrBlank()) {
+                        val r = json.parseToJsonElement(b).jsonObject
+                        val type = r["type"]?.jsonPrimitive?.content
+                        val extract = r["extract"]?.jsonPrimitive?.content
+                        val desc = r["description"]?.jsonPrimitive?.content
+                        val wikiPageUrl = r["content_urls"]?.jsonObject?.get("desktop")?.jsonObject?.get("page")?.jsonPrimitive?.content
+                        val thumbUrl = r["originalimage"]?.jsonObject?.get("source")?.jsonPrimitive?.content
+                            ?: r["thumbnail"]?.jsonObject?.get("source")?.jsonPrimitive?.content
+
+                        if (isValidArtistSummary(extract, desc, type)) {
+                            val result = VerifiedArtistBio(
+                                bio = extract,
+                                description = desc,
+                                wikiUrl = wikiPageUrl,
+                                photoUrl = thumbUrl
+                            )
+                            bioCache[cacheKey] = result
+                            return@withContext result
+                        }
+                    }
+                }
+            }
+
+            // 3. Wikipedia Search Fallback
+            val searchUrl = "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${URLEncoder.encode("$cleanName singer musician", "UTF-8")}&format=json"
+            val searchReq = Request.Builder().url(searchUrl).addHeader("User-Agent", "SieloMusicApp/10.1.2").build()
             val searchResp = client.newCall(searchReq).execute()
             if (searchResp.isSuccessful) {
                 val sBody = searchResp.body?.string()
                 if (!sBody.isNullOrBlank()) {
                     val sRoot = json.parseToJsonElement(sBody).jsonObject
                     val searchItems = sRoot["query"]?.jsonObject?.get("search")?.jsonArray
-                    val firstTitle = searchItems?.getOrNull(0)?.jsonObject?.get("title")?.jsonPrimitive?.content
-                    if (!firstTitle.isNullOrBlank()) {
-                        val encFirst = URLEncoder.encode(firstTitle.replace(" ", "_"), "UTF-8")
-                        val fallbackSummaryReq = Request.Builder()
+                    for (item in searchItems.orEmpty().take(3)) {
+                        val title = item.jsonObject["title"]?.jsonPrimitive?.content ?: continue
+                        val cleanTarget = cleanName.lowercase().trim()
+                        val searchTokens = cleanTarget.split(Regex("[^a-z0-9]+")).filter { it.length >= 2 }
+                        val titleClean = title.substringBefore("(").trim().lowercase()
+                        val titleTokens = titleClean.split(Regex("[^a-z0-9]+")).filter { it.length >= 2 }
+
+                        // Prevent completely unrelated artists from matching (e.g. Kishore Kumar matching Mukesh Kumar)
+                        val matchesClean = titleClean == cleanTarget
+                        val hasFirstTokenMatch = searchTokens.isNotEmpty() && titleTokens.isNotEmpty() && searchTokens.first() == titleTokens.first()
+                        val containsAllTokens = searchTokens.isNotEmpty() && searchTokens.all { titleClean.contains(it) }
+
+                        if (!matchesClean && !hasFirstTokenMatch && !containsAllTokens) {
+                            continue
+                        }
+
+                        val encFirst = URLEncoder.encode(title.replace(" ", "_"), "UTF-8")
+                        val fallbackReq = Request.Builder()
                             .url("https://en.wikipedia.org/api/rest_v1/page/summary/$encFirst")
-                            .addHeader("User-Agent", "SieloMusicApp/9.0.4")
+                            .addHeader("User-Agent", "SieloMusicApp/10.1.2")
                             .build()
-                        val fbResp = client.newCall(fallbackSummaryReq).execute()
+                        val fbResp = client.newCall(fallbackReq).execute()
                         if (fbResp.isSuccessful) {
                             val fbBody = fbResp.body?.string()
                             if (!fbBody.isNullOrBlank()) {
                                 val fbRoot = json.parseToJsonElement(fbBody).jsonObject
+                                val type = fbRoot["type"]?.jsonPrimitive?.content
                                 val extract = fbRoot["extract"]?.jsonPrimitive?.content
                                 val desc = fbRoot["description"]?.jsonPrimitive?.content
                                 val wikiPageUrl = fbRoot["content_urls"]?.jsonObject?.get("desktop")?.jsonObject?.get("page")?.jsonPrimitive?.content
                                 val thumbUrl = fbRoot["originalimage"]?.jsonObject?.get("source")?.jsonPrimitive?.content
                                     ?: fbRoot["thumbnail"]?.jsonObject?.get("source")?.jsonPrimitive?.content
 
-                                if (!extract.isNullOrBlank() && extract.length > 50) {
+                                if (isValidArtistSummary(extract, desc, type)) {
                                     val result = VerifiedArtistBio(
                                         bio = extract,
                                         description = desc,
@@ -351,7 +409,15 @@ object ArtistMetadataResolver {
         val cacheKey = cleanName.lowercase()
         photoCache[cacheKey]?.let { return@withContext it }
 
-        // 1. Deezer high-res artist photo (1000x1000)
+        // 1. Wikipedia verified high-res portrait
+        fetchWikipediaBio(cleanName)?.photoUrl?.let {
+            if (it.isNotBlank()) {
+                photoCache[cacheKey] = it
+                return@withContext it
+            }
+        }
+
+        // 2. Deezer high-res artist photo fallback (1000x1000)
         try {
             val encodedQuery = URLEncoder.encode(cleanName, "UTF-8")
             val deezerSearchUrl = "https://api.deezer.com/search/artist?q=$encodedQuery"
@@ -364,7 +430,7 @@ object ArtistMetadataResolver {
                     val dzResults = dzRoot["data"]?.jsonArray
                     val firstArtist = dzResults?.firstOrNull()?.jsonObject
                     val artistNameFromDz = firstArtist?.get("name")?.jsonPrimitive?.content ?: ""
-                    if (TrackMatchValidator.isFuzzyMatch(cleanName, artistNameFromDz)) {
+                    if (TrackMatchValidator.isStrictArtistMatch(artistNameFromDz, cleanName)) {
                         val pic = firstArtist?.get("picture_xl")?.jsonPrimitive?.content
                             ?: firstArtist?.get("picture_big")?.jsonPrimitive?.content
                         if (!pic.isNullOrBlank() && !pic.contains("default-artist") && !pic.contains("default")) {
@@ -375,14 +441,6 @@ object ArtistMetadataResolver {
                 }
             }
         } catch (_: Exception) {}
-
-        // 2. Wikipedia high-res thumbnail
-        fetchWikipediaBio(cleanName)?.photoUrl?.let {
-            if (it.isNotBlank()) {
-                photoCache[cacheKey] = it
-                return@withContext it
-            }
-        }
 
         null
     }

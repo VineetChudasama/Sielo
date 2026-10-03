@@ -45,7 +45,15 @@ data class MbArtist(
     val score: Int? = null,
     val country: String? = null,
     val disambiguation: String? = null,
-    val tags: List<MbTag> = emptyList()
+    val tags: List<MbTag> = emptyList(),
+    @SerialName("life-span") val lifeSpan: MbLifeSpan? = null
+)
+
+@Serializable
+data class MbLifeSpan(
+    val ended: Boolean = false,
+    val begin: String? = null,
+    val end: String? = null
 )
 
 @Serializable

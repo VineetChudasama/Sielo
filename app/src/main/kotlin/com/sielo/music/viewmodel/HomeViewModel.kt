@@ -507,12 +507,18 @@ class HomeViewModel @Inject constructor(
         _genreTracks.value = emptyList()
     }
 
+    private val artistHistoryStack = ArrayDeque<com.sielo.music.core.network.models.ArtistDetails>()
+
     fun openArtist(artist: SieloArtist) {
         val saavnId = if (artist.id.all { it.isDigit() }) artist.id else null
         openArtist(artist.name, artist.imageUrl, saavnId)
     }
 
     fun openArtist(artistName: String, imageUrl: String? = null, artistId: String? = null) {
+        val current = _selectedArtist.value
+        if (current != null && !current.name.equals(artistName, ignoreCase = true)) {
+            artistHistoryStack.addLast(current)
+        }
         viewModelScope.launch {
             _isArtistLoading.value = true
             _selectedArtist.value = com.sielo.music.core.network.models.ArtistDetails(
@@ -534,8 +540,32 @@ class HomeViewModel @Inject constructor(
 
     fun toggleFollowArtist(artistName: String): Boolean = userManager.toggleFollowArtist(artistName)
 
-    fun closeArtist() {
-        _selectedArtist.value = null
+    fun refreshArtist() {
+        val current = _selectedArtist.value ?: return
+        viewModelScope.launch {
+            _isArtistLoading.value = true
+            val saavnId = if (current.id.all { it.isDigit() }) current.id else null
+            val full = musicMetadataRepository.getArtistDetails(
+                artistName = current.name,
+                imageUrl = current.imageUrl,
+                artistId = saavnId,
+                forceRefresh = true
+            )
+            if (full != null) {
+                _selectedArtist.value = full
+            }
+            _isArtistLoading.value = false
+        }
+    }
+
+    fun closeArtist(): Boolean {
+        if (artistHistoryStack.isNotEmpty()) {
+            _selectedArtist.value = artistHistoryStack.removeLast()
+            return true
+        } else {
+            _selectedArtist.value = null
+            return false
+        }
     }
 
     suspend fun getAlbumSongs(album: com.sielo.music.core.network.models.SieloAlbum): List<SieloTrack> {

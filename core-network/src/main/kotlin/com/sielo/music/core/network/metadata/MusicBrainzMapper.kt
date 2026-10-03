@@ -72,7 +72,8 @@ object MusicBrainzMapper {
         coverUrls: CoverArtUrls? = null,
         fallbackArtistName: String? = null,
         fallbackArtworkUrl: String? = null,
-        tracks: List<SieloTrack> = emptyList()
+        tracks: List<SieloTrack> = emptyList(),
+        explicitTrackCount: Int? = null
     ): SieloAlbum {
         val category = categorizeReleaseGroup(rg)
         val artistDisplay = formatArtistCredit(rg.artistCredit, fallbackArtistName ?: "Various Artists")
@@ -88,12 +89,11 @@ object MusicBrainzMapper {
         }
 
         val artwork = coverUrls?.medium ?: coverUrls?.large ?: coverUrls?.thumbnail ?: fallbackArtworkUrl
-        val defaultCount = when (category) {
-            ReleaseType.SINGLE -> 1
-            ReleaseType.EP -> 4
-            ReleaseType.ALBUM -> 10
-            ReleaseType.SOUNDTRACK -> 8
-            else -> 1
+        val calculatedCount = when {
+            tracks.isNotEmpty() -> tracks.size
+            explicitTrackCount != null && explicitTrackCount > 0 -> explicitTrackCount
+            category == ReleaseType.SINGLE -> 1
+            else -> 0
         }
 
         return SieloAlbum(
@@ -103,7 +103,7 @@ object MusicBrainzMapper {
             year = yearStr,
             thumbnailUrl = artwork,
             tracks = tracks,
-            songCount = if (tracks.isNotEmpty()) tracks.size else defaultCount,
+            songCount = calculatedCount,
             type = typeString,
             releaseDate = rg.firstReleaseDate,
             musicBrainzId = rg.id,

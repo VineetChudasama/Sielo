@@ -39,7 +39,7 @@ class MusicBrainzClient @Inject constructor() {
     companion object {
         private const val TAG = "MusicBrainz"
         private const val BASE_URL = "https://musicbrainz.org/ws/2"
-        private const val USER_AGENT = "Sielo/10.0.8 ( https://github.com/sielo/music ; contact@sielo.app )"
+        private const val USER_AGENT = "Sielo/10.1.6 ( https://github.com/sielo/music ; contact@sielo.app )"
     }
 
     private suspend fun throttle() {
@@ -155,7 +155,7 @@ class MusicBrainzClient @Inject constructor() {
         val pageSize = 100
 
         while (offset < maxLimit) {
-            val url = "$BASE_URL/release-group?artist=$artistMbid&limit=$pageSize&offset=$offset&fmt=json"
+            val url = "$BASE_URL/release-group?artist=$artistMbid&inc=artist-credits&limit=$pageSize&offset=$offset&fmt=json"
             val body = executeGet(url) ?: break
 
             try {
@@ -186,7 +186,7 @@ class MusicBrainzClient @Inject constructor() {
     suspend fun getArtistReleases(artistMbid: String, limit: Int = 100): List<MbRelease> = withContext(Dispatchers.IO) {
         if (artistMbid.isBlank()) return@withContext emptyList()
 
-        val url = "$BASE_URL/release?artist=$artistMbid&inc=release-groups+artist-credits&limit=$limit&fmt=json"
+        val url = "$BASE_URL/release?artist=$artistMbid&inc=release-groups+artist-credits+media+recordings&limit=$limit&fmt=json"
         val body = executeGet(url) ?: return@withContext emptyList()
 
         try {

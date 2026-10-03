@@ -18,16 +18,37 @@ import android.graphics.Typeface
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.foundation.layout.fillMaxHeight
+import com.sielo.music.ui.components.rememberAlbumTopColors
+import com.sielo.music.ui.components.extractTop2Colors
+import com.sielo.music.ui.components.AlbumGradientCache
+import androidx.core.graphics.drawable.toBitmap
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -150,6 +171,7 @@ enum class ArtistProfileTab(val label: String) {
  * Sielo Universal Artist Profile Screen.
  * Highly polished, cinematic, mobile-first profile dynamically rendering for EVERY artist.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ArtistProfileScreen(
     artist: ArtistDetails,
@@ -165,18 +187,63 @@ fun ArtistProfileScreen(
     currentTrackId: String? = null,
     isPlaying: Boolean = false,
     onLoadAlbumTracks: suspend (SieloAlbum) -> List<SieloTrack> = { it.tracks },
+    onRefresh: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     // Album detail view state: when an album is tapped, open and list its songs
     var viewingAlbum by remember { mutableStateOf<SieloAlbum?>(null) }
+    var selectedTab by remember(artist.id) { mutableStateOf(ArtistProfileTab.MUSIC) }
+    var isFollowingState by remember(isFollowed, artist.name) { mutableStateOf(isFollowed) }
+    var showMoreDropdown by remember { mutableStateOf(false) }
+    var showShareSheet by remember { mutableStateOf(false) }
+    var isGeneratingCard by remember { mutableStateOf(false) }
+    var selectedSongActionsTrack by remember { mutableStateOf<SieloTrack?>(null) }
+    var isPopularExpanded by remember { mutableStateOf(false) }
 
-    // Intercept back gesture: if viewing an album, return to the artist profile
-    BackHandler {
-        if (viewingAlbum != null) {
-            viewingAlbum = null
-        } else {
-            onBack()
+    val handleBackNavigation: () -> Unit = {
+        when {
+            selectedSongActionsTrack != null -> selectedSongActionsTrack = null
+            showShareSheet -> showShareSheet = false
+            showMoreDropdown -> showMoreDropdown = false
+            viewingAlbum != null -> viewingAlbum = null
+            selectedTab != ArtistProfileTab.MUSIC -> selectedTab = ArtistProfileTab.MUSIC
+            else -> onBack()
         }
+    }
+
+    // Intercept back gesture cleanly (hardware back, system gesture, back navigation)
+    BackHandler(onBack = handleBackNavigation)
+
+    // Edge swipe navigation handling (smooth gesture dismiss on edge horizontal drag)
+    val density = LocalDensity.current
+    val edgeThresholdPx = remember(density) { with(density) { 70.dp.toPx() } }
+    val edgeStartWidthPx = remember(density) { with(density) { 48.dp.toPx() } }
+    var edgeSwipeDragAmount by remember { mutableFloatStateOf(0f) }
+
+    val edgeSwipeModifier = Modifier.pointerInput(artist.id, viewingAlbum, selectedTab) {
+        detectHorizontalDragGestures(
+            onDragStart = { offset ->
+                if (offset.x <= edgeStartWidthPx) {
+                    edgeSwipeDragAmount = 0f
+                } else {
+                    edgeSwipeDragAmount = -1f
+                }
+            },
+            onHorizontalDrag = { _, dragAmount ->
+                if (edgeSwipeDragAmount >= 0f) {
+                    edgeSwipeDragAmount += dragAmount
+                }
+            },
+            onDragEnd = {
+                if (edgeSwipeDragAmount >= edgeThresholdPx) {
+                    handleBackNavigation()
+                }
+                edgeSwipeDragAmount = 0f
+            },
+            onDragCancel = {
+                edgeSwipeDragAmount = 0f
+            }
+        )
     }
 
     // Render Album Detail View if an album is tapped
@@ -216,13 +283,6 @@ fun ArtistProfileScreen(
         derivedStateOf { headerAlpha > 0.65f }
     }
 
-    var selectedTab by remember(artist.id) { mutableStateOf(ArtistProfileTab.MUSIC) }
-    var isFollowingState by remember(isFollowed, artist.name) { mutableStateOf(isFollowed) }
-    var showMoreDropdown by remember { mutableStateOf(false) }
-    var showShareSheet by remember { mutableStateOf(false) }
-    var isGeneratingCard by remember { mutableStateOf(false) }
-    var selectedSongActionsTrack by remember { mutableStateOf<SieloTrack?>(null) }
-    var isPopularExpanded by remember { mutableStateOf(false) }
     val songActionsVm: SongActionsViewModel = hiltViewModel()
     val favoriteEntities by songActionsVm.favorites.collectAsState(initial = emptyList())
     val favoriteIds = remember(favoriteEntities) { favoriteEntities.map { it.id }.toSet() }
@@ -244,7 +304,7 @@ fun ArtistProfileScreen(
 
     val singlesAndEPs = remember(artist) {
         val list = if (artist.musicBrainzId != null) {
-            artist.singles + artist.pastAlbums.filter { it.type.equals("EP", ignoreCase = true) }
+            artist.singles
         } else {
             (artist.singles + (artist.originalAlbums + artist.pastAlbums).filter { it.type.equals("Single", ignoreCase = true) || it.type.equals("EP", ignoreCase = true) || it.songCount == 1 || (it.tracks.size == 1 && it.songCount <= 1) })
                 .filter { TrackMatchValidator.isAlbumMadeByArtist(it.title, it.artist, artist.name) }
@@ -272,19 +332,91 @@ fun ArtistProfileScreen(
         allReleases.take(2)
     }
 
+    @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+    val pullState = rememberPullToRefreshState()
+    var isPullRefreshing by remember { mutableStateOf(false) }
+
+    val infiniteTransition = rememberInfiniteTransition(label = "artist_refresh_spin")
+    val spinRotation by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(800, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "spin"
+    )
+
     Box(
         modifier = modifier
             .fillMaxSize()
+            .then(edgeSwipeModifier)
             .background(PaletteDarkNavy)
     ) {
-        if (isLoading) {
+        if (isLoading && !isPullRefreshing) {
             ArtistProfileSkeleton(onBack = onBack)
         } else {
-            LazyColumn(
-                state = listState,
+            PullToRefreshBox(
+                isRefreshing = isPullRefreshing || isLoading,
+                onRefresh = {
+                    if (onRefresh != null) {
+                        isPullRefreshing = true
+                        coroutineScope.launch {
+                            try {
+                                onRefresh()
+                            } finally {
+                                isPullRefreshing = false
+                            }
+                        }
+                    }
+                },
+                state = pullState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = 210.dp)
+                indicator = {
+                    val progress = pullState.distanceFraction.coerceIn(0f, 1.5f)
+                    if (progress > 0.02f || isPullRefreshing || isLoading) {
+                        val isTriggerReached = progress >= 1f || isPullRefreshing || isLoading
+                        val glowAlpha by animateFloatAsState(
+                            targetValue = if (isTriggerReached) 0.65f else (progress * 0.35f).coerceIn(0f, 0.35f),
+                            animationSpec = tween(durationMillis = 200),
+                            label = "glowAlpha"
+                        )
+                        val glowScale by animateFloatAsState(
+                            targetValue = if (isTriggerReached) 1.15f else 0.9f,
+                            animationSpec = tween(durationMillis = 200),
+                            label = "glowScale"
+                        )
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .padding(top = 16.dp)
+                                .size(56.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size((36 * glowScale).dp)
+                                    .clip(CircleShape)
+                                    .background(PaletteOxfordBlue.copy(alpha = glowAlpha))
+                                    .border(1.dp, PaletteSageGreen.copy(alpha = (glowAlpha * 0.8f).coerceIn(0.15f, 0.7f)), CircleShape)
+                            )
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "Refreshing",
+                                tint = PaletteSageGreen,
+                                modifier = Modifier
+                                    .size(20.dp)
+                                    .rotate(if (isPullRefreshing || isLoading) spinRotation else progress * 180f)
+                            )
+                        }
+                    }
+                }
             ) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(bottom = 210.dp)
+                ) {
                 // 1. CINEMATIC HERO SECTION
                 item {
                     ArtistHeroHeader(
@@ -438,7 +570,7 @@ fun ArtistProfileScreen(
                         // C. Studio Albums Section (Carousel with "See all >")
                         if (studioAlbums.isNotEmpty()) {
                             item {
-                                Spacer(modifier = Modifier.height(22.dp))
+                                Spacer(modifier = Modifier.height(24.dp))
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -474,16 +606,20 @@ fun ArtistProfileScreen(
                                     }
                                 }
 
+                                val screenWidth = LocalConfiguration.current.screenWidthDp.dp
+                                val cardWidth = (screenWidth * 0.82f).coerceIn(285.dp, 340.dp)
+
                                 LazyRow(
                                     contentPadding = PaddingValues(horizontal = 20.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                                     modifier = Modifier.padding(vertical = 8.dp)
                                 ) {
                                     items(studioAlbums) { album ->
-                                        ArtistAlbumCard(
+                                        LargeAlbumCard(
                                             album = album,
                                             artistName = artist.name,
-                                            onOpenAlbum = { viewingAlbum = album }
+                                            onClick = { viewingAlbum = album },
+                                            modifier = Modifier.width(cardWidth)
                                         )
                                     }
                                 }
@@ -493,7 +629,7 @@ fun ArtistProfileScreen(
                         // D. Singles & EPs Section (Carousel with "See all >")
                         if (singlesAndEPs.isNotEmpty()) {
                             item {
-                                Spacer(modifier = Modifier.height(22.dp))
+                                Spacer(modifier = Modifier.height(24.dp))
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -529,16 +665,20 @@ fun ArtistProfileScreen(
                                     }
                                 }
 
+                                val screenWidth = LocalConfiguration.current.screenWidthDp.dp
+                                val cardWidth = (screenWidth * 0.82f).coerceIn(285.dp, 340.dp)
+
                                 LazyRow(
                                     contentPadding = PaddingValues(horizontal = 20.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                                     modifier = Modifier.padding(vertical = 8.dp)
                                 ) {
                                     items(singlesAndEPs) { album ->
-                                        ArtistAlbumCard(
+                                        LargeAlbumCard(
                                             album = album,
                                             artistName = artist.name,
-                                            onOpenAlbum = { viewingAlbum = album }
+                                            onClick = { viewingAlbum = album },
+                                            modifier = Modifier.width(cardWidth)
                                         )
                                     }
                                 }
@@ -548,7 +688,7 @@ fun ArtistProfileScreen(
                         // Soundtracks & Features Section (Carousel with "See all >")
                         if (soundtracks.isNotEmpty()) {
                             item {
-                                Spacer(modifier = Modifier.height(22.dp))
+                                Spacer(modifier = Modifier.height(24.dp))
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -584,16 +724,20 @@ fun ArtistProfileScreen(
                                     }
                                 }
 
+                                val screenWidth = LocalConfiguration.current.screenWidthDp.dp
+                                val cardWidth = (screenWidth * 0.82f).coerceIn(285.dp, 340.dp)
+
                                 LazyRow(
                                     contentPadding = PaddingValues(horizontal = 20.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                                     modifier = Modifier.padding(vertical = 8.dp)
                                 ) {
                                     items(soundtracks) { album ->
-                                        ArtistAlbumCard(
+                                        LargeAlbumCard(
                                             album = album,
                                             artistName = artist.name,
-                                            onOpenAlbum = { viewingAlbum = album }
+                                            onClick = { viewingAlbum = album },
+                                            modifier = Modifier.width(cardWidth)
                                         )
                                     }
                                 }
@@ -696,6 +840,7 @@ fun ArtistProfileScreen(
                         }
                     }
                 }
+            }
             }
 
             // 5. STICKY COLLAPSING TOP BAR
@@ -838,6 +983,14 @@ private fun ArtistHeroHeader(
     Box(
         modifier = Modifier
             .fillMaxWidth()
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        PaletteOxfordBlue,
+                        PaletteDarkNavy
+                    )
+                )
+            )
     ) {
         // High-Resolution Atmospheric Backdrop Image (matches parent size seamlessly)
         if (!heroImg.isNullOrBlank()) {
@@ -1439,10 +1592,15 @@ private fun ArtistLatestReleaseCard(
                 val trackCount = if (album.tracks.isNotEmpty()) album.tracks.size else album.songCount
                 val typeStr = album.type?.takeIf { it.isNotBlank() } ?: "Album"
                 val yearStr = album.year ?: ""
+                val countText = when {
+                    trackCount == 1 -> "1 track"
+                    trackCount > 1 -> "$trackCount tracks"
+                    else -> null
+                }
                 val metaSubtitle = listOfNotNull(
                     typeStr,
                     yearStr.takeIf { it.isNotBlank() },
-                    if (trackCount > 0) "$trackCount ${if (trackCount == 1) "song" else "songs"}" else null
+                    countText
                 ).joinToString(" • ")
 
                 Text(
@@ -1478,8 +1636,279 @@ private fun ArtistLatestReleaseCard(
 }
 
 /**
- * Album Card for horizontal carousel:
- * [Square Artwork] Title and Release Year below.
+ * Large Visual Album Card (Option 5 Album Design):
+ * - Height: 156dp
+ * - Corner radius: 22dp
+ * - Blurred atmospheric artwork backdrop + dark gradient overlay
+ * - Sharp 110dp artwork on left with 14dp rounded corners
+ * - Title (Sora Bold 16.5sp, max 2 lines, ellipsis)
+ * - Metadata ("2025 · 22 tracks · 1h 14m")
+ * - Subtle release pill badge ([ ALBUM ], [ SINGLE ], [ EP ], [ SOUNDTRACK ]) + chevron
+ * - Micro-interaction: scale down on press (0.98)
+ */
+@Composable
+fun LargeAlbumCard(
+    album: SieloAlbum,
+    artistName: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) 0.98f else 1f,
+        animationSpec = tween(durationMillis = 150),
+        label = "largeAlbumCardScale"
+    )
+
+    val year = album.year?.takeIf { it.isNotBlank() }
+        ?: album.releaseDate?.takeIf { it.isNotBlank() }?.let { extractYear(it).takeIf { y -> y > 0 }?.toString() }
+    val trackCount = if (album.tracks.isNotEmpty()) album.tracks.size else album.songCount
+    val trackCountText = when {
+        trackCount == 1 -> "1 track"
+        trackCount > 1 -> "$trackCount tracks"
+        else -> null
+    }
+
+    val totalSecs = album.tracks.sumOf { it.durationSeconds }
+    val durationText = if (totalSecs > 0) {
+        val hours = totalSecs / 3600
+        val mins = (totalSecs % 3600) / 60
+        if (hours > 0) "${hours}h ${mins}m" else "${mins}m"
+    } else null
+
+    val metadataText = listOfNotNull(year, trackCountText, durationText).joinToString(" · ")
+
+    val rawType = album.releaseType?.takeIf { it.isNotBlank() } ?: album.type?.takeIf { it.isNotBlank() }
+    val releaseTypeLabel = when {
+        rawType != null && rawType.contains("soundtrack", ignoreCase = true) -> "SOUNDTRACK"
+        rawType != null && rawType.equals("ep", ignoreCase = true) -> "EP"
+        rawType != null && rawType.equals("single", ignoreCase = true) -> "SINGLE"
+        rawType != null && rawType.contains("live", ignoreCase = true) -> "LIVE ALBUM"
+        rawType != null -> rawType.uppercase()
+        trackCount == 1 -> "SINGLE"
+        else -> "ALBUM"
+    }
+
+    val topColorsState = rememberAlbumTopColors(
+        artworkUrl = album.thumbnailUrl,
+        title = album.title,
+        artist = artistName
+    )
+    var activeColors by remember(album.thumbnailUrl, album.title, artistName) {
+        mutableStateOf(topColorsState.value)
+    }
+
+    LaunchedEffect(topColorsState.value) {
+        activeColors = topColorsState.value
+    }
+
+    val animatedStartColor by animateColorAsState(
+        targetValue = activeColors.startColor,
+        animationSpec = tween(durationMillis = 350),
+        label = "albumCardStartColor"
+    )
+    val animatedEndColor by animateColorAsState(
+        targetValue = activeColors.endColor,
+        animationSpec = tween(durationMillis = 350),
+        label = "albumCardEndColor"
+    )
+
+    Box(
+        modifier = modifier
+            .height(156.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .clip(RoundedCornerShape(22.dp))
+            .background(
+                Brush.horizontalGradient(
+                    colors = listOf(
+                        animatedStartColor,
+                        animatedEndColor
+                    )
+                )
+            )
+            .border(
+                width = 1.dp,
+                brush = Brush.horizontalGradient(
+                    colors = listOf(
+                        animatedStartColor.copy(alpha = 0.85f),
+                        animatedEndColor.copy(alpha = 0.50f),
+                        BorderGlass.copy(alpha = 0.25f)
+                    )
+                ),
+                shape = RoundedCornerShape(22.dp)
+            )
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null
+            ) { onClick() }
+    ) {
+        // Layer 1: Blurred atmospheric artwork background
+        if (!album.thumbnailUrl.isNullOrBlank()) {
+            AsyncImage(
+                model = album.thumbnailUrl,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                onSuccess = { successResult ->
+                    val bitmap = successResult.result.drawable.toBitmap(120, 120)
+                    val extracted = extractTop2Colors(bitmap)
+                    val key = "top2-${album.thumbnailUrl ?: ""}-${album.title}-${artistName}"
+                    AlbumGradientCache.put(key, extracted)
+                    activeColors = extracted
+                },
+                modifier = Modifier
+                    .matchParentSize()
+                    .blur(20.dp)
+                    .graphicsLayer { alpha = 0.25f }
+            )
+        }
+
+        // Layer 1.5: Soft radial glow bloom anchored behind the left artwork
+        val density = LocalDensity.current
+        val glowCenterX = with(density) { 72.dp.toPx() }
+        val glowCenterY = with(density) { 78.dp.toPx() }
+        val glowRadius = with(density) { 160.dp.toPx() }
+
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .background(
+                    Brush.radialGradient(
+                        colors = listOf(
+                            animatedStartColor.copy(alpha = 0.45f),
+                            animatedStartColor.copy(alpha = 0.15f),
+                            androidx.compose.ui.graphics.Color.Transparent
+                        ),
+                        center = Offset(glowCenterX, glowCenterY),
+                        radius = glowRadius
+                    )
+                )
+        )
+
+        // Layer 2: Neutral text-readability contrast layer across the card (no default color)
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .background(
+                    Brush.horizontalGradient(
+                        colors = listOf(
+                            androidx.compose.ui.graphics.Color.Transparent,
+                            androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.15f),
+                            androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.40f)
+                        )
+                    )
+                )
+        )
+
+        // Layer 3: Foreground content
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 14.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Sharp Artwork on the left with prominent glow shadow
+            Box(
+                modifier = Modifier
+                    .size(110.dp)
+                    .shadow(
+                        elevation = 14.dp,
+                        shape = RoundedCornerShape(14.dp),
+                        spotColor = animatedStartColor.copy(alpha = 0.85f),
+                        ambientColor = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.50f)
+                    )
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(animatedStartColor)
+                    .border(1.dp, BorderGlass.copy(alpha = 0.4f), RoundedCornerShape(14.dp))
+            ) {
+                SieloSongArtwork(
+                    thumbnailUrl = album.thumbnailUrl,
+                    title = album.title,
+                    artist = artistName,
+                    modifier = Modifier.fillMaxSize(),
+                    shape = RoundedCornerShape(14.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(14.dp))
+
+            // Metadata & Details Column
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight(),
+                verticalArrangement = Arrangement.Center
+            ) {
+                // Album Title
+                Text(
+                    text = album.title,
+                    color = PaletteCream,
+                    fontFamily = SoraFontFamily,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.5.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    lineHeight = 21.sp
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // Metadata: "2025 · 22 tracks · 1h 14m"
+                if (metadataText.isNotBlank()) {
+                    Text(
+                        text = metadataText,
+                        color = TextSecondary,
+                        fontFamily = UrbanistFontFamily,
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 12.5.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                } else {
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+
+                // Release type pill & subtle chevron
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(animatedEndColor.copy(alpha = 0.50f))
+                            .border(0.5.dp, animatedStartColor.copy(alpha = 0.65f), RoundedCornerShape(6.dp))
+                            .padding(horizontal = 7.dp, vertical = 2.5.dp)
+                    ) {
+                        Text(
+                            text = releaseTypeLabel,
+                            color = PaletteCream,
+                            fontFamily = UrbanistFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 10.sp,
+                            letterSpacing = 0.8.sp
+                        )
+                    }
+
+                    Icon(
+                        imageVector = Icons.Default.ChevronRight,
+                        contentDescription = null,
+                        tint = TextSecondary.copy(alpha = 0.7f),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Backwards-compatible delegate for horizontal carousel.
  */
 @Composable
 private fun ArtistAlbumCard(
@@ -1487,51 +1916,11 @@ private fun ArtistAlbumCard(
     artistName: String,
     onOpenAlbum: () -> Unit
 ) {
-    Column(
-        modifier = Modifier
-            .width(136.dp)
-            .clickable { onOpenAlbum() }
-    ) {
-        Box(
-            modifier = Modifier
-                .size(136.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(PaletteOxfordBlue)
-                .border(1.dp, BorderGlass, RoundedCornerShape(14.dp))
-        ) {
-            SieloSongArtwork(
-                thumbnailUrl = album.thumbnailUrl,
-                title = album.title,
-                artist = artistName,
-                modifier = Modifier.fillMaxSize(),
-                shape = RoundedCornerShape(14.dp)
-            )
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Text(
-            text = album.title,
-            color = PaletteCream,
-            fontFamily = UrbanistFontFamily,
-            fontWeight = FontWeight.Bold,
-            fontSize = 13.5.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-
-        val yearStr = album.year ?: ""
-        if (yearStr.isNotBlank()) {
-            Text(
-                text = yearStr,
-                color = TextSecondary,
-                fontFamily = UrbanistFontFamily,
-                fontSize = 12.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-    }
+    LargeAlbumCard(
+        album = album,
+        artistName = artistName,
+        onClick = onOpenAlbum
+    )
 }
 
 /**
@@ -1604,7 +1993,7 @@ private fun ArtistAllAlbumsTabContent(
 
     val singlesAndEPs = remember(artist) {
         val list = if (artist.musicBrainzId != null) {
-            artist.singles + artist.pastAlbums.filter { it.type.equals("EP", ignoreCase = true) }
+            artist.singles
         } else {
             (artist.singles + (artist.originalAlbums + artist.pastAlbums).filter { it.type.equals("Single", ignoreCase = true) || it.type.equals("EP", ignoreCase = true) || it.songCount == 1 || (it.tracks.size == 1 && it.songCount <= 1) })
                 .filter { TrackMatchValidator.isAlbumMadeByArtist(it.title, it.artist, artist.name) }
@@ -1629,11 +2018,11 @@ private fun ArtistAllAlbumsTabContent(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 20.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp)
+        verticalArrangement = Arrangement.spacedBy(24.dp)
     ) {
         // 1. Studio Albums Section
         if (studioAlbums.isNotEmpty()) {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
                     text = "Studio Albums (${studioAlbums.size})",
                     color = PaletteCream,
@@ -1643,10 +2032,11 @@ private fun ArtistAllAlbumsTabContent(
                 )
 
                 studioAlbums.forEach { album ->
-                    ArtistAlbumListRow(
+                    LargeAlbumCard(
                         album = album,
                         artistName = artist.name,
-                        onOpenAlbum = onOpenAlbum
+                        onClick = { onOpenAlbum(album) },
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
             }
@@ -1654,7 +2044,7 @@ private fun ArtistAllAlbumsTabContent(
 
         // 2. Singles & EPs Section
         if (singlesAndEPs.isNotEmpty()) {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
                     text = "Singles & EPs (${singlesAndEPs.size})",
                     color = PaletteCream,
@@ -1664,10 +2054,11 @@ private fun ArtistAllAlbumsTabContent(
                 )
 
                 singlesAndEPs.forEach { album ->
-                    ArtistAlbumListRow(
+                    LargeAlbumCard(
                         album = album,
                         artistName = artist.name,
-                        onOpenAlbum = onOpenAlbum
+                        onClick = { onOpenAlbum(album) },
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
             }
@@ -1675,7 +2066,7 @@ private fun ArtistAllAlbumsTabContent(
 
         // 3. Soundtracks & Features Section
         if (soundtracks.isNotEmpty()) {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
                     text = "Soundtracks & Features (${soundtracks.size})",
                     color = PaletteCream,
@@ -1685,10 +2076,11 @@ private fun ArtistAllAlbumsTabContent(
                 )
 
                 soundtracks.forEach { album ->
-                    ArtistAlbumListRow(
+                    LargeAlbumCard(
                         album = album,
                         artistName = artist.name,
-                        onOpenAlbum = onOpenAlbum
+                        onClick = { onOpenAlbum(album) },
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
             }
@@ -1696,72 +2088,21 @@ private fun ArtistAllAlbumsTabContent(
     }
 }
 
+/**
+ * Backwards-compatible delegate for vertical album list row.
+ */
 @Composable
 private fun ArtistAlbumListRow(
     album: SieloAlbum,
     artistName: String,
     onOpenAlbum: (SieloAlbum) -> Unit
 ) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(PaletteOxfordBlue)
-            .border(1.dp, BorderGlass, RoundedCornerShape(14.dp))
-            .clickable { onOpenAlbum(album) }
-            .padding(12.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            SieloSongArtwork(
-                thumbnailUrl = album.thumbnailUrl,
-                title = album.title,
-                artist = artistName,
-                modifier = Modifier
-                    .size(56.dp)
-                    .clip(RoundedCornerShape(10.dp)),
-                shape = RoundedCornerShape(10.dp)
-            )
-
-            Spacer(modifier = Modifier.width(14.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = album.title,
-                    color = PaletteCream,
-                    fontFamily = SoraFontFamily,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 14.5.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                val trackCount = if (album.tracks.isNotEmpty()) album.tracks.size else album.songCount
-                val type = album.type?.takeIf { it.isNotBlank() } ?: if (trackCount == 1) "Single" else "Album"
-                val subtitle = listOfNotNull(
-                    type,
-                    album.year?.takeIf { it.isNotBlank() },
-                    if (trackCount > 0) "$trackCount tracks" else null
-                ).joinToString(" • ")
-
-                Text(
-                    text = subtitle,
-                    color = TextSecondary,
-                    fontFamily = UrbanistFontFamily,
-                    fontSize = 12.sp
-                )
-            }
-
-            Icon(
-                imageVector = Icons.Default.ChevronRight,
-                contentDescription = null,
-                tint = TextSecondary,
-                modifier = Modifier.size(18.dp)
-            )
-        }
-    }
+    LargeAlbumCard(
+        album = album,
+        artistName = artistName,
+        onClick = { onOpenAlbum(album) },
+        modifier = Modifier.fillMaxWidth()
+    )
 }
 
 /**
@@ -1887,7 +2228,7 @@ private fun ArtistDetailedAboutSection(
 
     val singlesCount = remember(artist) {
         val list = if (artist.musicBrainzId != null) {
-            artist.singles + artist.pastAlbums.filter { it.type.equals("EP", ignoreCase = true) }
+            artist.singles
         } else {
             (artist.singles + (artist.originalAlbums + artist.pastAlbums).filter { it.type.equals("Single", ignoreCase = true) || it.type.equals("EP", ignoreCase = true) || it.songCount == 1 || (it.tracks.size == 1 && it.songCount <= 1) })
                 .filter { TrackMatchValidator.isAlbumMadeByArtist(it.title, it.artist, artist.name) }
@@ -2230,14 +2571,12 @@ private fun ArtistCollapsingTopBar(
     onOpenWiki: () -> Unit
 ) {
     val barColor = PaletteDarkNavy.copy(alpha = (headerAlpha * 0.96f).coerceIn(0f, 0.96f))
-    val borderColor = BorderGlass.copy(alpha = headerAlpha)
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .statusBarsPadding()
             .background(barColor)
-            .border(width = if (isCollapsed) 1.dp else 0.dp, color = borderColor)
             .padding(horizontal = 16.dp, vertical = 10.dp)
     ) {
         Row(
@@ -2423,9 +2762,43 @@ private fun ArtistAlbumDetailView(
         }
     }
 
+    BackHandler { onBack() }
+
+    val density = LocalDensity.current
+    val edgeThresholdPx = remember(density) { with(density) { 70.dp.toPx() } }
+    val edgeStartWidthPx = remember(density) { with(density) { 48.dp.toPx() } }
+    var edgeSwipeDragAmount by remember { mutableFloatStateOf(0f) }
+
+    val albumEdgeSwipeModifier = Modifier.pointerInput(album.id) {
+        detectHorizontalDragGestures(
+            onDragStart = { offset ->
+                if (offset.x <= edgeStartWidthPx) {
+                    edgeSwipeDragAmount = 0f
+                } else {
+                    edgeSwipeDragAmount = -1f
+                }
+            },
+            onHorizontalDrag = { _, dragAmount ->
+                if (edgeSwipeDragAmount >= 0f) {
+                    edgeSwipeDragAmount += dragAmount
+                }
+            },
+            onDragEnd = {
+                if (edgeSwipeDragAmount >= edgeThresholdPx) {
+                    onBack()
+                }
+                edgeSwipeDragAmount = 0f
+            },
+            onDragCancel = {
+                edgeSwipeDragAmount = 0f
+            }
+        )
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
+            .then(albumEdgeSwipeModifier)
             .background(PaletteDarkNavy)
     ) {
         LazyColumn(

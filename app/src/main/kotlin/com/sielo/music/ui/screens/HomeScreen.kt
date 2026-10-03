@@ -160,10 +160,9 @@ fun HomeScreen(
         .distinctBy { it.id }
         .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
 
-    // Handle device system back gesture when artist, playlist, or genre is open
-    BackHandler(enabled = selectedArtist != null || selectedPlaylist != null || selectedGenre != null) {
+    // Handle device system back gesture when playlist or genre is open (ArtistProfileScreen handles its own back gestures)
+    BackHandler(enabled = selectedPlaylist != null || selectedGenre != null) {
         when {
-            selectedArtist != null -> viewModel.closeArtist()
             selectedPlaylist != null -> viewModel.closePlaylist()
             selectedGenre != null -> viewModel.closeGenre()
         }
@@ -186,6 +185,7 @@ fun HomeScreen(
             currentTrackId = playbackState.currentTrack?.id,
             isPlaying = playbackState.isPlaying,
             onLoadAlbumTracks = { album -> viewModel.getAlbumSongs(album) },
+            onRefresh = { viewModel.refreshArtist() },
             modifier = modifier
         )
         return

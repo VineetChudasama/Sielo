@@ -102,10 +102,9 @@ fun SearchScreen(
     var isDedicatedSearchOpen by remember { mutableStateOf(false) }
     var selectedSongActionsTrack by remember { mutableStateOf<SieloTrack?>(null) }
 
-    // System Back Press Handler
-    BackHandler(enabled = selectedArtist != null || selectedCategory != null || isDedicatedSearchOpen) {
+    // System Back Press Handler (ArtistProfileScreen handles its own back gestures)
+    BackHandler(enabled = selectedCategory != null || isDedicatedSearchOpen) {
         when {
-            selectedArtist != null -> viewModel.closeArtist()
             selectedCategory != null -> viewModel.closeCategory()
             isDedicatedSearchOpen -> {
                 isDedicatedSearchOpen = false
@@ -131,6 +130,7 @@ fun SearchScreen(
             currentTrackId = playbackState.currentTrack?.id,
             isPlaying = playbackState.isPlaying,
             onLoadAlbumTracks = { album -> viewModel.getAlbumSongs(album) },
+            onRefresh = { viewModel.refreshArtist() },
             modifier = modifier
         )
         return

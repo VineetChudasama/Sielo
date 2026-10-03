@@ -35,7 +35,7 @@ class CoverArtArchiveClient @Inject constructor() {
     companion object {
         private const val TAG = "CoverArtArchive"
         private const val BASE_URL = "https://coverartarchive.org"
-        private const val USER_AGENT = "Sielo/10.0.8 ( https://github.com/sielo/music ; contact@sielo.app )"
+        private const val USER_AGENT = "Sielo/10.1.6 ( https://github.com/sielo/music ; contact@sielo.app )"
     }
 
     /**

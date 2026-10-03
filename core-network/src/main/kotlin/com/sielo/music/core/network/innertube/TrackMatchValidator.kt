@@ -99,7 +99,12 @@ object TrackMatchValidator {
         "tour hits", "sad love songs", "romantic hits", "chartbusters",
         "fan favorites", "fan favourites", "anthology", "retrospective", "the collection",
         "definitive collection", "ultimate collection", "anniversary edition", "anniversary collection",
-        "platinum collection", "gold collection", "celebration", "spotlight"
+        "platinum collection", "gold collection", "celebration", "spotlight",
+        "rare", "vol.", "vol ", "volume", "vol-", "flash back", "flashback", "coffee with", "coffee aur",
+        "memoirs", "legends", "legend", "maestros", "maestro", "masterworks", "inimitable", "portrait",
+        "revival", "radio hits", "fm hits", "classic hits", "golden melodies", "finest moments", "audiobiography",
+        "ek aur baar", "once more", "nostalgia", "duets of", "duets with", "tribute to", "50 original hits",
+        "100 original hits", "the prodigy", "old songs", "rare songs"
     )
 
     fun isSoundtrackRelease(title: String, type: String? = null): Boolean {
@@ -156,7 +161,11 @@ object TrackMatchValidator {
             lower.contains("audio songs") || lower.contains("video songs") ||
             lower.contains("unheard") || lower.contains("gems") || lower.contains("yours truly") ||
             lower.contains("your's truly") || lower.contains("through the years") ||
-            lower.contains("tour hits") || lower.contains("sad love songs")
+            lower.contains("tour hits") || lower.contains("sad love songs") ||
+            lower.startsWith("songs of ") || lower == "songs of love" || lower.contains("songs of love") ||
+            lower.contains("love songs") || lower.contains("golden songs") || lower.contains("film songs") ||
+            lower.contains("movie hits") || lower.contains("evergreen hits") || lower.contains("anthology") ||
+            lower.contains("the essential") || lower.contains("the very best") || lower.contains("memories of")
         ) {
             return true
         }
@@ -174,7 +183,10 @@ object TrackMatchValidator {
                 "voice of", "magic of", "superhit", "superhits", "all time", "evergreen", "favorite", "favourite",
                 "nonstop", "non-stop", "jukebox", "compilation", "mashup", "special", "drive", "touching",
                 "self-titled", "self titled", "gems", "unheard", "truly", "years", "tour", "vault",
-                "unheard gems", "yours truly", "your's truly"
+                "unheard gems", "yours truly", "your's truly", "rare", "vol", "volume", "flash back", "flashback",
+                "coffee", "memoirs", "legends", "legend", "maestros", "maestro", "masterworks", "inimitable",
+                "portrait", "revival", "radio", "finest", "audiobiography", "ek aur baar", "nostalgia", "duets",
+                "prodigy", "old songs"
             )
 
             for (w in genericWords) {
@@ -229,7 +241,8 @@ object TrackMatchValidator {
         if (titleLower.contains("type beat") || titleLower.contains("type-beat") ||
             titleLower.endsWith(" beat") || titleLower.contains(" beat ") ||
             titleLower.contains("instrumental") || titleLower.contains("karaoke") ||
-            titleLower.contains("tribute") || titleLower.contains("cover")
+            titleLower.contains("tribute") || titleLower.contains("cover") ||
+            ((titleLower == "songs of love" || titleLower.startsWith("songs of love")) && artistLower != "adele")
         ) {
             return false
         }
@@ -255,10 +268,23 @@ object TrackMatchValidator {
             ) {
                 return false
             }
-            // Strict matching: albumArtist MUST contain targetArtist or vice versa, OR one of the split artists matches
-            val splitArtists = albumArtistLower.split(Regex("[,&/]|\\b(ft|feat|featuring)\\b")).map { it.trim() }
-            val matchesArtist = albumArtistLower.contains(artistLower) || artistLower.contains(albumArtistLower) ||
-                    splitArtists.any { it.contains(artistLower) || artistLower.contains(it) }
+
+            // Reject third-party tribute / karaoke / instrumental / cover artists
+            val spamArtistKeywords = listOf("tribute", "karaoke", "sing2piano", "sing2guitar", "instrumental", "quartet", "orchestra", "renditions")
+            if (spamArtistKeywords.any { albumArtistLower.contains(it) }) {
+                return false
+            }
+
+            // Word-boundary / exact token matching:
+            // Prevents "sombrerobeach" or "sombrero" from matching "sombr"
+            val wordBoundaryRegex = Regex("""\b${Regex.escape(artistLower)}\b""", RegexOption.IGNORE_CASE)
+            val splitArtists = albumArtistLower.split(Regex("[,&/|;]|\\b(ft|feat|featuring|with)\\b")).map { it.trim() }
+
+            val matchesArtist = splitArtists.any { part ->
+                part.equals(artistLower, ignoreCase = true) ||
+                (part.length > artistLower.length && wordBoundaryRegex.containsMatchIn(part))
+            }
+
             if (!matchesArtist) {
                 return false
             }
@@ -341,30 +367,30 @@ object TrackMatchValidator {
         targetArtist: String?
     ): Boolean {
         if (targetArtist.isNullOrBlank()) return true
-        val cleanTarget = targetArtist.trim()
-        val targetNorm = cleanTarget.lowercase().replace(Regex("[^a-z0-9]"), "")
-        if (targetNorm.isBlank()) return true
+        val cleanTarget = targetArtist.trim().lowercase()
+        if (cleanTarget.isBlank()) return true
 
-        val artistStr = trackArtist.orEmpty()
-        val titleStr = trackTitle.orEmpty()
+        val aLower = trackArtist.orEmpty().trim().lowercase()
+        val tLower = trackTitle.orEmpty().trim().lowercase()
 
-        val artistNorm = artistStr.lowercase().replace(Regex("[^a-z0-9]"), "")
-        if (artistNorm.contains(targetNorm)) return true
+        val wordBoundaryRegex = Regex("""\b${Regex.escape(cleanTarget)}\b""", RegexOption.IGNORE_CASE)
 
-        val titleNorm = titleStr.lowercase().replace(Regex("[^a-z0-9]"), "")
-        if (titleNorm.contains(targetNorm)) return true
+        if (wordBoundaryRegex.containsMatchIn(aLower)) return true
+        if (wordBoundaryRegex.containsMatchIn(tLower)) return true
 
-        // Check if all meaningful tokens of targetArtist exist in track artist or title
-        val tokens = cleanTarget.lowercase().split(Regex("[^a-z0-9]+")).filter { it.length >= 2 }
-        if (tokens.size >= 2) {
-            val aLower = artistStr.lowercase()
-            val tLower = titleStr.lowercase()
-            val inArtist = tokens.all { aLower.contains(it) }
-            val inTitle = tokens.all { tLower.contains(it) }
-            if (inArtist || inTitle) return true
+        val splitArtists = aLower.split(Regex("[,&/|;]|\\b(ft|feat|featuring|with)\\b")).map { it.trim() }
+        if (splitArtists.any { it == cleanTarget || (it.length > cleanTarget.length && wordBoundaryRegex.containsMatchIn(it)) }) {
+            return true
         }
 
         return false
+    }
+
+    fun isStrictArtistMatch(candidate: String, target: String): Boolean {
+        val c = candidate.lowercase().replace(Regex("[^a-z0-9]"), "").trim()
+        val t = target.lowercase().replace(Regex("[^a-z0-9]"), "").trim()
+        if (c.isBlank() || t.isBlank()) return false
+        return c == t
     }
 }
 
