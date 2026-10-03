@@ -68,16 +68,70 @@
 Sielo follows **Clean Architecture** principles and is organized into modular Gradle layers:
 
 ```text
-Sielo
-├── app/                  # Main Android Application & Compose UI
-│   ├── ui/               # Screens, Themes & Tactile Components
-│   └── viewmodel/        # StateFlow ViewModels
-├── core-audio/           # Media3 ExoPlayer & Background Service
-├── core-recommendations/ # Autoplay Engine & Similar Artist Scoring
-├── core-lyrics/          # LRCLIB API & Synced Lyrics Engine
-├── core-network/         # InnerTube & JioSaavn Lossless Resolvers
-└── core-database/        # Room DB & Listening Analytics
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Mobile Client Application (Android)                      │
+│                  Kotlin 2.0  •  Jetpack Compose  •  Dagger Hilt             │
+│                                                                             │
+│  ┌───────────────────────────────┐     ┌─────────────────────────────────┐  │
+│  │       UI & Interactions       │────►│       StateFlow ViewModels      │  │
+│  │  Tactile Vinyl Player         │     │  PlayerViewModel                │  │
+│  │  Large Visual Album Cards     │     │  HomeViewModel / SearchVM       │  │
+│  │  Floating Island Mini-Player  │◄────│  ProfileViewModel / SongActions │  │
+│  │  Synced Native Lyrics Screen  │     │  StateFlow<PlayerState>         │  │
+│  └───────────────┬───────────────┘     └────────────────┬────────────────┘  │
+│                  │                                      │                   │
+│                  ▼                                      ▼                   │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                    Listen Together (Room Sessions)                    │  │
+│  │     AES-256-GCM Encrypted Payloads  •  Sub-150ms Audio Sync Engine    │  │
+│  └──────────────────────────────────────┬────────────────────────────────┘  │
+└─────────────────────────────────────────┼───────────────────────────────────┘
+                                          │
+                        Intent / Flow     │ MediaController / Coroutines
+                                          ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Core Media & Playback Engine (Media3)                   │
+│                                                                             │
+│  ┌─────────────────────────────────┐   ┌─────────────────────────────────┐  │
+│  │          PlayerManager          │──►│       MusicPlaybackService      │  │
+│  │   Queue Management & Autoplay   │   │   AndroidX MediaSessionService  │  │
+│  │   Shuffle & Playback State      │   │   ExoPlayer Engine & AudioFocus │  │
+│  └────────────────┬────────────────┘   └────────────────┬────────────────┘  │
+│                   │                                     │                   │
+│                   ▼                                     ▼                   │
+│  ┌─────────────────────────────────┐   ┌─────────────────────────────────┐  │
+│  │       OfflineCacheManager       │   │        StreamClientUtils        │  │
+│  │   SimpleCache & Local Chunks    │   │   Format Selection & Bitrate    │  │
+│  └─────────────────────────────────┘   └─────────────────────────────────┘  │
+└─────────────────────────────────────────┬───────────────────────────────────┘
+                                          │
+                    Resolution & Decrypt  │ REST / HTTPS (TLS 1.3)
+                                          ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                  Network Resolvers & Open Metadata Sources                  │
+│                                                                             │
+│  ┌─────────────────────────┐  ┌─────────────────────────┐  ┌─────────────┐  │
+│  │    YouTube InnerTube    │  │    JioSaavn Lossless    │  │   LRCLIB    │  │
+│  │  Search & Stream Audio  │  │   320kbps DES Decrypt   │  │  1ms Synced │  │
+│  └────────────┬────────────┘  └────────────┬────────────┘  └──────┬──────┘  │
+│               │                            │                      │         │
+│               ▼                            ▼                      ▼         │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │              MusicBrainz & Cover Art Archive Integration              │  │
+│  │    Authentic Discography  •  Release Groups  •  Studio Cover Art      │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│      Room Local Database (KSP)   •   Last.fm Autoplay Recommendation        │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Module Breakdown
+- **`app`**: Main Android application containing Jetpack Compose UI, tactile components, and StateFlow ViewModels.
+- **`core-audio`**: AndroidX Media3 `MediaSessionService`, ExoPlayer engine, playback lifecycle, and chunk caching.
+- **`core-network`**: InnerTube client, JioSaavn lossless 320kbps resolver, MusicBrainz & Cover Art Archive clients.
+- **`core-lyrics`**: LRCLIB integration, millisecond timestamp synchronization, and live timing calibration.
+- **`core-recommendations`**: Autoplay queue replenishment, Last.fm similarity clustering, and taste profiles.
+- **`core-database`**: Room database, local listening events, and offline persistence.
 
 ### Tech Stack
 - **Language**: Kotlin 2.0 (Coroutines, StateFlow, Flow)
