@@ -68,61 +68,98 @@
 Sielo follows **Clean Architecture** principles and is organized into modular Gradle layers:
 
 ```text
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    Mobile Client Application (Android)                      │
-│                  Kotlin 2.0  •  Jetpack Compose  •  Dagger Hilt             │
-│                                                                             │
-│  ┌───────────────────────────────┐     ┌─────────────────────────────────┐  │
-│  │       UI & Interactions       │────►│       StateFlow ViewModels      │  │
-│  │  Tactile Vinyl Player         │     │  PlayerViewModel                │  │
-│  │  Large Visual Album Cards     │     │  HomeViewModel / SearchVM       │  │
-│  │  Floating Island Mini-Player  │◄────│  ProfileViewModel / SongActions │  │
-│  │  Synced Native Lyrics Screen  │     │  StateFlow<PlayerState>         │  │
-│  └───────────────┬───────────────┘     └────────────────┬────────────────┘  │
-│                  │                                      │                   │
-│                  ▼                                      ▼                   │
-│  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │                    Listen Together (Room Sessions)                    │  │
-│  │     AES-256-GCM Encrypted Payloads  •  Sub-150ms Audio Sync Engine    │  │
-│  └──────────────────────────────────────┬────────────────────────────────┘  │
-└─────────────────────────────────────────┼───────────────────────────────────┘
-                                          │
-                        Intent / Flow     │ MediaController / Coroutines
-                                          ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     Core Media & Playback Engine (Media3)                   │
-│                                                                             │
-│  ┌─────────────────────────────────┐   ┌─────────────────────────────────┐  │
-│  │          PlayerManager          │──►│       MusicPlaybackService      │  │
-│  │   Queue Management & Autoplay   │   │   AndroidX MediaSessionService  │  │
-│  │   Shuffle & Playback State      │   │   ExoPlayer Engine & AudioFocus │  │
-│  └────────────────┬────────────────┘   └────────────────┬────────────────┘  │
-│                   │                                     │                   │
-│                   ▼                                     ▼                   │
-│  ┌─────────────────────────────────┐   ┌─────────────────────────────────┐  │
-│  │       OfflineCacheManager       │   │        StreamClientUtils        │  │
-│  │   SimpleCache & Local Chunks    │   │   Format Selection & Bitrate    │  │
-│  └─────────────────────────────────┘   └─────────────────────────────────┘  │
-└─────────────────────────────────────────┬───────────────────────────────────┘
-                                          │
-                    Resolution & Decrypt  │ REST / HTTPS (TLS 1.3)
-                                          ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                  Network Resolvers & Open Metadata Sources                  │
-│                                                                             │
-│  ┌─────────────────────────┐  ┌─────────────────────────┐  ┌─────────────┐  │
-│  │    YouTube InnerTube    │  │    JioSaavn Lossless    │  │   LRCLIB    │  │
-│  │  Search & Stream Audio  │  │   320kbps DES Decrypt   │  │  1ms Synced │  │
-│  └────────────┬────────────┘  └────────────┬────────────┘  └──────┬──────┘  │
-│               │                            │                      │         │
-│               ▼                            ▼                      ▼         │
-│  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │              MusicBrainz & Cover Art Archive Integration              │  │
-│  │    Authentic Discography  •  Release Groups  •  Studio Cover Art      │  │
-│  └───────────────────────────────────────────────────────────────────────┘  │
-│                                                                             │
-│      Room Local Database (KSP)   •   Last.fm Autoplay Recommendation        │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                                 PRESENTATION LAYER (UI)                                 │
+│                                                                                         │
+│  ┌────────────────────────┐      User Gestures       ┌───────────────────────────────┐  │
+│  │   Jetpack Compose UI   │─────────────────────────►│     StateFlow ViewModels      │  │
+│  │                        │  (Play, Pause, Seek,     │                               │  │
+│  │  • Tactile Vinyl Player│   Query, AddToQueue)     │  • PlayerViewModel            │  │
+│  │  • Large Visual Cards  │                          │  • HomeViewModel / SearchVM   │  │
+│  │  • Synced Lyrics View  │◄─────────────────────────│  • ProfileViewModel           │  │
+│  │  • Floating Mini-Player│     UI State Emission    │  • SongActionsViewModel       │  │
+│  └───────────┬────────────┘   StateFlow<ScreenState> └───────────────┬───────────────┘  │
+│              │                                                       │                  │
+│              │ Room Action / Chat                                    │ Intent / Command │
+│              │ (AES-256 Payload)                                     │ (PlayTrack,      │
+│              ▼                                                       │  SeekTo, Skip)   │
+│  ┌──────────────────────────────────────────┐                        │                  │
+│  │    Listen Together Session (P2P Mesh)    │                        │                  │
+│  │                                          │                        │                  │
+│  │  [Room Host] ──(MQTT Broker Relay)──►    │                        │                  │
+│  │  • Clock Drift Correction (sub-150ms)    │                        │                  │
+│  │  • AES-256-GCM Encrypted Chat & Queue    │                        │                  │
+│  └───────────────────┬──────────────────────┘                        │                  │
+│                      │                                               │                  │
+│                      │ Synchronized Playback Event                   │                  │
+│                      └───────────────────────┬───────────────────────┘                  │
+└──────────────────────────────────────────────┼──────────────────────────────────────────┘
+                                               │
+                                               ▼ MediaController Binder / Flow
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                         CORE AUDIO & PLAYBACK ENGINE (MEDIA3)                           │
+│                                                                                         │
+│  ┌────────────────────────────────────────┐       Tracks / MediaItems       ┌────────┐  │
+│  │             PlayerManager              │────────────────────────────────►│ Media3 │  │
+│  │                                        │                                 │Service │  │
+│  │  • Dynamic Queue Management            │   Play / Pause / Seek Commands  │        │  │
+│  │  • Smart Shuffle (Duplicate-Free)      │────────────────────────────────►│  (SES) │  │
+│  │  • Autoplay Candidate Replenishment    │                                 └───┬────┘  │
+│  └───────────────────┬────────────────────┘                                     │       │
+│                      │                                                          │       │
+│                      │ Track ID / Metadata Request                              │       │
+│                      ▼                                                          ▼       │
+│  ┌────────────────────────────────────────┐       Resolved Audio URL        ┌────────┐  │
+│  │           StreamClientUtils            │────────────────────────────────►│  Exo-  │  │
+│  │                                        │  (Chunk-Buffered Stream URI)    │ Player │  │
+│  │  • Bitrate Selection (320k vs 160k)    │                                 └───┬────┘  │
+│  │  • Fallback Stream Recovery Engine     │◄─────────────────┐                  │       │
+│  └───────────────────┬────────────────────┘  Cached Chunks   │                  │ Audio │
+│                      │                                       │                  │ Output│
+│                      │ Local Cache Check                     │                  ▼       │
+│                      ▼                                       │               [DAC /     │
+│  ┌────────────────────────────────────────┐                  │               Headset]   │
+│  │          OfflineCacheManager           │──────────────────┘                          │
+│  │  LRU SimpleCache • Encrypted Storage   │                                             │
+│  └────────────────────────────────────────┘                                             │
+└──────────────────────────────────────────────┬──────────────────────────────────────────┘
+                                               │
+                                               │ Fetch Metadata & Stream URLs
+                                               │ (HTTPS / TLS 1.3 Async)
+                                               ▼
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                         DATA SOURCES & METADATA PIPELINE                                │
+│                                                                                         │
+│  ┌───────────────────────┐   ┌────────────────────────┐   ┌──────────────────────────┐  │
+│  │   YouTube InnerTube   │   │   JioSaavn Resolvers   │   │     LRCLIB Provider      │  │
+│  │                       │   │                        │   │                          │  │
+│  │ • Client Video Stream │   │ • 320kbps CD AAC Audio │   │ • 1ms Synced Lyrics      │  │
+│  │ • Type-Ahead Search   │   │ • DES Secret Key Decrypt│  │ • Language Normalization │  │
+│  │ • Trending Song Feeds │   │ • High-Res Studio Art  │   │ • Acoustic Offset Trim   │  │
+│  └───────────┬───────────┘   └───────────┬────────────┘   └────────────┬─────────────┘  │
+│              │                           │                             │                │
+│              │ Raw Metadata              │ Studio Metadata             │ Timestamped    │
+│              │ Streams                   │ & Cover Art                 │ Lines          │
+│              └───────────────┬───────────┴─────────────────────────────┤                │
+│                              │                                         │                │
+│                              ▼                                         ▼                │
+│  ┌───────────────────────────────────────────────────────────────────────────────────┐  │
+│  │                      MusicBrainz & Cover Art Archive (CAA)                        │  │
+│  │                                                                                   │  │
+│  │  • Strict Release Group Deduplication (Studio Albums vs EPs vs Soundtracks)       │  │
+│  │  • High-Resolution Original Front Cover Resolution (500px / 1200px)               │  │
+│  │  • Clean Artist Alias Verification & False-Collaboration Suppression              │  │
+│  └───────────────────────────────────────────┬───────────────────────────────────────┘  │
+│                                              │                                          │
+│                                              │ Validated Entities                       │
+│                                              ▼                                          │
+│  ┌───────────────────────────────────────────────────────────────────────────────────┐  │
+│  │                                Local Database (Room)                              │  │
+│  │                                                                                   │  │
+│  │  • TrackCacheDao (Local Playback Cache)    • ListeningHistoryDao (Stats & Vibe)   │  │
+│  │  • ArtistMetadataDao (Verified Profiles)   • RoomSessionDao (Encrypted Rooms)     │  │
+│  └───────────────────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Module Breakdown
