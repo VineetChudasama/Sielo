@@ -11,6 +11,7 @@ import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -30,6 +31,11 @@ class MusicBrainzClient @Inject constructor() {
         .readTimeout(15, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
+
+    // In-memory response caches to avoid repeated rate-limited calls
+    private val searchArtistCache = ConcurrentHashMap<String, MbArtist?>()
+    private val releaseGroupsCache = ConcurrentHashMap<String, List<MbReleaseGroup>>()
+    private val releasesCache = ConcurrentHashMap<String, List<MbRelease>>()
 
     // Respect MusicBrainz rate limit policy (maximum 1 request per second per IP)
     private val rateLimitMutex = Mutex()
@@ -100,6 +106,11 @@ class MusicBrainzClient @Inject constructor() {
         val trimmed = artistName.trim()
         if (trimmed.isBlank()) return@withContext null
 
+        val cacheKey = trimmed.lowercase()
+        if (searchArtistCache.containsKey(cacheKey)) {
+            return@withContext searchArtistCache[cacheKey]
+        }
+
         Log.d(TAG, "Searching artist: $trimmed")
         val escapedQuery = trimmed.replace("\"", "")
         val encoded = URLEncoder.encode("artist:\"$escapedQuery\"", "UTF-8")
@@ -111,6 +122,7 @@ class MusicBrainzClient @Inject constructor() {
             val artists = response.artists
             if (artists.isEmpty()) {
                 Log.d(TAG, "No artists found for: $trimmed")
+                searchArtistCache[cacheKey] = null
                 return@withContext null
             }
 
@@ -118,6 +130,7 @@ class MusicBrainzClient @Inject constructor() {
             val exactMatch = artists.firstOrNull { it.name.equals(trimmed, ignoreCase = true) }
             if (exactMatch != null) {
                 Log.d(TAG, "Found exact match: ${exactMatch.name} (MBID: ${exactMatch.id})")
+                searchArtistCache[cacheKey] = exactMatch
                 return@withContext exactMatch
             }
 
@@ -126,6 +139,7 @@ class MusicBrainzClient @Inject constructor() {
             val normalizedMatch = artists.firstOrNull { normalizeName(it.name) == normalizedTarget }
             if (normalizedMatch != null) {
                 Log.d(TAG, "Found normalized match: ${normalizedMatch.name} (MBID: ${normalizedMatch.id})")
+                searchArtistCache[cacheKey] = normalizedMatch
                 return@withContext normalizedMatch
             }
 
@@ -133,10 +147,13 @@ class MusicBrainzClient @Inject constructor() {
             val topScore = artists.maxByOrNull { it.score ?: 0 }
             if (topScore != null && (topScore.score ?: 0) >= 80) {
                 Log.d(TAG, "Found high-score match: ${topScore.name} (MBID: ${topScore.id}, score: ${topScore.score})")
+                searchArtistCache[cacheKey] = topScore
                 return@withContext topScore
             }
 
-            artists.firstOrNull()
+            val fallbackMatch = artists.firstOrNull()
+            searchArtistCache[cacheKey] = fallbackMatch
+            fallbackMatch
         } catch (e: Exception) {
             Log.e(TAG, "Error parsing search artist response: ${e.message}", e)
             null
@@ -147,8 +164,12 @@ class MusicBrainzClient @Inject constructor() {
      * Retrieves all release groups associated with an artist MBID.
      * Implements pagination to fetch full catalog up to maxLimit.
      */
-    suspend fun getArtistReleaseGroups(artistMbid: String, maxLimit: Int = 200): List<MbReleaseGroup> = withContext(Dispatchers.IO) {
+    suspend fun getArtistReleaseGroups(artistMbid: String, maxLimit: Int = 100): List<MbReleaseGroup> = withContext(Dispatchers.IO) {
         if (artistMbid.isBlank()) return@withContext emptyList()
+
+        if (releaseGroupsCache.containsKey(artistMbid)) {
+            return@withContext releaseGroupsCache[artistMbid] ?: emptyList()
+        }
 
         val allReleaseGroups = mutableListOf<MbReleaseGroup>()
         var offset = 0
@@ -176,6 +197,7 @@ class MusicBrainzClient @Inject constructor() {
         }
 
         Log.d(TAG, "Retrieved ${allReleaseGroups.size} release groups for MBID: $artistMbid")
+        releaseGroupsCache[artistMbid] = allReleaseGroups
         allReleaseGroups
     }
 
@@ -186,12 +208,18 @@ class MusicBrainzClient @Inject constructor() {
     suspend fun getArtistReleases(artistMbid: String, limit: Int = 100): List<MbRelease> = withContext(Dispatchers.IO) {
         if (artistMbid.isBlank()) return@withContext emptyList()
 
+        if (releasesCache.containsKey(artistMbid)) {
+            return@withContext releasesCache[artistMbid] ?: emptyList()
+        }
+
         val url = "$BASE_URL/release?artist=$artistMbid&inc=release-groups+artist-credits+media+recordings&limit=$limit&fmt=json"
         val body = executeGet(url) ?: return@withContext emptyList()
 
         try {
             val response = json.decodeFromString<MbReleaseListResponse>(body)
-            response.releases
+            val releases = response.releases
+            releasesCache[artistMbid] = releases
+            releases
         } catch (e: Exception) {
             Log.e(TAG, "Error parsing artist releases: ${e.message}", e)
             emptyList()

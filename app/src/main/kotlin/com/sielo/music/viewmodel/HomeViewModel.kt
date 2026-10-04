@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.sielo.music.core.network.metadata.MusicMetadataRepository
 import kotlinx.coroutines.launch
 import java.util.Calendar
@@ -103,11 +104,10 @@ class HomeViewModel @Inject constructor(
     val dynamicSimilarArtists: StateFlow<List<ArtistProfile>> = _dynamicSimilarArtists.asStateFlow()
 
     private var lastResolvedArtist: String? = null
+    private var lastLoadedUserId: String? = null
 
     init {
-        loadInitialFeed()
         viewModelScope.launch {
-            var hasInitialized = false
             userManager.currentUser.collect { user ->
                 if (user == null) {
                     _recentPlayedSongs.value = emptyList()
@@ -117,11 +117,16 @@ class HomeViewModel @Inject constructor(
                     _songsForYouTracks.value = emptyList()
                     _sinceYouLikeTracks.value = emptyList()
                     _currentSimilarToArtist.value = "The Weeknd"
-                    hasInitialized = false
+                    lastLoadedUserId = null
                 } else if (user.hasCompletedOnboarding) {
-                    if (!hasInitialized) {
-                        refreshHome()
-                        hasInitialized = true
+                    if (lastLoadedUserId != user.id) {
+                        lastLoadedUserId = user.id
+                        loadInitialFeed()
+                    }
+                } else {
+                    if (lastLoadedUserId == null) {
+                        lastLoadedUserId = "guest"
+                        loadInitialFeed()
                     }
                 }
             }
@@ -155,8 +160,8 @@ class HomeViewModel @Inject constructor(
             val deferredTracks = artistsToQuery.map { artist ->
                 async {
                     try {
-                        val details = musicMetadataRepository.getArtistDetails(artist)
-                        val topSongs = details?.topSongs?.take(5) ?: innerTubeClient.search("$artist top hits").take(5)
+                        val cached = musicMetadataRepository.getCachedArtist(artist)
+                        val topSongs = cached?.topSongs?.take(5) ?: innerTubeClient.search("$artist top hits").take(5)
                         // Strictly filter to ensure songs belong to the chosen artist
                         topSongs.filter { song ->
                             song.artist.contains(artist, ignoreCase = true) ||
@@ -202,8 +207,8 @@ class HomeViewModel @Inject constructor(
             val deferredTracks = candidateArtists.map { artist ->
                 async {
                     try {
-                        val details = musicMetadataRepository.getArtistDetails(artist)
-                        val songs = details?.topSongs?.take(6) ?: innerTubeClient.search("$artist hits").take(6)
+                        val cached = musicMetadataRepository.getCachedArtist(artist)
+                        val songs = cached?.topSongs?.take(6) ?: innerTubeClient.search("$artist hits").take(6)
                         // Strictly filter out any song the user has already listened to
                         songs.filter { song ->
                             song.id !in playedSongIds &&
@@ -267,61 +272,60 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             _isLoading.value = true
             try {
-                // Fetch initial history snapshots
-                val recent = listeningHistoryDao.getRecentUniquePlayedSongs(5).firstOrNull() ?: emptyList()
-                val rediscovered = listeningHistoryDao.getRediscoveredFavorites(
-                    twoDaysAgoMs = System.currentTimeMillis() - (2L * 24 * 60 * 60 * 1000L),
-                    limit = 5
-                ).firstOrNull() ?: emptyList()
-                val topArtists = listeningHistoryDao.getTopArtists(sinceMs = 0L, limit = 1).firstOrNull() ?: emptyList()
-
-                _recentPlayedSongs.value = recent
-                _rediscoveredFavorites.value = rediscovered
-                _topArtistStat.value = topArtists
-                resolveMissingDurations(recent)
-
-                val cleanedQuery = _selectedMood.value.replace(Regex("[^a-zA-Z0-9 ]"), "").trim()
-                val query = if (cleanedQuery.isNotEmpty()) cleanedQuery else "Top Hits 2026"
-
-                val topArtistName = pickDynamicSimilarArtist()
-                _currentSimilarToArtist.value = topArtistName
-                lastResolvedArtist = topArtistName
-
                 coroutineScope {
-                    val tracksDeferred = async {
+                    launch {
+                        val recent = listeningHistoryDao.getRecentUniquePlayedSongs(5).firstOrNull() ?: emptyList()
+                        val rediscovered = listeningHistoryDao.getRediscoveredFavorites(
+                            twoDaysAgoMs = System.currentTimeMillis() - (2L * 24 * 60 * 60 * 1000L),
+                            limit = 5
+                        ).firstOrNull() ?: emptyList()
+                        val topArtists = listeningHistoryDao.getTopArtists(sinceMs = 0L, limit = 1).firstOrNull() ?: emptyList()
+
+                        _recentPlayedSongs.value = recent
+                        _rediscoveredFavorites.value = rediscovered
+                        _topArtistStat.value = topArtists
+                        resolveMissingDurations(recent)
+                    }
+
+                    val cleanedQuery = _selectedMood.value.replace(Regex("[^a-zA-Z0-9 ]"), "").trim()
+                    val query = if (cleanedQuery.isNotEmpty()) cleanedQuery else "Top Hits 2026"
+
+                    val topArtistName = pickDynamicSimilarArtist()
+                    _currentSimilarToArtist.value = topArtistName
+                    lastResolvedArtist = topArtistName
+
+                    launch {
                         try {
                             val tracks = innerTubeClient.search(query)
                             if (tracks.isNotEmpty()) {
-                                tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
-                            } else defaultStarterTracks()
+                                _trendingTracks.value = tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+                            } else {
+                                _trendingTracks.value = defaultStarterTracks()
+                            }
                         } catch (e: Exception) {
-                            defaultStarterTracks()
+                            _trendingTracks.value = defaultStarterTracks()
                         }
                     }
 
-                    val similarDeferred = async {
+                    launch {
                         try {
-                            fetchSimilarArtistProfiles(topArtistName)
-                        } catch (e: Exception) {
-                            emptyList()
+                            val similarList = fetchSimilarArtistProfiles(topArtistName)
+                            if (similarList.isNotEmpty()) {
+                                _currentSimilarToArtist.value = topArtistName
+                                _dynamicSimilarArtists.value = similarList
+                            }
+                        } catch (_: Exception) {
                         }
                     }
 
-                    val songsForYouDeferred = async {
+                    launch {
                         try {
-                            resolveSongsForYou()
-                        } catch (e: Exception) {
-                            defaultStarterTracks().shuffled().take(8)
+                            val songs = resolveSongsForYou()
+                            _songsForYouTracks.value = songs
+                        } catch (_: Exception) {
+                            _songsForYouTracks.value = defaultStarterTracks().shuffled().take(8)
                         }
                     }
-
-                    _trendingTracks.value = tracksDeferred.await()
-                    val similarList = similarDeferred.await()
-                    if (similarList.isNotEmpty()) {
-                        _currentSimilarToArtist.value = topArtistName
-                        _dynamicSimilarArtists.value = similarList
-                    }
-                    _songsForYouTracks.value = songsForYouDeferred.await()
                 }
             } catch (e: Exception) {
                 _trendingTracks.value = defaultStarterTracks()
@@ -335,64 +339,60 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             _isRefreshing.value = true
             try {
-                val newGreeting = computeGreeting()
-                val newRecent = listeningHistoryDao.getRecentUniquePlayedSongs(5).firstOrNull() ?: emptyList()
-                val newRediscovered = listeningHistoryDao.getRediscoveredFavorites(
-                    twoDaysAgoMs = System.currentTimeMillis() - (2L * 24 * 60 * 60 * 1000L),
-                    limit = 5
-                ).firstOrNull() ?: emptyList()
-                val newTopArtists = listeningHistoryDao.getTopArtists(sinceMs = 0L, limit = 1).firstOrNull() ?: emptyList()
-
-                val cleanedQuery = _selectedMood.value.replace(Regex("[^a-zA-Z0-9 ]"), "").trim()
-                val query = if (cleanedQuery.isNotEmpty()) cleanedQuery else "Top Hits 2026"
-
-                val topArtistName = pickDynamicSimilarArtist()
-                _currentSimilarToArtist.value = topArtistName
-                lastResolvedArtist = topArtistName
-
                 coroutineScope {
-                    val tracksDeferred = async {
+                    launch {
+                        val newGreeting = computeGreeting()
+                        val newRecent = listeningHistoryDao.getRecentUniquePlayedSongs(5).firstOrNull() ?: emptyList()
+                        val newRediscovered = listeningHistoryDao.getRediscoveredFavorites(
+                            twoDaysAgoMs = System.currentTimeMillis() - (2L * 24 * 60 * 60 * 1000L),
+                            limit = 5
+                        ).firstOrNull() ?: emptyList()
+                        val newTopArtists = listeningHistoryDao.getTopArtists(sinceMs = 0L, limit = 1).firstOrNull() ?: emptyList()
+
+                        _greeting.value = newGreeting
+                        _recentPlayedSongs.value = newRecent
+                        _rediscoveredFavorites.value = newRediscovered
+                        _topArtistStat.value = newTopArtists
+                        resolveMissingDurations(newRecent)
+                        playerManager.reloadCurrentTrackArtwork()
+                    }
+
+                    val cleanedQuery = _selectedMood.value.replace(Regex("[^a-zA-Z0-9 ]"), "").trim()
+                    val query = if (cleanedQuery.isNotEmpty()) cleanedQuery else "Top Hits 2026"
+
+                    val topArtistName = pickDynamicSimilarArtist()
+                    _currentSimilarToArtist.value = topArtistName
+                    lastResolvedArtist = topArtistName
+
+                    launch {
                         try {
                             val tracks = innerTubeClient.search(query)
-                            if (tracks.isNotEmpty()) {
+                            val newTracks = if (tracks.isNotEmpty()) {
                                 tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
                             } else defaultStarterTracks().shuffled()
-                        } catch (e: Exception) {
-                            defaultStarterTracks().shuffled()
+                            _trendingTracks.value = newTracks
+                        } catch (_: Exception) {
                         }
                     }
 
-                    val similarDeferred = async {
+                    launch {
                         try {
-                            fetchSimilarArtistProfiles(topArtistName)
-                        } catch (e: Exception) {
-                            emptyList()
+                            val newSimilarArtists = fetchSimilarArtistProfiles(topArtistName)
+                            if (newSimilarArtists.isNotEmpty()) {
+                                _currentSimilarToArtist.value = topArtistName
+                                _dynamicSimilarArtists.value = newSimilarArtists
+                            }
+                        } catch (_: Exception) {
                         }
                     }
 
-                    val songsForYouDeferred = async {
+                    launch {
                         try {
-                            resolveSongsForYou()
-                        } catch (e: Exception) {
-                            defaultStarterTracks().shuffled().take(8)
+                            val songs = resolveSongsForYou()
+                            _songsForYouTracks.value = songs
+                        } catch (_: Exception) {
                         }
                     }
-
-                    _greeting.value = newGreeting
-                    _recentPlayedSongs.value = newRecent
-                    _rediscoveredFavorites.value = newRediscovered
-                    _topArtistStat.value = newTopArtists
-                    resolveMissingDurations(newRecent)
-                    playerManager.reloadCurrentTrackArtwork()
-
-                    val newTracks = tracksDeferred.await()
-                    _trendingTracks.value = newTracks
-                    val newSimilarArtists = similarDeferred.await()
-                    if (newSimilarArtists.isNotEmpty()) {
-                        _currentSimilarToArtist.value = topArtistName
-                        _dynamicSimilarArtists.value = newSimilarArtists
-                    }
-                    _songsForYouTracks.value = songsForYouDeferred.await()
                 }
             } catch (e: Exception) {
                 // Retain current states on error
@@ -520,6 +520,14 @@ class HomeViewModel @Inject constructor(
             artistHistoryStack.addLast(current)
         }
         viewModelScope.launch {
+            // Instant load from memory cache if available
+            val cached = musicMetadataRepository.getCachedArtist(artistName)
+            if (cached != null) {
+                _selectedArtist.value = cached
+                _isArtistLoading.value = false
+                return@launch
+            }
+
             _isArtistLoading.value = true
             _selectedArtist.value = com.sielo.music.core.network.models.ArtistDetails(
                 id = artistId ?: artistName,
@@ -682,21 +690,24 @@ class HomeViewModel @Inject constructor(
         }
     }
 
-    private suspend fun fetchSimilarArtistProfiles(topArtistName: String): List<ArtistProfile> {
+    private suspend fun fetchSimilarArtistProfiles(topArtistName: String): List<ArtistProfile> = withContext(Dispatchers.IO) {
         val names = getSimilarArtistNames(topArtistName)
             .filterNot { it.equals(topArtistName, ignoreCase = true) }
             .distinctBy { it.lowercase().trim() }
+            .take(8)
 
-        val list = mutableListOf<ArtistProfile>()
-        for (name in names) {
-            val photo = YouTubeArtistImageResolver.resolveArtistImageUrl(name)
-                ?: innerTubeClient.getArtistPhotoFromYouTube(name)
-            if (!photo.isNullOrBlank()) {
-                list.add(ArtistProfile(name, photo))
-                if (list.size >= 8) break
+        val deferredProfiles = names.map { name ->
+            async {
+                try {
+                    val photo = YouTubeArtistImageResolver.resolveArtistImageUrl(name)
+                        ?: innerTubeClient.getArtistPhotoFromYouTube(name)
+                    if (!photo.isNullOrBlank()) ArtistProfile(name, photo) else null
+                } catch (_: Exception) {
+                    null
+                }
             }
         }
-        return list
+        deferredProfiles.awaitAll().filterNotNull()
     }
 
     fun loadDynamicSimilarArtists(topArtistName: String, forceRefresh: Boolean = false) {

@@ -15,6 +15,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -29,6 +30,20 @@ class MusicMetadataRepository @Inject constructor(
 
     private val albumCache = ConcurrentHashMap<String, SieloAlbum>()
     private val albumTracksCache = ConcurrentHashMap<String, List<SieloTrack>>()
+
+    /**
+     * Fast synchronous memory cache lookup for artist details.
+     */
+    fun getCachedArtist(artistName: String): ArtistDetails? {
+        val cleanName = artistName.trim()
+        if (cleanName.isBlank()) return null
+        val cached = artistProfileCache.get(cleanName) ?: return null
+        val hasContent = cached.originalAlbums.isNotEmpty() ||
+                cached.featuredAlbums.isNotEmpty() ||
+                cached.singles.isNotEmpty() ||
+                cached.topSongs.isNotEmpty()
+        return if (hasContent) cached else null
+    }
 
     companion object {
         private const val TAG = "MusicMetadata"
@@ -84,24 +99,35 @@ class MusicMetadataRepository @Inject constructor(
             }
         } else {
             // 1. Session Memory Cache Check
-            val cached = artistProfileCache.get(cleanName)
-            if (cached != null && !cached.musicBrainzId.isNullOrBlank()) {
-                val hasDiscography = cached.originalAlbums.isNotEmpty() ||
-                        cached.featuredAlbums.isNotEmpty() ||
-                        cached.singles.isNotEmpty()
-                if (hasDiscography) {
-                    Log.d(TAG, "Cache hit for artist: $cleanName")
-                    return@withContext cached
-                }
+            val cached = getCachedArtist(cleanName)
+            if (cached != null) {
+                Log.d(TAG, "Cache hit for artist: $cleanName")
+                return@withContext cached
             }
         }
 
         Log.d(TAG, "Resolving artist discography from MusicBrainz for: $cleanName (forceRefresh=$forceRefresh)")
 
         coroutineScope {
-            // Parallel metadata jobs
-            val mbArtistDeferred = async { musicBrainzClient.searchArtist(cleanName) }
-            val wikiBioDeferred = async { ArtistMetadataResolver.fetchWikipediaBio(cleanName) }
+            // Parallel metadata jobs with robust timeouts to prevent slow external endpoints from blocking UI
+            val mbArtistDeferred = async {
+                try {
+                    withTimeoutOrNull(2500L) {
+                        musicBrainzClient.searchArtist(cleanName)
+                    }
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            val wikiBioDeferred = async {
+                try {
+                    withTimeoutOrNull(2000L) {
+                        ArtistMetadataResolver.fetchWikipediaBio(cleanName)
+                    }
+                } catch (_: Exception) {
+                    null
+                }
+            }
             val portraitDeferred = async {
                 YouTubeArtistImageResolver.resolveArtistImageUrl(cleanName)
             }
@@ -119,7 +145,9 @@ class MusicMetadataRepository @Inject constructor(
             }
             val fallbackDetailsDeferred = async {
                 try {
-                    innerTubeClient.getArtistDetails(cleanName, imageUrl, artistId)
+                    withTimeoutOrNull(2500L) {
+                        innerTubeClient.getArtistDetails(cleanName, imageUrl, artistId)
+                    }
                 } catch (_: Exception) {
                     null
                 }
@@ -170,7 +198,7 @@ class MusicMetadataRepository @Inject constructor(
                 Log.d(TAG, "MusicBrainz MBID resolved: $mbid for $cleanName (isDeceased=$isDeceased, maxActiveYear=$maxActiveYear)")
 
                 // Fetch release-groups and direct releases in parallel
-                val rgsDeferred = async { musicBrainzClient.getArtistReleaseGroups(mbid, maxLimit = 150) }
+                val rgsDeferred = async { musicBrainzClient.getArtistReleaseGroups(mbid, maxLimit = 100) }
                 val releasesDeferred = async { musicBrainzClient.getArtistReleases(mbid, limit = 100) }
 
                 val releaseGroups = rgsDeferred.await()
