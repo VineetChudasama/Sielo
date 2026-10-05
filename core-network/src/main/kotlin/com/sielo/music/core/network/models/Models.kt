@@ -14,8 +14,21 @@ data class SieloTrack(
     val streamUrl: String? = null,
     val musicBrainzRecordingId: String? = null,
     val isrc: String? = null,
-    val albumId: String? = null
+    val albumId: String? = null,
+    val viewCount: Long = 0L,
+    val isExplicit: Boolean = false
 ) {
+    val formattedViews: String?
+        get() {
+            if (viewCount <= 0L) return null
+            return when {
+                viewCount >= 1_000_000_000L -> String.format(java.util.Locale.US, "%.1fB views", viewCount / 1_000_000_000.0).replace(".0B", "B")
+                viewCount >= 1_000_000L -> String.format(java.util.Locale.US, "%.1fM views", viewCount / 1_000_000.0).replace(".0M", "M")
+                viewCount >= 1_000L -> String.format(java.util.Locale.US, "%.1fK views", viewCount / 1_000.0).replace(".0K", "K")
+                else -> "$viewCount views"
+            }
+        }
+
     val formattedDuration: String
         get() {
             if (!durationText.isNullOrBlank()) return durationText

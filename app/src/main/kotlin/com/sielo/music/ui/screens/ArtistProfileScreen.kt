@@ -18,6 +18,8 @@ import android.graphics.Typeface
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.ui.input.pointer.pointerInput
@@ -1259,8 +1261,8 @@ private fun ArtistPrimaryActionRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         // PLAY BUTTON (Cream #F4F1DE container with Dark Navy #0D1B2A text/icon)
@@ -1274,10 +1276,10 @@ private fun ArtistPrimaryActionRow(
                 disabledContentColor = TextMuted
             ),
             shape = RoundedCornerShape(24.dp),
-            contentPadding = PaddingValues(horizontal = 14.dp),
+            contentPadding = PaddingValues(horizontal = 10.dp),
             modifier = Modifier
-                .weight(1.3f)
-                .height(46.dp)
+                .weight(1.35f)
+                .height(44.dp)
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -1289,9 +1291,10 @@ private fun ArtistPrimaryActionRow(
                     tint = PaletteDarkNavy,
                     modifier = Modifier.size(20.dp)
                 )
-                Spacer(modifier = Modifier.width(6.dp))
+                Spacer(modifier = Modifier.width(4.dp))
                 Text(
                     text = "Play",
+                    color = PaletteDarkNavy,
                     fontFamily = SoraFontFamily,
                     fontWeight = FontWeight.Bold,
                     fontSize = 14.sp,
@@ -1304,13 +1307,13 @@ private fun ArtistPrimaryActionRow(
         // SHUFFLE BUTTON (Dark translucent surface with AnimatedShuffleIcon)
         Box(
             modifier = Modifier
-                .weight(1.3f)
-                .height(46.dp)
+                .weight(1.35f)
+                .height(44.dp)
                 .clip(RoundedCornerShape(24.dp))
                 .background(PaletteOxfordBlue)
                 .border(1.dp, BorderGlass, RoundedCornerShape(24.dp))
                 .clickable(enabled = artist.topSongs.isNotEmpty()) { onShuffle() }
-                .padding(horizontal = 14.dp),
+                .padding(horizontal = 8.dp),
             contentAlignment = Alignment.Center
         ) {
             Row(
@@ -1319,15 +1322,15 @@ private fun ArtistPrimaryActionRow(
             ) {
                 AnimatedShuffleIcon(
                     tint = if (artist.topSongs.isNotEmpty()) PaletteCream else TextMuted,
-                    modifier = Modifier.size(18.dp)
+                    modifier = Modifier.size(16.dp)
                 )
-                Spacer(modifier = Modifier.width(6.dp))
+                Spacer(modifier = Modifier.width(4.dp))
                 Text(
                     text = "Shuffle",
                     color = if (artist.topSongs.isNotEmpty()) PaletteCream else TextMuted,
                     fontFamily = SoraFontFamily,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
+                    fontSize = 13.sp,
                     maxLines = 1,
                     softWrap = false
                 )
@@ -1337,7 +1340,7 @@ private fun ArtistPrimaryActionRow(
         // FOLLOW / FAVORITE BUTTON (Circle)
         Box(
             modifier = Modifier
-                .size(46.dp)
+                .size(44.dp)
                 .clip(CircleShape)
                 .background(PaletteOxfordBlue)
                 .border(1.dp, BorderGlass, CircleShape)
@@ -1348,14 +1351,14 @@ private fun ArtistPrimaryActionRow(
                 imageVector = if (isFollowing) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                 contentDescription = if (isFollowing) "Following" else "Follow",
                 tint = if (isFollowing) Color(0xFFE63946) else PaletteCream,
-                modifier = Modifier.size(20.dp)
+                modifier = Modifier.size(18.dp)
             )
         }
 
         // SHARE BUTTON (Circle)
         Box(
             modifier = Modifier
-                .size(46.dp)
+                .size(44.dp)
                 .clip(CircleShape)
                 .background(PaletteOxfordBlue)
                 .border(1.dp, BorderGlass, CircleShape)
@@ -1374,18 +1377,20 @@ private fun ArtistPrimaryActionRow(
 
 /**
  * Tab Navigation Bar: Music | About | Albums | Similar Artists
- * with active Cream underline indicator.
+ * with active Cream underline indicator and responsive horizontal scrolling.
  */
 @Composable
 private fun ArtistTabNavigation(
     selectedTab: ArtistProfileTab,
     onTabSelected: (ArtistProfileTab) -> Unit
 ) {
+    val scrollState = rememberScrollState()
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .horizontalScroll(scrollState)
             .padding(horizontal = 20.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        horizontalArrangement = Arrangement.spacedBy(24.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         ArtistProfileTab.entries.forEach { tab ->
@@ -1476,15 +1481,34 @@ private fun ArtistTrackRow(
 
                 // Title & Subtitle
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = track.title,
-                        color = if (isPlaying) PaletteSand else PaletteCream,
-                        fontFamily = UrbanistFontFamily,
-                        fontSize = 14.5.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (track.isExplicit) {
+                            Box(
+                                modifier = Modifier
+                                    .padding(end = 5.dp)
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(PaletteSand.copy(alpha = 0.25f))
+                                    .padding(horizontal = 4.dp, vertical = 1.dp)
+                            ) {
+                                Text(
+                                    text = "E",
+                                    color = PaletteSand,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = SoraFontFamily
+                                )
+                            }
+                        }
+                        Text(
+                            text = track.title,
+                            color = if (isPlaying) PaletteSand else PaletteCream,
+                            fontFamily = UrbanistFontFamily,
+                            fontSize = 14.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = "${track.album ?: "Single"} • ${track.formattedDuration}",
@@ -2323,7 +2347,8 @@ private fun ArtistDetailedAboutSection(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                val displayedBio = bio ?: "${artist.name} is a celebrated musical artist featured on Sielo, renowned for their distinctive sound, compelling compositions, and globally streamed catalog."
+                val cleanBio = bio?.trim()?.takeIf { it.isNotBlank() }
+                val displayedBio = cleanBio ?: "-"
 
                 Text(
                     text = displayedBio,
@@ -2335,7 +2360,7 @@ private fun ArtistDetailedAboutSection(
                     overflow = TextOverflow.Ellipsis
                 )
 
-                if (displayedBio.length > 200) {
+                if (cleanBio != null && cleanBio.length > 200) {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = if (isBioExpanded) "Read less" else "Read more",

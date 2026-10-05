@@ -131,7 +131,36 @@ class InnerTubeClient @Inject constructor(
 
             val response = client.newCall(request).execute()
             val bodyString = response.body?.string() ?: return emptyList()
-            parseMusicSearchResults(bodyString)
+            val songTracks = parseMusicSearchResults(bodyString)
+
+            val videoTracks = try {
+                val videoBody = """
+                    {
+                        "context": {
+                            "client": {
+                                "clientName": "WEB_REMIX",
+                                "clientVersion": "1.20260114.01.00",
+                                "hl": "en",
+                                "gl": "US"
+                            }
+                        },
+                        "query": "${query.replace("\"", "\\\"")}",
+                        "params": "EgWKAQIQAWoQEAMQBBAJEAoQBRAREBAQFQ%3D%3D"
+                    }
+                """.trimIndent()
+                val vidReq = Request.Builder()
+                    .url("https://music.youtube.com/youtubei/v1/search")
+                    .post(videoBody.toRequestBody(JSON_MEDIA))
+                    .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
+                    .addHeader("Origin", "https://music.youtube.com")
+                    .addHeader("Referer", "https://music.youtube.com/")
+                    .build()
+                val vidRes = client.newCall(vidReq).execute()
+                val vidString = vidRes.body?.string()
+                if (vidString != null) parseMusicSearchResults(vidString) else emptyList()
+            } catch (_: Exception) { emptyList() }
+
+            TrackMatchValidator.deduplicateTracks(songTracks + videoTracks)
                 .distinctBy { it.id }
                 .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
         } catch (e: Exception) {
@@ -167,11 +196,17 @@ class InnerTubeClient @Inject constructor(
                 val durFormatted = if (durationSec > 0) "${durationSec / 60}:${(durationSec % 60).toString().padStart(2, '0')}" else null
                 val encUrl = obj["encrypted_media_url"]?.jsonPrimitive?.content
                 val streamUrl = if (!encUrl.isNullOrBlank()) decryptDesUrl(encUrl) else null
+                val playCountStr = obj["play_count"]?.jsonPrimitive?.content
+                val viewCount = playCountStr?.toLongOrNull() ?: 0L
 
                 // Ensure JioSaavn results have authentic relevance to the search query
                 if (!TrackMatchValidator.isFuzzyMatch(query, title, null, artist)) {
                     return@mapNotNull null
                 }
+
+                val explicitContent = obj["explicit_content"]?.jsonPrimitive?.content
+                val isExplicit = (explicitContent == "1" || explicitContent?.toIntOrNull() == 1 || title.contains("explicit", ignoreCase = true)) &&
+                    !TrackMatchValidator.isCleanOrCensored(title)
 
                 SieloTrack(
                     id = id,
@@ -181,7 +216,9 @@ class InnerTubeClient @Inject constructor(
                     durationText = durFormatted,
                     durationSeconds = durationSec,
                     thumbnailUrl = image,
-                    streamUrl = streamUrl
+                    streamUrl = streamUrl,
+                    viewCount = viewCount,
+                    isExplicit = isExplicit
                 )
             }.let { TrackMatchValidator.deduplicateTracks(it) }.distinctBy { it.id }
         } catch (e: Exception) {
@@ -195,25 +232,39 @@ class InnerTubeClient @Inject constructor(
         if (cleanQuery.isBlank()) return@withContext emptyList()
 
         coroutineScope {
-            // 1. Query YouTube Music first for verified authentic artists and collaborators
-            val ytDeferred = async { searchYouTubeArtists(cleanQuery) }
-            val rawYtArtists = ytDeferred.await().filter { isValidOfficialArtist(it.name) }
-            val ytArtists = filterFakeAndDuplicateArtists(rawYtArtists)
-
-            // If YouTube returned authentic artists, use them directly to prevent JioSaavn placeholder/fake injection
-            if (ytArtists.isNotEmpty()) {
-                return@coroutineScope filterDuplicateArtistImages(ytArtists)
-            }
-
-            // Fallback to JioSaavn only if YouTube returned no artists
+            // 1. Query YouTube Music for verified authentic artists
+            val ytMusicDeferred = async { searchYouTubeArtists(cleanQuery) }
+            // 2. Query YouTube channels for rising/indie artists with >= 300k subscribers
+            val ytChannelsDeferred = async { searchYouTubeChannelsWithHighSubscribers(cleanQuery) }
+            // 3. Fallback/supplement with JioSaavn
             val saavnDeferred = async { searchArtistsSaavn(cleanQuery) }
+
+            val rawYtArtists = ytMusicDeferred.await().filter { isValidOfficialArtist(it.name) }
+            val rawChannelArtists = ytChannelsDeferred.await().filter { isValidOfficialArtist(it.name) }
             val rawSaavnArtists = saavnDeferred.await().filter {
                 isValidOfficialArtist(it.name) && !isPlaceholderImage(it.imageUrl)
             }
-            val saavnArtists = filterFakeAndDuplicateArtists(rawSaavnArtists)
-            filterDuplicateArtistImages(saavnArtists)
+
+            val combined = mutableListOf<SieloArtist>()
+            val seenKeys = mutableSetOf<String>()
+
+            fun addArtist(artist: SieloArtist) {
+                val key = artist.name.trim().lowercase().replace(Regex("[^a-z0-9]"), "")
+                if (key.isNotBlank() && seenKeys.add(key)) {
+                    combined.add(artist)
+                }
+            }
+
+            // Prioritize YouTube Music artists, then YouTube channel artists with >= 300k subs, then JioSaavn
+            for (a in rawYtArtists) addArtist(a)
+            for (a in rawChannelArtists) addArtist(a)
+            for (a in rawSaavnArtists) addArtist(a)
+
+            val filtered = filterFakeAndDuplicateArtists(combined)
+            filterDuplicateArtistImages(filtered)
         }
     }
+
 
     private fun filterDuplicateArtistImages(artists: List<SieloArtist>): List<SieloArtist> {
         val seenImages = mutableSetOf<String>()
@@ -268,8 +319,11 @@ class InnerTubeClient @Inject constructor(
         return true
     }
 
-    private fun isAuthenticArtistSubtitle(subText: String, hasExistingAuthentic: Boolean): Boolean {
+    private fun isAuthenticArtistSubtitle(subText: String, hasExistingAuthentic: Boolean = false): Boolean {
         val lower = subText.lowercase()
+        if (lower.contains("profile") || lower.contains("topic") || lower.contains("playlist") || lower.contains("podcast")) {
+            return false
+        }
         if (lower.contains("monthly audience")) {
             return true
         }
@@ -282,13 +336,9 @@ class InnerTubeClient @Inject constructor(
             val count = subMatch.groupValues[1].replace(",", "").toLongOrNull() ?: 0L
             return count >= 10000L
         }
-        // Exclude profiles, topic channels
-        if (lower.contains("profile") || lower.contains("topic")) {
-            return false
-        }
-        // If an authentic artist was already found, any subsequent item with plain "Artist" (no audience/subscribers) is an unverified copycat!
-        if (hasExistingAuthentic) {
-            return false
+        // Authentic YouTube Music artist subtitle often states "Artist", "Musician", "Band", or "Singer"
+        if (lower.contains("artist") || lower.contains("musician") || lower.contains("singer") || lower.contains("band")) {
+            return true
         }
         return false
     }
@@ -469,6 +519,139 @@ class InnerTubeClient @Inject constructor(
             e.printStackTrace()
         }
         return filterFakeAndDuplicateArtists(artists)
+    }
+
+    /**
+     * Searches YouTube for channels matching query and returns those with >= 50,000 subscribers.
+     * Allows rising/indie artists not yet on YouTube Music artist shelves to be discovered and played in Sielo.
+     */
+    private suspend fun searchYouTubeChannelsWithHighSubscribers(query: String): List<SieloArtist> = withContext(Dispatchers.IO) {
+        val cleanQuery = query.trim()
+        if (cleanQuery.isBlank()) return@withContext emptyList()
+
+        try {
+            val requestBody = """
+                {
+                    "context": {
+                        "client": {
+                            "clientName": "WEB",
+                            "clientVersion": "2.20231201.00.00",
+                            "hl": "en",
+                            "gl": "US"
+                        }
+                    },
+                    "query": "${cleanQuery.replace("\"", "\\\"")}",
+                    "params": "EgIQAg%3D%3D"
+                }
+            """.trimIndent()
+
+            val request = Request.Builder()
+                .url("https://www.youtube.com/youtubei/v1/search")
+                .post(requestBody.toRequestBody(JSON_MEDIA))
+                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
+                .build()
+
+            val response = client.newCall(request).execute()
+            val bodyString = response.body?.string() ?: return@withContext emptyList()
+            parseYouTubeChannelSearchResults(bodyString, cleanQuery)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun parseYouTubeChannelSearchResults(bodyString: String, query: String): List<SieloArtist> {
+        val artists = mutableListOf<SieloArtist>()
+        try {
+            val root = json.parseToJsonElement(bodyString).jsonObject
+            val sections = root["contents"]?.jsonObject
+                ?.get("twoColumnSearchResultsRenderer")?.jsonObject
+                ?.get("primaryContents")?.jsonObject
+                ?.get("sectionListRenderer")?.jsonObject
+                ?.get("contents")?.jsonArray ?: return emptyList()
+
+            for (section in sections) {
+                val items = section.jsonObject["itemSectionRenderer"]?.jsonObject?.get("contents")?.jsonArray ?: continue
+                for (item in items) {
+                    val cr = item.jsonObject["channelRenderer"]?.jsonObject ?: continue
+                    val channelId = cr["channelId"]?.jsonPrimitive?.content ?: continue
+
+                    // Extract title
+                    val titleSimple = cr["title"]?.jsonObject?.get("simpleText")?.jsonPrimitive?.content
+                    val titleRuns = cr["title"]?.jsonObject?.get("runs")?.jsonArray?.mapNotNull { it.jsonObject["text"]?.jsonPrimitive?.content }?.joinToString("")
+                    val title = (titleSimple ?: titleRuns ?: "").trim()
+                    if (title.isBlank()) continue
+
+                    // Extract subscriber count text from videoCountText, subscriberCountText, or accessibility labels
+                    val s1 = cr["videoCountText"]?.jsonObject?.get("simpleText")?.jsonPrimitive?.content ?: ""
+                    val l1 = cr["videoCountText"]?.jsonObject?.get("accessibility")?.jsonObject?.get("accessibilityData")?.jsonObject?.get("label")?.jsonPrimitive?.content ?: ""
+                    val s2 = cr["subscriberCountText"]?.jsonObject?.get("simpleText")?.jsonPrimitive?.content ?: ""
+                    val l2 = cr["subscriberCountText"]?.jsonObject?.get("accessibility")?.jsonObject?.get("accessibilityData")?.jsonObject?.get("label")?.jsonPrimitive?.content ?: ""
+
+                    val candidateSubsText = "$s1 $l1 $s2 $l2"
+                    val subs = parseSubscriberCount(candidateSubsText)
+
+                    // User requirement: show artists from youtube that have above 50k subscribers
+                    if (subs == null || subs < 50_000L) continue
+
+                    // Reject spam / gaming / clips channels
+                    val titleLower = title.lowercase()
+                    val spamKeywords = listOf(
+                        "gameplay", "roblox", "brookhaven", "asmr", "fanpage", "clips",
+                        "unboxing", "vlog", "comedy", "trolls", "facts", "status", "shorts",
+                        "news", "reaction", "daily", "movie", "series", "episode", "live unedited"
+                    )
+                    if (spamKeywords.any { titleLower.contains(it) }) continue
+
+                    // Extract thumbnail
+                    val thumbs = cr["thumbnail"]?.jsonObject?.get("thumbnails")?.jsonArray
+                    val rawThumb = thumbs?.lastOrNull()?.jsonObject?.get("url")?.jsonPrimitive?.content
+                    val imgUrl = when {
+                        rawThumb.isNullOrBlank() -> null
+                        rawThumb.startsWith("//") -> "https:$rawThumb"
+                        else -> rawThumb
+                    }
+                    val upgradedImg = imgUrl?.let { YouTubeArtistImageResolver.upgradeImageUrl(it) }
+
+                    // Clean channel title (e.g. "BellaOfficials" -> "Bella")
+                    val cleanTitle = title.replace(Regex("(?i)\\s*\\b(officials?|official channel|channel|vevo|records|music)\\b\\s*"), " ").trim()
+                    val finalName = if (cleanTitle.isNotBlank() && cleanTitle.length >= 2) cleanTitle else title
+
+                    artists.add(
+                        SieloArtist(
+                            id = channelId.ifBlank { finalName },
+                            name = finalName,
+                            imageUrl = upgradedImg,
+                            role = "Artist"
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return artists
+    }
+
+    private fun parseSubscriberCount(text: String): Long? {
+        val lower = text.lowercase().trim()
+        val match = Regex("([0-9]+(?:\\.[0-9]+)?)\\s*([kmb]|thousand|million|billion)?\\s*subscribers?\\b").find(lower)
+            ?: Regex("([0-9]+(?:\\.[0-9]+)?)\\s*(thousand|million|billion)\\b").find(lower)
+            ?: Regex("([0-9]+(?:\\.[0-9]+)?)\\s*([kmb])\\b").find(lower)
+        if (match != null) {
+            val num = match.groupValues[1].toDoubleOrNull() ?: return null
+            val unit = match.groupValues[2].lowercase()
+            return when {
+                unit == "k" || unit == "thousand" -> (num * 1_000.0).toLong()
+                unit == "m" || unit == "million" -> (num * 1_000_000.0).toLong()
+                unit == "b" || unit == "billion" -> (num * 1_000_000_000.0).toLong()
+                else -> num.toLong()
+            }
+        }
+        val rawMatch = Regex("([0-9,]+)\\s+subscribers?\\b").find(lower)
+        if (rawMatch != null) {
+            return rawMatch.groupValues[1].replace(",", "").toLongOrNull()
+        }
+        return null
     }
 
     suspend fun getArtistPhotoFromYouTube(artistName: String): String? {
@@ -830,8 +1013,11 @@ class InnerTubeClient @Inject constructor(
                             artistIdOrName
                         } else {
                             val saavnResults = searchArtistsSaavn(cleanQuery)
-                            saavnResults.firstOrNull { it.name.trim().equals(cleanQuery, ignoreCase = true) }?.id
-                                ?: saavnResults.firstOrNull()?.id
+                            val exactMatch = saavnResults.firstOrNull { 
+                                it.name.trim().equals(cleanQuery, ignoreCase = true) ||
+                                it.name.trim().lowercase().replace(Regex("[^a-z0-9]"), "") == cleanQuery.lowercase().replace(Regex("[^a-z0-9]"), "")
+                            }
+                            exactMatch?.id
                         }
                         if (resolvedId != null) {
                             val url = "https://www.jiosaavn.com/api.php?__call=artist.getArtistPageDetails&_format=json&_marker=0&artistId=$resolvedId&n_song=50&n_album=50"
@@ -1031,10 +1217,9 @@ class InnerTubeClient @Inject constructor(
 
                 val bioText = wikiBio?.bio?.takeIf { it.isNotBlank() }
                     ?: root["bio"]?.jsonPrimitive?.content?.takeIf { !it.isNullOrBlank() && !it.equals("null", true) }
-                    ?: "${name} is a celebrated musical artist featured on Sielo, renowned for their acclaimed compositions, iconic releases, and globally streamed catalog."
 
                 val mergedGenres = (verifiedDiscography.primaryGenres + (root["genres"]?.jsonArray?.mapNotNull { it.jsonPrimitive.content } ?: emptyList())).distinct()
-                val similarList = resolveSimilarArtistsForArtist(name, root["similarArtists"]?.jsonArray ?: root["similar_artists"]?.jsonArray)
+                val similarList = resolveSimilarArtistsForArtist(name, root["similarArtists"]?.jsonArray ?: root["similar_artists"]?.jsonArray, mergedGenres, topSongs)
 
                 val details = ArtistDetails(
                     id = artistId ?: name,
@@ -1512,8 +1697,12 @@ class InnerTubeClient @Inject constructor(
         return false
     }
 
-    suspend fun getSimilarArtistsForArtist(artistName: String): List<SieloArtist> = withContext(Dispatchers.IO) {
-        val clusterNames = getCuratedClusterArtists(artistName)
+    suspend fun getSimilarArtistsForArtist(
+        artistName: String,
+        topSongs: List<SieloTrack> = emptyList(),
+        genres: List<String> = emptyList()
+    ): List<SieloArtist> = withContext(Dispatchers.IO) {
+        val clusterNames = getCuratedClusterArtists(artistName, topSongs, genres)
         val seenNames = mutableSetOf<String>()
         seenNames.add(artistName.trim().lowercase())
 
@@ -1536,51 +1725,59 @@ class InnerTubeClient @Inject constructor(
 
     private suspend fun resolveSimilarArtistsForArtist(
         artistName: String,
-        saavnSimilarArray: kotlinx.serialization.json.JsonArray?
+        saavnSimilarArray: kotlinx.serialization.json.JsonArray?,
+        genres: List<String> = emptyList(),
+        topSongs: List<SieloTrack> = emptyList()
     ): List<SieloArtist> = withContext(Dispatchers.IO) {
         val resultList = mutableListOf<SieloArtist>()
         val seenNames = mutableSetOf<String>()
         seenNames.add(artistName.trim().lowercase())
 
-        // 1. First parse JioSaavn similar artists if provided
+        val clusterNames = getCuratedClusterArtists(artistName, topSongs, genres)
+        val isHipHop = isIndianHipHopArtist(artistName, genres, topSongs)
+
+        // 1. First parse JioSaavn similar artists if provided, filtering for genre alignment
         saavnSimilarArray?.forEach { element ->
             try {
                 val obj = element.jsonObject
                 val id = obj["id"]?.jsonPrimitive?.content ?: obj["artistid"]?.jsonPrimitive?.content ?: ""
                 val name = unescapeHtml(obj["name"]?.jsonPrimitive?.content ?: "").trim()
-                if (name.isNotBlank() && !isSelfOrNameVariation(name, artistName) && seenNames.add(name.lowercase())) {
-                    val rawImg = (obj["image"]?.jsonPrimitive?.content ?: obj["imageUrl"]?.jsonPrimitive?.content)
-                        ?.replace("50x50", "500x500")
-                        ?.replace("150x150", "500x500")
-                    val role = obj["role"]?.jsonPrimitive?.content ?: "Artist"
-                    resultList.add(
-                        SieloArtist(
-                            id = if (id.isNotBlank()) id else name,
-                            name = name,
-                            imageUrl = if (rawImg.isNullOrBlank() || rawImg.contains("default")) null else rawImg,
-                            role = role
+                if (name.isNotBlank() && !isSelfOrNameVariation(name, artistName)) {
+                    // For Indian Hip-Hop artists, do not include classical playback/bollywood pop singers from JioSaavn
+                    if (isHipHop && isNonHipHopIndianArtist(name)) {
+                        return@forEach
+                    }
+                    if (seenNames.add(name.lowercase())) {
+                        val rawImg = (obj["image"]?.jsonPrimitive?.content ?: obj["imageUrl"]?.jsonPrimitive?.content)
+                            ?.replace("50x50", "500x500")
+                            ?.replace("150x150", "500x500")
+                        val role = obj["role"]?.jsonPrimitive?.content ?: "Artist"
+                        resultList.add(
+                            SieloArtist(
+                                id = if (id.isNotBlank()) id else name,
+                                name = name,
+                                imageUrl = if (rawImg.isNullOrBlank() || rawImg.contains("default")) null else rawImg,
+                                role = role
+                            )
                         )
-                    )
+                    }
                 }
             } catch (_: Exception) {}
         }
 
-        // 2. If JioSaavn returned fewer than 6, supplement from curated cluster
-        if (resultList.size < 6) {
-            val clusterNames = getCuratedClusterArtists(artistName)
-            for (clusterName in clusterNames) {
-                if (!isSelfOrNameVariation(clusterName, artistName) && seenNames.add(clusterName.lowercase())) {
-                    resultList.add(
-                        SieloArtist(
-                            id = clusterName,
-                            name = clusterName,
-                            imageUrl = null,
-                            role = "Artist"
-                        )
+        // 2. Supplement from genre & language aligned curated cluster
+        for (clusterName in clusterNames) {
+            if (!isSelfOrNameVariation(clusterName, artistName) && seenNames.add(clusterName.lowercase())) {
+                resultList.add(
+                    SieloArtist(
+                        id = clusterName,
+                        name = clusterName,
+                        imageUrl = null,
+                        role = "Artist"
                     )
-                }
-                if (resultList.size >= 10) break
+                )
             }
+            if (resultList.size >= 12) break
         }
 
         // 3. Resolve images in parallel so similar artists appear instantly without lag
@@ -1602,195 +1799,232 @@ class InnerTubeClient @Inject constructor(
         finalArtists
     }
 
-    private fun getCuratedClusterArtists(artistName: String): List<String> {
+    private fun isIndianHipHopArtist(
+        artistName: String,
+        genres: List<String> = emptyList(),
+        topSongs: List<SieloTrack> = emptyList()
+    ): Boolean {
         val lower = artistName.trim().lowercase()
-        return when {
-            // Classical / Golden Era Indian Playback Legends
-            lower.contains("mukesh") -> listOf(
-                "Kishore Kumar", "Mohammed Rafi", "Manna Dey", "Lata Mangeshkar",
-                "Asha Bhosle", "Hemant Kumar", "Talat Mahmood", "Mahendra Kapoor", "K. L. Saigal"
-            )
-            lower.contains("kishore") -> listOf(
-                "Mohammed Rafi", "Mukesh", "Manna Dey", "Lata Mangeshkar",
-                "Asha Bhosle", "Hemant Kumar", "R. D. Burman", "Mahendra Kapoor", "Amit Kumar"
-            )
-            lower.contains("rafi") -> listOf(
-                "Kishore Kumar", "Mukesh", "Manna Dey", "Lata Mangeshkar",
-                "Asha Bhosle", "Talat Mahmood", "Mahendra Kapoor", "Hemant Kumar", "K. L. Saigal"
-            )
-            lower.contains("lata mangeshkar") || lower.contains("lata ji") -> listOf(
-                "Asha Bhosle", "Mohammed Rafi", "Kishore Kumar", "Mukesh",
-                "Geeta Dutt", "Manna Dey", "Suman Kalyanpur", "Hemant Kumar", "Usha Mangeshkar"
-            )
-            lower.contains("asha bhosle") -> listOf(
-                "Lata Mangeshkar", "Mohammed Rafi", "Kishore Kumar", "R. D. Burman",
-                "Geeta Dutt", "Mukesh", "Manna Dey", "Usha Mangeshkar", "Alisha Chinai"
-            )
-            lower.contains("manna dey") || lower.contains("hemant kumar") || lower.contains("talat mahmood") ||
-            lower.contains("mahendra kapoor") || lower.contains("saigal") || lower.contains("geeta dutt") -> listOf(
-                "Mukesh", "Kishore Kumar", "Mohammed Rafi", "Hemant Kumar",
-                "Manna Dey", "Talat Mahmood", "Geeta Dutt", "Lata Mangeshkar", "Mahendra Kapoor"
-            )
-            lower.contains("jagjit") || lower.contains("pankaj udhas") || lower.contains("ghulam ali") ||
-            lower.contains("mehdi hassan") || lower.contains("chitra singh") || lower.contains("bhupinder") -> listOf(
-                "Pankaj Udhas", "Jagjit Singh", "Ghulam Ali", "Mehdi Hassan",
-                "Chitra Singh", "Bhupinder Singh", "Talat Aziz", "Anup Jalota", "Hariharan"
-            )
-            lower.contains("yesudas") || lower.contains("balasubrahmanyam") || lower.contains("spb") ||
-            lower.contains("s. p. b") || lower.contains("chithra") || lower.contains("susheela") || lower.contains("s. janaki") -> listOf(
-                "S. P. Balasubrahmanyam", "K. J. Yesudas", "K. S. Chithra", "S. Janaki",
-                "P. Susheela", "Vani Jairam", "Hariharan", "Mano", "Unni Menon"
-            )
+        val dhhKeywords = listOf(
+            "bella", "seedhe maut", "kr\$na", "krsna", "divine", "mc stan", "stan",
+            "raftaar", "badshah", "emiway", "young stunners", "talha anjum", "talhah yunus",
+            "paradox", "fotty seven", "karma", "king", "dino james", "rawal", "bharg",
+            "ikka", "raga", "spectra", "panther", "gd 47", "gravity", "srushti tawade",
+            "epr", "yashraj", "rebel 7", "frappe ash", "calm", "encore abj", "prabh deep",
+            "sikander kahlon", "muhfaad", "gaush", "kalam ink", "munawar faruqui", "vilen"
+        )
+        if (dhhKeywords.any { lower.contains(it) }) return true
 
-            // Indian Classical (Hindustani / Carnatic)
-            lower.contains("bhimsen") || lower.contains("jasraj") || lower.contains("amonkar") ||
-            lower.contains("gandharva") || lower.contains("bade ghulam") -> listOf(
-                "Pandit Jasraj", "Pandit Bhimsen Joshi", "Kishori Amonkar", "Kumar Gandharva",
-                "Bade Ghulam Ali Khan", "Girija Devi", "Gangubai Hangal", "Ustad Amir Khan"
-            )
-            lower.contains("ravi shankar") || lower.contains("hariprasad") || lower.contains("chaurasia") ||
-            lower.contains("zakir hussain") || lower.contains("shivkumar") || lower.contains("bismillah") || lower.contains("amjad ali") -> listOf(
-                "Hariprasad Chaurasia", "Shivkumar Sharma", "Zakir Hussain", "Ravi Shankar",
-                "Ustad Bismillah Khan", "Amjad Ali Khan", "Ustad Vilayat Khan", "L. Subramaniam"
-            )
-            lower.contains("subbulakshmi") || lower.contains("balamuralikrishna") || lower.contains("semmangudi") -> listOf(
-                "M. S. Subbulakshmi", "M. Balamuralikrishna", "D. K. Pattammal", "M. L. Vasanthakumari",
-                "K. J. Yesudas", "Chembai Vaidyanatha Bhagavatar"
-            )
+        val genreStr = genres.joinToString(" ").lowercase()
+        if (genreStr.contains("desi hip hop") || genreStr.contains("indian hip hop") ||
+            genreStr.contains("hindi rap") || genreStr.contains("desi rap") || genreStr.contains("dhh") ||
+            (genreStr.contains("rap") && (genreStr.contains("hindi") || genreStr.contains("india")))) {
+            return true
+        }
 
-            // Western Golden Era / Crooners / Traditional Pop
-            lower.contains("sinatra") || lower.contains("dean martin") || lower.contains("nat king cole") ||
-            lower.contains("bing crosby") || lower.contains("perry como") || lower.contains("tony bennett") -> listOf(
-                "Dean Martin", "Nat King Cole", "Tony Bennett", "Bing Crosby",
-                "Perry Como", "Sammy Davis Jr.", "Bobby Darin", "Andy Williams", "Elvis Presley"
-            )
-            lower.contains("elvis") || lower.contains("presley") || lower.contains("chuck berry") ||
-            lower.contains("buddy holly") || lower.contains("roy orbison") || lower.contains("johnny cash") -> listOf(
-                "Johnny Cash", "Roy Orbison", "Buddy Holly", "Chuck Berry",
-                "Jerry Lee Lewis", "Little Richard", "Carl Perkins", "Ricky Nelson"
-            )
-            lower.contains("armstrong") || lower.contains("ella fitzgerald") || lower.contains("billie holiday") ||
-            lower.contains("chet baker") || lower.contains("miles davis") -> listOf(
-                "Ella Fitzgerald", "Billie Holiday", "Louis Armstrong", "Chet Baker",
-                "Miles Davis", "Sarah Vaughan", "Nina Simone", "John Coltrane"
-            )
+        val titlesStr = topSongs.map { it.title.lowercase() }.joinToString(" ")
+        if (titlesStr.contains("hustle") || titlesStr.contains("cypher") || titlesStr.contains("freestyle") || titlesStr.contains("dhh")) {
+            return true
+        }
+        return false
+    }
 
-            // sombr & Bedroom Pop / Indie Alternative
-            lower == "sombr" || lower.contains("sombr") -> listOf(
-                "BoyWithUke", "d4vd", "JVKE", "David Kushner",
-                "Stephen Sanchez", "Matt Maltese", "Conan Gray", "Current Joys", "Alec Benjamin"
-            )
+    private fun isNonHipHopIndianArtist(artistName: String): Boolean {
+        val lower = artistName.trim().lowercase()
+        val nonHipHop = listOf(
+            "lata mangeshkar", "kishore kumar", "mohammed rafi", "mukesh", "asha bhosle",
+            "manna dey", "alka yagnik", "kumar sanu", "udit narayan", "anuradha paudwal",
+            "jagjit singh", "pankaj udhas", "bhupinder singh", "anup jalota"
+        )
+        return nonHipHop.any { lower.contains(it) }
+    }
 
-            lower.contains("twenty one pilots") || lower.contains("21 pilots") -> listOf(
-                "Imagine Dragons", "Fall Out Boy", "Panic! At The Disco", "Coldplay",
-                "OneRepublic", "Linkin Park", "The 1975", "My Chemical Romance",
-                "Bastille", "Arctic Monkeys", "The Neighbourhood", "Paramore"
-            )
-            lower.contains("imagine dragons") || lower.contains("onerepublic") -> listOf(
-                "Twenty One Pilots", "Fall Out Boy", "Coldplay", "The Script",
-                "Bastille", "Maroon 5", "Panic! At The Disco", "X Ambassadors", "American Authors"
-            )
-            lower.contains("coldplay") -> listOf(
-                "OneRepublic", "The Script", "Keane", "Maroon 5", "Imagine Dragons",
-                "Snow Patrol", "U2", "Oasis", "The Killers", "Bastille"
-            )
-            lower.contains("linkin park") || lower.contains("evanescence") || lower.contains("green day") -> listOf(
-                "Evanescence", "Green Day", "Three Days Grace", "Breaking Benjamin",
-                "Papa Roach", "System Of A Down", "Slipknot", "Bring Me The Horizon", "Skillet", "Avenged Sevenfold"
-            )
-            lower.contains("arctic monkeys") || lower.contains("the strokes") -> listOf(
-                "The Strokes", "The Neighbourhood", "Cage The Elephant", "Wallows",
-                "Franz Ferdinand", "Foals", "Two Door Cinema Club", "The 1975", "Cigarettes After Sex"
-            )
-            lower.contains("cigarettes after sex") || lower.contains("the neighbourhood") -> listOf(
-                "The Neighbourhood", "Beach House", "Current Joys", "TV Girl",
-                "girl in red", "Mac DeMarco", "Men I Trust", "Joji", "Slowdive", "Lana Del Rey"
-            )
-            lower.contains("weeknd") -> listOf(
-                "Drake", "Bruno Mars", "Post Malone", "Justin Bieber", "Dua Lipa",
-                "Travis Scott", "Frank Ocean", "SZA", "Khalid", "Daft Punk"
-            )
-            lower.contains("taylor swift") -> listOf(
-                "Olivia Rodrigo", "Billie Eilish", "Selena Gomez", "Ariana Grande",
-                "Katy Perry", "Lorde", "Sabrina Carpenter", "Gracie Abrams", "Lana Del Rey", "Ed Sheeran"
-            )
-            lower.contains("billie eilish") || lower.contains("finneas") -> listOf(
-                "FINNEAS", "Olivia Rodrigo", "Melanie Martinez", "Lana Del Rey",
-                "girl in red", "Conan Gray", "Lorde", "Clairo", "Phoebe Bridges", "Sub Urban"
-            )
-            lower.contains("ed sheeran") || lower.contains("shawn mendes") || lower.contains("charlie puth") -> listOf(
-                "Shawn Mendes", "James Arthur", "Charlie Puth", "Lewis Capaldi",
-                "Sam Smith", "Dean Lewis", "George Ezra", "Calum Scott", "Harry Styles", "Niall Horan"
-            )
-            lower.contains("ariana grande") || lower.contains("dua lipa") || lower.contains("selena gomez") -> listOf(
-                "Dua Lipa", "Camila Cabello", "Selena Gomez", "Doja Cat",
-                "Sabrina Carpenter", "Olivia Rodrigo", "Ava Max", "Bebe Rexha", "Katy Perry"
-            )
-            lower.contains("post malone") || lower.contains("juice wrld") -> listOf(
-                "The Weeknd", "Juice WRLD", "Swae Lee", "Khalid", "24kGoldn",
-                "Iann Dior", "The Kid LAROI", "Lil Peep", "Trippie Redd", "Machine Gun Kelly"
-            )
-            lower.contains("lana del rey") -> listOf(
-                "Lorde", "Marina", "Mitski", "Arctic Monkeys", "Cigarettes After Sex",
-                "Phoebe Bridges", "Billie Eilish", "Florence + The Machine", "Clairo"
-            )
-            lower.contains("drake") || lower.contains("travis scott") || lower.contains("kendrick") -> listOf(
-                "Travis Scott", "Kendrick Lamar", "Future", "21 Savage", "Kanye West",
-                "J. Cole", "Lil Baby", "Post Malone", "The Weeknd", "Metro Boomin"
-            )
-            lower.contains("eminem") || lower.contains("50 cent") -> listOf(
-                "50 Cent", "Dr. Dre", "Snoop Dogg", "Jay-Z", "Kendrick Lamar",
-                "NF", "Machine Gun Kelly", "Tupac Shakur", "Lil Wayne", "Joyner Lucas"
-            )
-            lower.contains("arijit") || lower.contains("atif") -> listOf(
-                "Atif Aslam", "Mohit Chauhan", "Shreya Ghoshal", "Armaan Malik",
-                "Vishal Mishra", "Jubin Nautiyal", "Anuv Jain", "Darshan Raval", "Sonu Nigam", "Prateek Kuhad"
-            )
-            lower.contains("rahman") || lower.contains("pritam") || lower.contains("trivedi") -> listOf(
-                "Pritam", "Amit Trivedi", "Shankar Mahadevan", "Anirudh Ravichander",
-                "Ilaiyaraaja", "Harris Jayaraj", "Santhosh Narayanan", "Devi Sri Prasad", "Vishal-Shekhar", "Salim-Sulaiman"
-            )
-            lower.contains("shreya ghoshal") || lower.contains("sunidhi") -> listOf(
-                "Sunidhi Chauhan", "Alka Yagnik", "Neha Kakkar", "Monali Thakur",
-                "Palak Muchhal", "Jonita Gandhi", "Shilpa Rao", "Jasleen Royal", "Arijit Singh"
-            )
-            lower.contains("kk") || lower.contains("krishnakumar") || lower.contains("lucky ali") -> listOf(
-                "Mohit Chauhan", "Lucky Ali", "Shaan", "Sonu Nigam",
-                "Javed Ali", "Papon", "Shafqat Amanat Ali", "Atif Aslam", "Arijit Singh"
-            )
-            lower.contains("anuv jain") || lower.contains("prateek kuhad") || lower.contains("zaeden") -> listOf(
-                "Prateek Kuhad", "Zaeden", "Jasleen Royal", "When Chai Met Toast",
-                "The Local Train", "Osho Jain", "Twin Strings", "Aditya A"
-            )
-            lower.contains("diljit") || lower.contains("ap dhillon") || lower.contains("karan aujla") || lower.contains("sidhu") -> listOf(
-                "AP Dhillon", "Karan Aujla", "Sidhu Moose Wala", "Shubh",
-                "Guru Randhawa", "Amrinder Gill", "Amrit Maan", "Garry Sandhu", "B Praak"
-            )
-            lower.contains("anirudh") || lower.contains("santhosh narayanan") || lower.contains("sid sriram") -> listOf(
-                "Santhosh Narayanan", "Sid Sriram", "G.V. Prakash Kumar", "Harris Jayaraj",
-                "Yuvan Shankar Raja", "Devi Sri Prasad", "Thaman S", "A.R. Rahman", "Hiphop Tamizha"
-            )
-            lower.contains("martin garrix") || lower.contains("alan walker") || lower.contains("avicii") || lower.contains("marshmello") -> listOf(
-                "Avicii", "David Guetta", "Alan Walker", "The Chainsmokers",
-                "Calvin Harris", "Marshmello", "Tiësto", "Alesso", "Kygo", "Zedd", "DJ Snake"
-            )
-            lower.contains("hans zimmer") || lower.contains("john williams") -> listOf(
-                "John Williams", "Ennio Morricone", "Ramin Djawadi", "Howard Shore",
-                "Ludovico Einaudi", "Max Richter", "Danny Elfman", "James Horner", "Alan Silvestri"
-            )
-            lower.contains("bts") || lower.contains("blackpink") || lower.contains("stray kids") -> listOf(
-                "TXT", "Stray Kids", "ENHYPEN", "SEVENTEEN", "BLACKPINK",
-                "EXO", "TWICE", "NewJeans", "ATEEZ", "Jung Kook"
-            )
-            lower.contains("queen") || lower.contains("beatles") || lower.contains("pink floyd") -> listOf(
-                "The Beatles", "Led Zeppelin", "Pink Floyd", "Elton John",
-                "David Bowie", "The Rolling Stones", "AC/DC", "Guns N' Roses", "Fleetwood Mac"
-            )
-            else -> listOf(
-                "The Weeknd", "Imagine Dragons", "Coldplay", "Taylor Swift",
-                "Billie Eilish", "Drake", "Ed Sheeran", "Post Malone"
+    private fun getCuratedClusterArtists(
+        artistName: String,
+        sampleTracks: List<SieloTrack> = emptyList(),
+        genres: List<String> = emptyList()
+    ): List<String> {
+        val lower = artistName.trim().lowercase()
+        val combinedGenres = genres.map { it.lowercase() }.joinToString(" ")
+
+        // 1. Indian Hip-Hop (DHH)
+        if (isIndianHipHopArtist(artistName, genres, sampleTracks)) {
+            return listOf(
+                "Seedhe Maut", "KR\$NA", "DIVINE", "MC Stan", "Bella",
+                "Raftaar", "Emiway Bantai", "Paradox", "Young Stunners", "Talha Anjum",
+                "Karma", "Fotty Seven", "King", "Dino James", "Rawal", "Ikka",
+                "Raga", "Panther", "Prabh Deep"
             )
         }
+
+        // 2. Indian Indie / Acoustic / Smooth / Lo-Fi
+        val indieKeywords = listOf(
+            "anuv jain", "prateek kuhad", "the local train", "osho jain", "jasleen royal",
+            "twin strings", "zaeden", "ritviz", "aditya a", "when chai met toast",
+            "raghav chaitanya", "mitraz", "kushagra thakur", "akshath", "taba chake",
+            "bipul chettri", "bharat chauhan", "tanmaya bhatnagar", "dream note",
+            "samar mehdi", "the yellow diary", "sanam", "lucky ali", "lost stories"
+        )
+        if (indieKeywords.any { lower.contains(it) } || combinedGenres.contains("indian indie") || combinedGenres.contains("desi indie")) {
+            return listOf(
+                "Anuv Jain", "Prateek Kuhad", "The Local Train", "Osho Jain",
+                "Jasleen Royal", "Twin Strings", "Zaeden", "Ritviz", "Mitraz",
+                "Aditya A", "When Chai Met Toast", "Lucky Ali", "Raghav Chaitanya",
+                "Kushagra Thakur", "The Yellow Diary", "Sanam"
+            )
+        }
+
+        // 3. Punjabi Pop / Punjabi Wave
+        val punjabiKeywords = listOf(
+            "ap dhillon", "diljit", "karan aujla", "sidhu moose", "sidhu", "shubh",
+            "talwiinder", "gurinder gill", "amrit maan", "harrdy sandhu", "prem dhillon",
+            "the prophec", "b praak", "jaani", "jass manak", "jordan sandhu", "amrinder gill",
+            "garry sandhu", "mankirt aulakh", "nimrat khaira", "sunanda sharma", "jassi gill",
+            "guru randhawa", "honey singh", "sukhe", "mika singh", "daler mehndi"
+        )
+        val hasGurmukhi = Regex("[\\u0A00-\\u0A7F]").containsMatchIn(artistName)
+        if (hasGurmukhi || punjabiKeywords.any { lower.contains(it) } || combinedGenres.contains("punjabi") || combinedGenres.contains("bhangra")) {
+            return listOf(
+                "AP Dhillon", "Diljit Dosanjh", "Karan Aujla", "Sidhu Moose Wala",
+                "Shubh", "Talwiinder", "Gurinder Gill", "Prem Dhillon",
+                "The PropheC", "B Praak", "Jaani", "Amrit Maan", "Harrdy Sandhu"
+            )
+        }
+
+        // 4. South Indian (Tamil / Telugu / Malayalam / Kannada)
+        val southIndianKeywords = listOf(
+            "anirudh", "sid sriram", "yuvan", "harris jayaraj", "santhosh narayanan",
+            "devi sri prasad", "dsp", "thaman", "sushin shyam", "g. v. prakash",
+            "g.v. prakash", "hesham abdul", "a.r. rahman", "ar rahman", "rahman",
+            "ilaiyaraaja", "ilayaraja", "spb", "balasubrahmanyam", "yesudas",
+            "chithra", "s. janaki", "d. imman", "sean roldan", "hiphop tamizha"
+        )
+        val hasSouthIndianScript = Regex("[\\u0B80-\\u0BFF\\u0C00-\\u0C7F\\u0C80-\\u0CFF\\u0D00-\\u0D7F]").containsMatchIn(artistName)
+        if (hasSouthIndianScript || southIndianKeywords.any { lower.contains(it) } ||
+            combinedGenres.contains("tamil") || combinedGenres.contains("telugu") ||
+            combinedGenres.contains("malayalam") || combinedGenres.contains("kannada")) {
+            return listOf(
+                "Anirudh Ravichander", "Sid Sriram", "Yuvan Shankar Raja", "Harris Jayaraj",
+                "Santhosh Narayanan", "Devi Sri Prasad", "Thaman S", "Sushin Shyam",
+                "G. V. Prakash Kumar", "Hesham Abdul Wahab", "A.R. Rahman"
+            )
+        }
+
+        // 5. Classical & Ghazal Legends (Hindi / Urdu)
+        val classicalGhazalKeywords = listOf(
+            "mukesh", "kishore", "rafi", "lata", "asha bhosle", "manna dey",
+            "hemant kumar", "talat mahmood", "mahendra kapoor", "jagjit", "pankaj udhas",
+            "ghulam ali", "mehdi hassan", "chitra singh", "bhupinder", "nusrat",
+            "rahat", "bhimsen", "jasraj", "zakir hussain", "ravi shankar", "bade ghulam",
+            "hariprasad", "chaurasia", "shivkumar", "bismillah"
+        )
+        if (classicalGhazalKeywords.any { lower.contains(it) }) {
+            return listOf(
+                "Jagjit Singh", "Pankaj Udhas", "Ghulam Ali", "Mehdi Hassan",
+                "Kishore Kumar", "Mohammed Rafi", "Mukesh", "Lata Mangeshkar",
+                "Asha Bhosle", "Hariharan", "Nusrat Fateh Ali Khan", "Rahat Fateh Ali Khan"
+            )
+        }
+
+        // 6. Hindi Romantic / Bollywood Melodies
+        val bollywoodKeywords = listOf(
+            "arijit", "atif", "shreya ghoshal", "jubin", "mohit chauhan",
+            "armaan malik", "vishal mishra", "darshan raval", "sonu nigam", "kk",
+            "krishnakumar", "pritam", "sachin-jigar", "sachin jigar", "javed ali",
+            "papon", "shaan", "neha kakkar", "sunidhi", "akhil sachdeva", "stebin ben",
+            "asim azhar", "sachet", "parampara", "ankit tiwari", "meet bros",
+            "tony kakkar", "palak muchhal", "monali thakur", "shilpa rao", "tulsi kumar",
+            "himesh", "alka yagnik", "kumar sanu", "udit narayan", "abhijeet"
+        )
+        val hasDevanagari = Regex("[\\u0900-\\u097F]").containsMatchIn(artistName)
+        val indianSurnames = listOf(
+            "singh", "kumar", "thakur", "sharma", "verma", "yadav", "gupta", "mishra",
+            "pandey", "patel", "shah", "reddy", "nair", "rao", "chowdhury", "kaur", "khan", "ali", "malik"
+        )
+        if (hasDevanagari || bollywoodKeywords.any { lower.contains(it) } ||
+            combinedGenres.contains("bollywood") || combinedGenres.contains("filmi") ||
+            indianSurnames.any { lower.contains(it) }) {
+            return listOf(
+                "Arijit Singh", "Atif Aslam", "Mohit Chauhan", "Shreya Ghoshal",
+                "Armaan Malik", "Vishal Mishra", "Jubin Nautiyal", "Darshan Raval",
+                "Sonu Nigam", "Pritam", "Sachin-Jigar", "Javed Ali", "KK", "Papon"
+            )
+        }
+
+        // 7. Western Hip-Hop / Rap
+        val westernHipHop = listOf(
+            "kendrick", "drake", "j. cole", "j cole", "travis scott", "21 savage",
+            "future", "metro boomin", "a\$ap rocky", "playboi carti", "kanye",
+            "eminem", "lil baby", "gunna", "lil wayne", "juice wrld", "50 cent",
+            "snoop dogg", "dr. dre", "jay-z", "central cee"
+        )
+        if (westernHipHop.any { lower.contains(it) } || combinedGenres.contains("hip hop") || combinedGenres.contains("rap") || combinedGenres.contains("trap")) {
+            return listOf(
+                "Kendrick Lamar", "Drake", "J. Cole", "Travis Scott", "21 Savage",
+                "Future", "Metro Boomin", "A\$AP Rocky", "Playboi Carti", "Kanye West", "Eminem", "Lil Baby"
+            )
+        }
+
+        // 8. Western Calm / Bedroom Pop / Indie Alternative
+        val westernCalmIndie = listOf(
+            "cigarettes after sex", "phoebe bridgers", "clairo", "hozier", "laufey",
+            "the neighbourhood", "beach house", "girl in red", "mac demarco", "men i trust",
+            "joji", "lana del rey", "stephen sanchez", "sombr", "boywithuke", "d4vd",
+            "jvke", "david kushner", "matt maltese", "conan gray", "current joys", "alec benjamin", "tv girl", "mitski"
+        )
+        if (westernCalmIndie.any { lower.contains(it) } || lower == "sombr" || combinedGenres.contains("bedroom pop") || combinedGenres.contains("dream pop") || combinedGenres.contains("shoegaze")) {
+            return listOf(
+                "Cigarettes After Sex", "The Neighbourhood", "Beach House", "Lana Del Rey",
+                "Clairo", "Phoebe Bridgers", "girl in red", "Mac DeMarco", "Men I Trust",
+                "Joji", "Laufey", "Hozier", "Stephen Sanchez", "sombr"
+            )
+        }
+
+        // 9. Western Rock / Alternative
+        val westernRock = listOf(
+            "imagine dragons", "coldplay", "twenty one pilots", "21 pilots", "linkin park",
+            "arctic monkeys", "the strokes", "green day", "fall out boy", "panic! at the disco",
+            "onerepublic", "the script", "bastille", "the 1975", "muse", "foo fighters", "nirvana", "queen", "radiohead"
+        )
+        if (westernRock.any { lower.contains(it) } || combinedGenres.contains("rock") || combinedGenres.contains("alternative rock")) {
+            return listOf(
+                "Coldplay", "Imagine Dragons", "Twenty One Pilots", "Arctic Monkeys",
+                "The Strokes", "Linkin Park", "Green Day", "Fall Out Boy", "The 1975", "OneRepublic"
+            )
+        }
+
+        // 10. EDM / Dance / Electronic
+        val edmKeywords = listOf(
+            "martin garrix", "alan walker", "avicii", "marshmello", "the chainsmokers",
+            "chainsmokers", "david guetta", "calvin harris", "tiësto", "tiesto", "kygo",
+            "alesso", "zedd", "dj snake", "skrillex", "illenium"
+        )
+        if (edmKeywords.any { lower.contains(it) } || combinedGenres.contains("edm") || combinedGenres.contains("dance") || combinedGenres.contains("electronic")) {
+            return listOf(
+                "Martin Garrix", "Avicii", "Alan Walker", "The Chainsmokers",
+                "David Guetta", "Calvin Harris", "Marshmello", "Kygo", "Tiësto", "Alesso", "DJ Snake", "Zedd"
+            )
+        }
+
+        // 11. K-Pop
+        val kpopKeywords = listOf(
+            "bts", "blackpink", "stray kids", "txt", "enhypen", "seventeen", "twice",
+            "newjeans", "ateez", "jung kook", "le sserafim", "itzy", "aespa", "ive"
+        )
+        val hasHangul = Regex("[\\uAC00-\\uD7AF\\u1100-\\u11FF]").containsMatchIn(artistName)
+        if (hasHangul || kpopKeywords.any { lower.contains(it) } || combinedGenres.contains("k-pop") || combinedGenres.contains("kpop") || combinedGenres.contains("korean")) {
+            return listOf(
+                "BTS", "BLACKPINK", "Stray Kids", "TXT", "ENHYPEN",
+                "SEVENTEEN", "TWICE", "NewJeans", "ATEEZ", "Jung Kook", "LE SSERAFIM"
+            )
+        }
+
+        // 12. Global Pop / Mainstream Hitmakers
+        return listOf(
+            "The Weeknd", "Taylor Swift", "Billie Eilish", "Ariana Grande",
+            "Dua Lipa", "Bruno Mars", "Justin Bieber", "Ed Sheeran", "Olivia Rodrigo",
+            "Sabrina Carpenter", "Harry Styles"
+        )
     }
 
     private suspend fun createGuaranteedArtistProfile(artistName: String, imageUrl: String?): ArtistDetails = coroutineScope {
@@ -1887,9 +2121,8 @@ class InnerTubeClient @Inject constructor(
             songCount = topTracks.size
         )
 
-        val similarList = resolveSimilarArtistsForArtist(cleanName, null)
+        val similarList = resolveSimilarArtistsForArtist(cleanName, null, verifiedDiscography.primaryGenres, topTracks)
         val bioText = wikiBio?.bio?.takeIf { it.isNotBlank() }
-            ?: "${cleanName} is a celebrated musical artist featured on Sielo, renowned for their distinctive sound, compelling compositions, and globally streamed catalog."
 
         return ArtistDetails(
             id = cleanName,
@@ -1926,6 +2159,28 @@ class InnerTubeClient @Inject constructor(
         streamCache[videoId] = CachedStream(url, expiresAtMs)
     }
 
+    private val explicitIdCache = ConcurrentHashMap<String, String>()
+
+    suspend fun resolveExplicitTrackId(title: String, artist: String): String? = withContext(Dispatchers.IO) {
+        val cacheKey = "${title.trim().lowercase()}|${artist.trim().lowercase()}"
+        explicitIdCache[cacheKey]?.let { return@withContext it }
+
+        try {
+            val cleanQuery = "${TrackMatchValidator.cleanTitle(title)} $artist".trim()
+            val candidates = searchYouTube(cleanQuery)
+            val explicitMatch = candidates.firstOrNull { cand ->
+                cand.isExplicit &&
+                TrackMatchValidator.isFuzzyMatch(title, cand.title, artist, cand.artist) &&
+                !TrackMatchValidator.isCleanOrCensored(cand.title)
+            }
+            if (explicitMatch != null) {
+                explicitIdCache[cacheKey] = explicitMatch.id
+                return@withContext explicitMatch.id
+            }
+        } catch (_: Exception) {}
+        null
+    }
+
     suspend fun getStreamUrl(videoId: String, title: String? = null, artist: String? = null): String? = withContext(Dispatchers.IO) {
         val cleanId = videoId.trim()
         if (cleanId.isNotBlank()) {
@@ -1937,17 +2192,36 @@ class InnerTubeClient @Inject constructor(
         }
         android.util.Log.d("InnerTubeClient", "getStreamUrl start: videoId=$cleanId, title=$title, artist=$artist")
 
-        // 1. Primary: YouTube InnerTube stream for the exact tapped track (full length)
-        if (cleanId.isNotBlank()) {
+        // 1. If title and artist are present, verify if there is an official uncensored/explicit version on YouTube Music!
+        var targetVideoId = cleanId
+        if (!title.isNullOrBlank() && !artist.isNullOrBlank()) {
+            val explicitId = resolveExplicitTrackId(title, artist)
+            if (!explicitId.isNullOrBlank() && explicitId != cleanId) {
+                targetVideoId = explicitId
+                android.util.Log.d("InnerTubeClient", "Upgraded track to explicit uncensored version: id=$explicitId for '$title' by '$artist'")
+            }
+        }
+
+        // 2. Primary: YouTube InnerTube stream for the target uncensored track (full length)
+        if (targetVideoId.isNotBlank()) {
+            val ytStream = resolveYouTubeStream(targetVideoId)
+            if (!ytStream.isNullOrBlank()) {
+                android.util.Log.d("InnerTubeClient", "YouTube stream resolved for $targetVideoId")
+                cacheStreamUrl(cleanId, ytStream)
+                cacheStreamUrl(targetVideoId, ytStream)
+                return@withContext ytStream
+            }
+        }
+
+        if (cleanId.isNotBlank() && cleanId != targetVideoId) {
             val ytStream = resolveYouTubeStream(cleanId)
             if (!ytStream.isNullOrBlank()) {
-                android.util.Log.d("InnerTubeClient", "YouTube stream resolved for $cleanId")
                 cacheStreamUrl(cleanId, ytStream)
                 return@withContext ytStream
             }
         }
 
-        // 2. Secondary: JioSaavn direct high-bitrate stream with strict title/artist validation
+        // 3. Secondary: JioSaavn direct high-bitrate stream with strict title/artist validation
         if (!title.isNullOrBlank() || !artist.isNullOrBlank()) {
             val saavnStream = resolveJioSaavnStream(title, artist, cleanId)
             if (!saavnStream.isNullOrBlank()) {
@@ -1994,8 +2268,7 @@ class InnerTubeClient @Inject constructor(
             }
 
             // Strictly validate that the JioSaavn search result matches the requested song!
-            // Never pick an unrelated song!
-            val matchingSong = results.mapNotNull { it.jsonObject }.firstOrNull { obj ->
+            val matchingSongs = results.mapNotNull { it.jsonObject }.filter { obj ->
                 val songTitle = unescapeHtml(obj["song"]?.jsonPrimitive?.content ?: obj["title"]?.jsonPrimitive?.content ?: "")
                 val songArtist = unescapeHtml(obj["primary_artists"]?.jsonPrimitive?.content ?: obj["singers"]?.jsonPrimitive?.content ?: "")
                 if (!title.isNullOrBlank()) {
@@ -2003,10 +2276,21 @@ class InnerTubeClient @Inject constructor(
                 } else {
                     true
                 }
-            } ?: run {
+            }
+
+            if (matchingSongs.isEmpty()) {
                 android.util.Log.w("InnerTubeClient", "No JioSaavn result matched title='$title', artist='$artist'")
                 return null
             }
+
+            // Always choose explicit uncensored song over clean/radio edits
+            val matchingSong = matchingSongs.firstOrNull { obj ->
+                val exp = obj["explicit_content"]?.jsonPrimitive?.content
+                exp == "1" || exp?.toIntOrNull() == 1
+            } ?: matchingSongs.firstOrNull { obj ->
+                val sTitle = unescapeHtml(obj["song"]?.jsonPrimitive?.content ?: "").lowercase()
+                !sTitle.contains("clean") && !sTitle.contains("radio edit") && !sTitle.contains("censored")
+            } ?: matchingSongs.first()
 
             val encryptedUrl = matchingSong["encrypted_media_url"]?.jsonPrimitive?.content ?: return null
 
@@ -2485,9 +2769,38 @@ class InnerTubeClient @Inject constructor(
             val durationText = allPotentialDurations.firstOrNull { it.matches(Regex("""^\d{1,2}:\d{2}(:\d{2})?$""")) }
             val durationSeconds = durationText?.let { parseDurationToSeconds(it) } ?: 0L
 
+            var extractedViews = 0L
+            for (txt in (allSubtitleTexts + fixedRuns)) {
+                val parsed = parseViewsStringToLong(txt)
+                if (parsed != null && parsed > extractedViews) {
+                    extractedViews = parsed
+                }
+            }
+
             if (!isAlbumOrPlaylist && !isPureMusicTrack(title, artist)) {
                 return null
             }
+
+            val badges = item["badges"]?.jsonArray
+                ?: flexColumns.getOrNull(0)?.jsonObject
+                    ?.get("musicResponsiveListItemFlexColumnRenderer")?.jsonObject
+                    ?.get("text")?.jsonObject
+                    ?.get("badges")?.jsonArray
+                ?: flexColumns.getOrNull(1)?.jsonObject
+                    ?.get("musicResponsiveListItemFlexColumnRenderer")?.jsonObject
+                    ?.get("text")?.jsonObject
+                    ?.get("badges")?.jsonArray
+
+            val hasExplicitBadge = badges?.any { badge ->
+                badge.jsonObject["musicInlineBadgeRenderer"]?.jsonObject
+                    ?.get("icon")?.jsonObject
+                    ?.get("iconType")?.jsonPrimitive?.content == "MUSIC_EXPLICIT_BADGE"
+            } == true
+
+            val isExplicit = (hasExplicitBadge ||
+                title.contains(Regex("(?i)\\b(explicit|uncensored|dirty)\\b")) ||
+                allSubtitleTexts.any { it.contains("explicit", ignoreCase = true) }) &&
+                !TrackMatchValidator.isCleanOrCensored(title)
 
             val resolvedDurationText = durationText ?: if (durationSeconds > 0) {
                 val mins = durationSeconds / 60
@@ -2501,10 +2814,30 @@ class InnerTubeClient @Inject constructor(
                 artist = artist,
                 thumbnailUrl = thumbUrl,
                 durationText = resolvedDurationText,
-                durationSeconds = durationSeconds
+                durationSeconds = durationSeconds,
+                viewCount = extractedViews,
+                isExplicit = isExplicit
             )
         } catch (e: Exception) {
             return null
+        }
+    }
+
+    private fun parseViewsStringToLong(raw: String): Long? {
+        val clean = raw.trim().lowercase()
+        if (!clean.contains("view") && !clean.contains("play") && !clean.endsWith("k") && !clean.endsWith("m") && !clean.endsWith("b")) {
+            return null
+        }
+        val match = Regex("""([\d,.]+)\s*([kmbt])?(?:\s*(?:views?|plays?|listeners?))?""").find(clean) ?: return null
+        val numStr = match.groupValues[1].replace(",", "")
+        val multiplier = match.groupValues.getOrNull(2)?.lowercase()
+        val num = numStr.toDoubleOrNull() ?: return null
+        return when (multiplier) {
+            "k" -> (num * 1_000L).toLong()
+            "m" -> (num * 1_000_000L).toLong()
+            "b" -> (num * 1_000_000_000L).toLong()
+            "t" -> (num * 1_000_000_000_000L).toLong()
+            else -> num.toLong()
         }
     }
 

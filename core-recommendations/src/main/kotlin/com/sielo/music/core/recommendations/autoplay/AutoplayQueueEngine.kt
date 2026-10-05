@@ -65,12 +65,26 @@ class AutoplayQueueEngine @Inject constructor(
         }
 
         // 4. Allocate slots: 60% Pool A, 25% Pool B, 15% Pool C (rounding / backfilling as needed)
-        val selectedCandidates = allocatePoolSlots(poolA, poolB, poolC, batchSize)
+        val seedLanguage = SongClassifier.detectLanguage(seedSong)
+        val candidateSlots = allocatePoolSlots(poolA, poolB, poolC, batchSize, seedSong)
+        val selectedCandidates = candidateSlots
             .filter { CandidatePoolBuilder.isCleanStudioTrack(it.title, it.artist) }
             .filterNot { CandidatePoolBuilder.isTitleTooSimilar(it.title, seedSong.title) }
+            .filter { SongClassifier.detectLanguage(it) == seedLanguage }
+
+        val finalCandidates = if (selectedCandidates.size < batchSize) {
+            val fallback = CuratedArtistClusters.defaultFallbackTracks(seedSong)
+                .filter { it.id != seedSong.id }
+                .filter { CandidatePoolBuilder.isCleanStudioTrack(it.title, it.artist) }
+                .filterNot { CandidatePoolBuilder.isTitleTooSimilar(it.title, seedSong.title) }
+                .filter { SongClassifier.detectLanguage(it) == seedLanguage }
+            (selectedCandidates + fallback).distinctBy { it.id }.take(batchSize)
+        } else {
+            selectedCandidates.take(batchSize)
+        }
 
         // 5. Interleave results so consecutive songs aren't from the same artist (within 3 positions)
-        val interleavedQueue = interleaveWithArtistSpacing(selectedCandidates, ARTIST_SEPARATION_DISTANCE)
+        val interleavedQueue = interleaveWithArtistSpacing(finalCandidates, ARTIST_SEPARATION_DISTANCE)
 
         // 6. Mark all selected songs via RecommendationHistoryEntity.markRecommended() with today's local date
         val selectedIds = interleavedQueue.map { it.id }
@@ -128,7 +142,8 @@ class AutoplayQueueEngine @Inject constructor(
         poolA: List<SieloTrack>,
         poolB: List<SieloTrack>,
         poolC: List<SieloTrack>,
-        batchSize: Int
+        batchSize: Int,
+        seedSong: SieloTrack
     ): List<SieloTrack> {
         val targetA = (batchSize * 0.60).roundToInt()
         val targetB = (batchSize * 0.25).roundToInt()
@@ -151,7 +166,7 @@ class AutoplayQueueEngine @Inject constructor(
             val backfill = remainingPool.take(deficit)
             val result = (selectedA + selectedB + selectedC + backfill).toMutableList()
             if (result.size < batchSize) {
-                val emergencyFallback = CuratedArtistClusters.defaultFallbackTracks().filter { it.id !in result.map { r -> r.id } }
+                val emergencyFallback = CuratedArtistClusters.defaultFallbackTracks(seedSong).filter { it.id !in result.map { r -> r.id } }
                 result.addAll(emergencyFallback.take(batchSize - result.size))
             }
             return result

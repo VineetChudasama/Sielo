@@ -153,11 +153,25 @@ class MusicMetadataRepository @Inject constructor(
                 }
             }
 
-            val mbArtist = mbArtistDeferred.await()
+            val rawMbArtist = mbArtistDeferred.await()
             val wikiBio = wikiBioDeferred.await()
             val resolvedPhoto = portraitDeferred.await()
             val fallbackDetails = fallbackDetailsDeferred.await()
             val rawTopTracks = topTracksDeferred.await()
+
+            // Validate that MusicBrainz artist is genuine and not an unrelated artist (e.g. Bella matching Bella Poarch)
+            val cleanLower = cleanName.lowercase().trim()
+            val isGenuineMbMatch = rawMbArtist != null && run {
+                val mbNameLower = rawMbArtist.name.lowercase().trim()
+                if (cleanLower == "bella" && (mbNameLower.contains("poarch") || rawMbArtist.disambiguation?.lowercase()?.contains("poarch") == true)) {
+                    false
+                } else {
+                    mbNameLower == cleanLower ||
+                    mbNameLower.replace(Regex("[^a-z0-9]"), "") == cleanLower.replace(Regex("[^a-z0-9]"), "") ||
+                    (cleanLower.split(" ").size > 1 && mbNameLower.contains(cleanLower))
+                }
+            }
+            val mbArtist = if (isGenuineMbMatch) rawMbArtist else null
 
             val deathYear = mbArtist?.lifeSpan?.end?.take(4)?.toIntOrNull()
             val isDeceased = mbArtist?.lifeSpan?.ended == true || deathYear != null
@@ -544,7 +558,6 @@ class MusicMetadataRepository @Inject constructor(
 
                 val bioText = wikiBio?.bio?.takeIf { it.isNotBlank() }
                     ?: mbArtist.disambiguation?.takeIf { it.isNotBlank() }
-                    ?: "$cleanName is a celebrated musical artist featured on Sielo, renowned for their acclaimed compositions, iconic releases, and globally streamed catalog."
 
                 val genresList = if (mbArtist.tags.isNotEmpty()) {
                     mbArtist.tags.sortedByDescending { it.count }.map { it.name }.take(5)
@@ -554,7 +567,7 @@ class MusicMetadataRepository @Inject constructor(
                 val rawSimilar = if (!fallbackDetails?.similarArtists.isNullOrEmpty()) {
                     fallbackDetails!!.similarArtists
                 } else {
-                    innerTubeClient.getSimilarArtistsForArtist(cleanName)
+                    innerTubeClient.getSimilarArtistsForArtist(cleanName, topSongs, genresList)
                 }
                 val resolvedSimilarArtists = rawSimilar.filter { artist ->
                     val aLower = artist.name.lowercase().trim()
@@ -601,7 +614,7 @@ class MusicMetadataRepository @Inject constructor(
                 val rawFallbackSimilar = if (!profileFallback.similarArtists.isNullOrEmpty()) {
                     profileFallback.similarArtists
                 } else {
-                    innerTubeClient.getSimilarArtistsForArtist(cleanName)
+                    innerTubeClient.getSimilarArtistsForArtist(cleanName, profileFallback.topSongs, profileFallback.genres)
                 }
                 val fallbackSimilar = rawFallbackSimilar.filter { artist ->
                     val aLower = artist.name.lowercase().trim()

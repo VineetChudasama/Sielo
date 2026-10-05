@@ -340,7 +340,10 @@
             }
     
             val finalSelection = if (filtered.isNotEmpty()) filtered else scoredTracks
-            return finalSelection.sortedByDescending { it.second.first }.map { it.first }
+            return finalSelection.sortedWith(
+                compareByDescending<Pair<SieloTrack, Pair<Int, Int>>> { it.first.viewCount }
+                    .thenByDescending { it.second.first }
+            ).map { it.first }
         }
     
         fun refreshArtist() {

@@ -6,6 +6,9 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -61,6 +64,15 @@ class MainActivity : ComponentActivity() {
     @javax.inject.Inject lateinit var userManager: com.sielo.music.core.auth.UserManager
     @javax.inject.Inject lateinit var playerManager: com.sielo.music.core.audio.PlayerManager
     @javax.inject.Inject lateinit var innerTubeClient: com.sielo.music.core.network.innertube.InnerTubeClient
+    @javax.inject.Inject lateinit var followedArtistReleaseNotifier: com.sielo.music.core.notifications.FollowedArtistReleaseNotifier
+
+    private val notificationPermissionLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            triggerReleaseCheck()
+        }
+    }
 
     private val homeViewModel: HomeViewModel by viewModels()
     private val searchViewModel: SearchViewModel by viewModels()
@@ -78,11 +90,46 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         intent.data?.toString()?.let { pendingDeepLink.value = it }
+        handleReleaseNotificationIntent(intent)
+    }
+
+    private fun handleReleaseNotificationIntent(intent: android.content.Intent?) {
+        val trackId = intent?.getStringExtra(com.sielo.music.core.notifications.FollowedArtistReleaseNotifier.EXTRA_TRACK_ID) ?: return
+        val title = intent.getStringExtra(com.sielo.music.core.notifications.FollowedArtistReleaseNotifier.EXTRA_TRACK_TITLE) ?: "Unknown"
+        val artist = intent.getStringExtra(com.sielo.music.core.notifications.FollowedArtistReleaseNotifier.EXTRA_TRACK_ARTIST) ?: "Unknown"
+        val thumb = intent.getStringExtra(com.sielo.music.core.notifications.FollowedArtistReleaseNotifier.EXTRA_TRACK_THUMB)
+        val track = com.sielo.music.core.network.models.SieloTrack(
+            id = trackId,
+            title = title,
+            artist = artist,
+            thumbnailUrl = thumb
+        )
+        playerManager.playTrack(track)
+    }
+
+    private fun triggerReleaseCheck() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val followed = userManager.getFavoriteArtists()
+            if (followed.isNotEmpty()) {
+                followedArtistReleaseNotifier.checkForNewReleases(followed)
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         intent?.data?.toString()?.let { pendingDeepLink.value = it }
+        handleReleaseNotificationIntent(intent)
+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            } else {
+                triggerReleaseCheck()
+            }
+        } else {
+            triggerReleaseCheck()
+        }
 
         // Connect player recommendation engine with dynamic user taste learning
         playerManager.onTrackPlayedTasteListener = { artist, genre ->

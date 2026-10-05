@@ -16,8 +16,8 @@ android {
         applicationId = "com.sielo.music"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1020
-        versionName = "10.2.0"
+        versionCode = 1034
+        versionName = "10.3.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -116,8 +116,10 @@ tasks.matching { it.name == "assembleDebug" }.configureEach {
         val apkFile = file("${layout.buildDirectory.asFile.get()}/outputs/apk/debug/app-debug.apk")
         if (apkFile.exists()) {
             val rootApk = file("${rootDir}/${android.defaultConfig.versionName}.apk")
+            val rootApkPrefixed = file("${rootDir}/Sielo_${android.defaultConfig.versionName}.apk")
             apkFile.copyTo(rootApk, overwrite = true)
-            println("APK successfully copied to: ${rootApk.absolutePath}")
+            apkFile.copyTo(rootApkPrefixed, overwrite = true)
+            println("APK successfully copied to: ${rootApk.absolutePath} and ${rootApkPrefixed.absolutePath}")
         }
     }
 }

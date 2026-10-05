@@ -143,21 +143,37 @@ class MusicBrainzClient @Inject constructor() {
                 return@withContext normalizedMatch
             }
 
-            // 3. Highest score match
+            // 3. Highest score match (only if genuinely compatible name, preventing Bella matching Bella Poarch)
             val topScore = artists.maxByOrNull { it.score ?: 0 }
-            if (topScore != null && (topScore.score ?: 0) >= 80) {
-                Log.d(TAG, "Found high-score match: ${topScore.name} (MBID: ${topScore.id}, score: ${topScore.score})")
-                searchArtistCache[cacheKey] = topScore
-                return@withContext topScore
+            if (topScore != null && (topScore.score ?: 0) >= 85) {
+                val scoreNorm = normalizeName(topScore.name)
+                val targetWords = normalizedTarget.split(" ").filter { it.isNotBlank() }
+                val scoreWords = scoreNorm.split(" ").filter { it.isNotBlank() }
+                val isSafeMatch = (targetWords.size == scoreWords.size) ||
+                    (targetWords.size > 1 && scoreWords.containsAll(targetWords))
+
+                if (isSafeMatch && !isUnrelatedArtistMismatch(trimmed, topScore.name)) {
+                    Log.d(TAG, "Found high-score match: ${topScore.name} (MBID: ${topScore.id}, score: ${topScore.score})")
+                    searchArtistCache[cacheKey] = topScore
+                    return@withContext topScore
+                }
             }
 
-            val fallbackMatch = artists.firstOrNull()
-            searchArtistCache[cacheKey] = fallbackMatch
-            fallbackMatch
+            searchArtistCache[cacheKey] = null
+            null
         } catch (e: Exception) {
             Log.e(TAG, "Error parsing search artist response: ${e.message}", e)
             null
         }
+    }
+
+    private fun isUnrelatedArtistMismatch(query: String, resultName: String): Boolean {
+        val qLower = query.lowercase().trim()
+        val rLower = resultName.lowercase().trim()
+        if (qLower == "bella" && (rLower.contains("poarch") || rLower.contains("thorne") || rLower.contains("hadid"))) {
+            return true
+        }
+        return false
     }
 
     /**

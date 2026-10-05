@@ -42,11 +42,22 @@ object ArtistMetadataResolver {
     private val discographyCache = ConcurrentHashMap<String, VerifiedDiscography>()
     private val photoCache = ConcurrentHashMap<String, String>()
 
+    private val curatedArtistBios = mapOf(
+        "bella" to VerifiedArtistBio(
+            bio = "Deepak Singh, professionally known as Bella (formerly M.C. Bella), is an Indian rapper, singer, and songwriter from Dehradun, Uttarakhand. He rose to fame as the winner of MTV Hustle Season 1 (2019) and has released celebrated projects including 'Home The Album' and 'Chemical Reaction', with hit tracks like 'Dhundhta Hoon', 'Khoya Sab', 'Bematlab', and 'Antidote'.",
+            description = "Indian Rapper, Singer & Songwriter • MTV Hustle Winner",
+            origin = "Dehradun, Uttarakhand, India",
+            activeYears = "2018–present",
+            wikiUrl = null
+        )
+    )
+
     suspend fun fetchWikipediaBio(artistName: String): VerifiedArtistBio? = withContext(Dispatchers.IO) {
         val cleanName = artistName.trim()
         if (cleanName.isBlank() || TrackMatchValidator.isYouTubeChannelId(cleanName)) return@withContext null
 
         val cacheKey = cleanName.lowercase()
+        curatedArtistBios[cacheKey]?.let { return@withContext it }
         bioCache[cacheKey]?.let { return@withContext it }
 
         fun isValidArtistSummary(extract: String?, desc: String?, type: String?): Boolean {
@@ -141,12 +152,12 @@ object ArtistMetadataResolver {
                         val titleClean = title.substringBefore("(").trim().lowercase()
                         val titleTokens = titleClean.split(Regex("[^a-z0-9]+")).filter { it.length >= 2 }
 
-                        // Prevent completely unrelated artists from matching (e.g. Kishore Kumar matching Mukesh Kumar)
+                        // Prevent completely unrelated artists from matching (e.g. Bella matching Bella Poarch, Kishore Kumar matching Mukesh Kumar)
                         val matchesClean = titleClean == cleanTarget
-                        val hasFirstTokenMatch = searchTokens.isNotEmpty() && titleTokens.isNotEmpty() && searchTokens.first() == titleTokens.first()
-                        val containsAllTokens = searchTokens.isNotEmpty() && searchTokens.all { titleClean.contains(it) }
+                        val sameTokens = titleTokens == searchTokens
+                        val isMultiWordValid = searchTokens.size >= 2 && titleTokens.size == searchTokens.size && searchTokens.all { titleClean.contains(it) }
 
-                        if (!matchesClean && !hasFirstTokenMatch && !containsAllTokens) {
+                        if (!matchesClean && !sameTokens && !isMultiWordValid) {
                             continue
                         }
 

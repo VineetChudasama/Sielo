@@ -1109,18 +1109,51 @@ fun SearchResultTrackRow(
                 Spacer(modifier = Modifier.width(12.dp))
 
                 Column {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        if (track.isExplicit) {
+                            Box(
+                                modifier = Modifier
+                                    .padding(end = 5.dp)
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(PaletteSand.copy(alpha = 0.25f))
+                                    .padding(horizontal = 4.dp, vertical = 1.dp)
+                            ) {
+                                Text(
+                                    text = "E",
+                                    color = PaletteSand,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = SoraFontFamily
+                                )
+                            }
+                        }
+                        Text(
+                            text = track.title,
+                            color = PaletteCream,
+                            fontFamily = UrbanistFontFamily,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    val subtitleText = buildString {
+                        append(track.artist)
+                        if (!track.formattedViews.isNullOrBlank()) {
+                            append(" • ")
+                            append(track.formattedViews)
+                        } else if (!track.album.isNullOrBlank()) {
+                            append(" • ")
+                            append(track.album)
+                        } else {
+                            append(" • Single")
+                        }
+                    }
                     Text(
-                        text = track.title,
-                        color = PaletteCream,
-                        fontFamily = UrbanistFontFamily,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "${track.artist} • ${track.album ?: "Single"}",
+                        text = subtitleText,
                         color = TextSecondary,
                         fontFamily = UrbanistFontFamily,
                         fontSize = 12.sp,

@@ -62,7 +62,7 @@ object TrackMatchValidator {
         return true
     }
 
-    private fun cleanTitle(title: String): String {
+    fun cleanTitle(title: String): String {
         return title
             .replace(Regex("(?i)\\(official.*?\\)|\\[official.*?\\]|\\(video.*?\\)|\\[video.*?\\]|\\(audio.*?\\)|\\[audio.*?\\]|\\(lyric.*?\\)|\\[lyric.*?\\]|\\(remix.*?\\)|\\[remix.*?\\]"), "")
             .replace(Regex("(?i)\\b(official music video|official video|official audio|full video|hd 4k|4k|audio|lyric video|remix)\\b"), "")
@@ -70,7 +70,7 @@ object TrackMatchValidator {
             .trim()
     }
 
-    private fun cleanArtist(artist: String): String {
+    fun cleanArtist(artist: String): String {
         return artist
             .replace(Regex("(?i)\\b(topic|vevo|official|channel|music|records)\\b"), "")
             .replace(Regex("[^a-zA-Z0-9\\s]"), " ")
@@ -343,22 +343,38 @@ object TrackMatchValidator {
         val result = ArrayList<com.sielo.music.core.network.models.SieloTrack>()
         for ((_, group) in groups) {
             // Sort each group so that:
-            // 1. Original studio/movie releases come BEFORE compilation re-issues (prevents fake compilation art)
-            // 2. High-res studio artwork (c.saavncdn.com) preferred over YouTube video thumbnails (i.ytimg.com)
-            // 3. Audio stream URL availability preferred
+            // 1. Explicit / Uncensored tracks ALWAYS preferred over clean/censored tracks (0 before 1)
+            // 2. Tracks explicitly titled "clean/radio edit/censored" ALWAYS penalized (1 after 0)
+            // 3. YouTube Topic / official audio preferred over music video (which often censors audio for YouTube guidelines)
+            // 4. Original studio/movie releases come BEFORE compilation re-issues (prevents fake compilation art)
+            // 5. Audio stream URL availability preferred
+            val hasExplicitInGroup = group.any { it.isExplicit }
             val bestTrack = group.minWithOrNull(
                 compareBy<com.sielo.music.core.network.models.SieloTrack> { track ->
-                    if (isCompilationAlbum(track.album, track.artist)) 1 else 0
+                    if (track.isExplicit) 0 else 1
+                }.thenBy { track ->
+                    if (isCleanOrCensored(track.title)) 1 else 0
                 }.thenBy { track ->
                     val thumb = track.thumbnailUrl ?: ""
-                    if (thumb.contains("c.saavncdn.com")) 0 else if (thumb.contains("i.ytimg.com")) 2 else 1
+                    if (thumb.contains("i.ytimg.com") && !thumb.contains("hqdefault.jpg")) 1 else 0
+                }.thenBy { track ->
+                    if (isCompilationAlbum(track.album, track.artist)) 1 else 0
                 }.thenBy { track ->
                     if (!track.streamUrl.isNullOrBlank()) 0 else 1
                 }
             ) ?: group.first()
-            result.add(bestTrack)
+            val maxViews = group.maxOfOrNull { it.viewCount } ?: 0L
+            val resolvedExplicit = bestTrack.isExplicit || hasExplicitInGroup
+            result.add(bestTrack.copy(
+                viewCount = if (maxViews > bestTrack.viewCount) maxViews else bestTrack.viewCount,
+                isExplicit = resolvedExplicit
+            ))
         }
         return result
+    }
+
+    fun isCleanOrCensored(title: String): Boolean {
+        return title.contains(Regex("(?i)\\b(clean|clean version|radio edit|censored|edited)\\b"))
     }
 
     fun isSongByOrFeaturingArtist(

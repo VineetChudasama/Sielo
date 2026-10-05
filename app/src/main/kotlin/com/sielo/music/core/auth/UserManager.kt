@@ -20,7 +20,8 @@ import javax.inject.Singleton
 class UserManager @Inject constructor(
     @ApplicationContext private val context: Context,
     private val databaseCleaner: com.sielo.music.core.database.DatabaseCleaner,
-    private val playerManager: com.sielo.music.core.audio.PlayerManager
+    private val playerManager: com.sielo.music.core.audio.PlayerManager,
+    private val releaseNotifier: dagger.Lazy<com.sielo.music.core.notifications.FollowedArtistReleaseNotifier>
 ) {
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true }
@@ -50,7 +51,12 @@ class UserManager @Inject constructor(
         val savedJson = prefs.getString(KEY_CURRENT_USER, null)
         if (!savedJson.isNullOrBlank()) {
             try {
-                val profile = json.decodeFromString<UserProfile>(savedJson)
+                var profile = json.decodeFromString<UserProfile>(savedJson)
+                if (profile.createdAt <= 0L) {
+                    val storedCreated = prefs.getLong("account_created_timestamp", System.currentTimeMillis())
+                    profile = profile.copy(createdAt = storedCreated)
+                    persistUser(profile)
+                }
                 _currentUser.value = profile
                 if (!profile.hasCompletedOnboarding) {
                     _isOnboardingOpen.value = true
@@ -172,6 +178,8 @@ class UserManager @Inject constructor(
         photoUrl: String?,
         provider: AuthProvider
     ): UserProfile {
+        val now = System.currentTimeMillis()
+        prefs.edit().putLong("account_created_timestamp", now).apply()
         return UserProfile(
             id = UUID.randomUUID().toString(),
             name = name,
@@ -182,8 +190,19 @@ class UserManager @Inject constructor(
             favoriteArtists = emptyList(),
             favoriteGenres = emptyList(),
             artistTasteWeights = emptyMap(),
-            genreTasteWeights = emptyMap()
+            genreTasteWeights = emptyMap(),
+            createdAt = now
         )
+    }
+
+    fun getAccountCreationTime(): Long {
+        val userCreated = _currentUser.value?.createdAt
+        if (userCreated != null && userCreated > 0L) return userCreated
+        val stored = prefs.getLong("account_created_timestamp", 0L)
+        if (stored > 0L) return stored
+        val now = System.currentTimeMillis()
+        prefs.edit().putLong("account_created_timestamp", now).apply()
+        return now
     }
 
     fun completeOnboarding(selectedArtists: List<String>, selectedGenres: List<String>) {
@@ -271,6 +290,13 @@ class UserManager @Inject constructor(
             artistTasteWeights = updatedWeights
         )
         persistUser(updated)
+        if (!isFollowed) {
+            scope.launch {
+                try {
+                    releaseNotifier.get().onArtistFollowed(clean)
+                } catch (_: Exception) {}
+            }
+        }
         return !isFollowed
     }
 

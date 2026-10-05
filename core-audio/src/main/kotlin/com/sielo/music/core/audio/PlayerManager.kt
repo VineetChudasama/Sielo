@@ -339,6 +339,67 @@ class PlayerManager @Inject constructor(
                 }
             }
 
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                if (mediaItem == null) return
+                val mediaId = mediaItem.mediaId
+                val currentState = _playbackState.value
+                val cur = currentState.currentTrack
+                if (mediaId == cur?.id) return
+
+                val queue = currentState.queue
+                val targetIndex = queue.indexOfFirst { it.id == mediaId }
+                if (targetIndex != -1) {
+                    val nextTrack = queue[targetIndex]
+                    Log.d("SieloPlayer", "Seamless onMediaItemTransition to: ${nextTrack.title} (reason=$reason)")
+
+                    flushCurrentListeningDuration()
+                    if (cur != null) {
+                        recordTrackCompleted(cur)
+                    }
+
+                    currentTrackAccumulatedPlayedMs = 0L
+                    lastTrackingTimestamp = System.currentTimeMillis()
+                    lastDbFlushTimestamp = System.currentTimeMillis()
+
+                    val expectedDurationMs = if (nextTrack.durationSeconds > 0) nextTrack.durationSeconds * 1000L else 0L
+                    _playbackState.update {
+                        it.copy(
+                            currentTrack = nextTrack,
+                            queueIndex = targetIndex,
+                            currentPositionMs = 0L,
+                            durationMs = expectedDurationMs,
+                            isPlaying = true,
+                            isBuffering = false
+                        )
+                    }
+
+                    savePlaybackState(nextTrack, queue, targetIndex, 0L, expectedDurationMs)
+                    recordTrackStart(nextTrack)
+
+                    // Prune played items from ExoPlayer so current item is index 0
+                    mediaController?.let { ctrl ->
+                        if (ctrl.currentMediaItemIndex > 0) {
+                            try {
+                                ctrl.removeMediaItems(0, ctrl.currentMediaItemIndex)
+                            } catch (_: Exception) {}
+                        }
+                    }
+
+                    // Replenish dynamic queue if running low
+                    val remainingUpcoming = queue.size - 1 - targetIndex
+                    if (remainingUpcoming < 20) {
+                        if (currentQueueScope == QueueScope.OPEN) {
+                            triggerAutoplayGeneration(nextTrack, isReseed = false)
+                        } else if (currentQueueScope == QueueScope.ARTIST_ONLY && !scopeArtistName.isNullOrBlank()) {
+                            triggerArtistAutoplayGeneration(nextTrack, scopeArtistName!!)
+                        }
+                    }
+
+                    // Preload next upcoming track into ExoPlayer
+                    preloadNextTrack(targetIndex, queue)
+                }
+            }
+
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                 val curTrack = _playbackState.value.currentTrack
                 val schemeHost = try {
@@ -381,12 +442,12 @@ class PlayerManager @Inject constructor(
         currentlyLoadingTrackId = track.id
 
         scope.launch {
-            // Stop and clear previous player item immediately to prevent old song audio from leaking
+            // Pause previous playback immediately so old audio stops,
+            // but DO NOT clear media items or stop player yet to prevent the notification tab from vanishing!
             val ctrl = mediaController ?: getController()
             if (ctrl != null) {
                 try {
-                    ctrl.stop()
-                    ctrl.clearMediaItems()
+                    ctrl.pause()
                 } catch (_: Exception) {}
             }
 
@@ -416,7 +477,9 @@ class PlayerManager @Inject constructor(
 
             val originalIdx = queue.indexOf(track).coerceAtLeast(0)
             originalQueue = queue
-            val activeQueue = if (_playbackState.value.isShuffle && queue.size > 1) {
+            val activeQueue = if (resetScope && currentQueueScope == QueueScope.OPEN) {
+                listOf(track)
+            } else if (_playbackState.value.isShuffle && queue.size > 1) {
                 val pastTracks = queue.take(originalIdx)
                 val upcomingTracks = queue.drop(originalIdx + 1).shuffled()
                 pastTracks + listOf(track) + upcomingTracks
@@ -458,7 +521,7 @@ class PlayerManager @Inject constructor(
             }
 
             if (currentQueueScope == QueueScope.OPEN) {
-                val shouldReseed = !isKnownAutoplayTrack && (queue.size <= 1 || autoplaySession.currentSeed.value?.id != track.id)
+                val shouldReseed = resetScope || !isKnownAutoplayTrack || (activeQueue.size <= 1 || autoplaySession.currentSeed.value?.id != track.id)
                 val remainingUpcoming = activeQueue.size - 1 - index
                 if (shouldReseed || remainingUpcoming < 20) {
                     triggerAutoplayGeneration(track, isReseed = shouldReseed)
@@ -543,8 +606,8 @@ class PlayerManager @Inject constructor(
                         currentlyLoadingTrackId = null
                         Log.d("SieloPlayer", "MediaItem committed and playback started for trackId=${track.id}, generation=$generation")
 
-                        // Background prefetch stream URLs for the next songs in queue so upcoming playback is instantaneous
-                        prefetchUpcomingTracks(index, activeQueue)
+                        // Preload the next upcoming track directly into ExoPlayer for seamless gapless playback (<1s gap)
+                        preloadNextTrack(index, activeQueue)
                     } else {
                         currentlyLoadingTrackId = null
                         Log.e("SieloPlayer", "MediaController is null, cannot start playback.")
@@ -563,17 +626,64 @@ class PlayerManager @Inject constructor(
         }
     }
 
-    private fun prefetchUpcomingTracks(currentIndex: Int, queue: List<SieloTrack>) {
-        prefetchJob?.cancel()
+    private var preloadJob: Job? = null
+
+    private fun preloadNextTrack(currentIndex: Int, queue: List<SieloTrack>) {
+        preloadJob?.cancel()
         if (queue.isEmpty()) return
-        prefetchJob = scope.launch(Dispatchers.IO) {
-            delay(1500L) // Wait for current track audio buffer to settle first
-            val upcoming = queue.drop(currentIndex + 1).take(2)
-            for (next in upcoming) {
-                if (!isActive) break
-                try {
-                    innerTubeClient.getStreamUrl(next.id, next.title, next.artist)
-                } catch (_: Exception) {}
+        val nextIndex = currentIndex + 1
+        if (nextIndex !in queue.indices) return
+        val nextTrack = queue[nextIndex]
+
+        preloadJob = scope.launch(Dispatchers.IO) {
+            delay(1000L) // Wait briefly for current track to start cleanly
+            if (!isActive) return@launch
+            try {
+                val streamUrl = innerTubeClient.getStreamUrl(nextTrack.id, nextTrack.title, nextTrack.artist)
+                if (!streamUrl.isNullOrBlank() && isActive) {
+                    withContext(Dispatchers.Main) {
+                        val ctrl = mediaController ?: return@withContext
+                        // Ensure player has not moved to another track
+                        if (_playbackState.value.queueIndex != currentIndex) return@withContext
+
+                        val alreadyQueued = (0 until ctrl.mediaItemCount).any { idx ->
+                            ctrl.getMediaItemAt(idx).mediaId == nextTrack.id
+                        }
+                        if (!alreadyQueued) {
+                            val mediaMetadata = MediaMetadata.Builder()
+                                .setTitle(nextTrack.title)
+                                .setArtist(nextTrack.artist)
+                                .setAlbumTitle(nextTrack.album)
+                                .setArtworkUri(nextTrack.thumbnailUrl?.toUri())
+                                .build()
+
+                            val nextMediaItem = MediaItem.Builder()
+                                .setMediaId(nextTrack.id)
+                                .setUri(streamUrl)
+                                .setMediaMetadata(mediaMetadata)
+                                .build()
+
+                            // If player has items beyond current, remove them first
+                            val currentItemIdx = ctrl.currentMediaItemIndex
+                            if (ctrl.mediaItemCount > currentItemIdx + 1) {
+                                ctrl.removeMediaItems(currentItemIdx + 1, ctrl.mediaItemCount)
+                            }
+                            ctrl.addMediaItem(nextMediaItem)
+                            Log.d("SieloPlayer", "Successfully preloaded next track into ExoPlayer: ${nextTrack.title}")
+                        }
+                    }
+                }
+
+                // Prefetch one more track URL in background cache
+                val secondNextIndex = nextIndex + 1
+                if (secondNextIndex in queue.indices && isActive) {
+                    val secondTrack = queue[secondNextIndex]
+                    try {
+                        innerTubeClient.getStreamUrl(secondTrack.id, secondTrack.title, secondTrack.artist)
+                    } catch (_: Exception) {}
+                }
+            } catch (e: Exception) {
+                Log.w("SieloPlayer", "Error preloading next track ${nextTrack.id}: ${e.message}")
             }
         }
     }
@@ -655,7 +765,10 @@ class PlayerManager @Inject constructor(
                             }
 
                             if (trackToAutoPlay != null) {
-                                playTrack(trackToAutoPlay!!, newQueueSnapshot)
+                                playTrack(trackToAutoPlay!!, newQueueSnapshot, resetScope = false)
+                            } else {
+                                val state = _playbackState.value
+                                preloadNextTrack(state.queueIndex, state.queue)
                             }
                         }
                     }
@@ -735,6 +848,9 @@ class PlayerManager @Inject constructor(
 
                     if (trackToAutoPlay != null) {
                         playTrack(trackToAutoPlay!!, newQueueSnapshot, resetScope = false)
+                    } else {
+                        val state = _playbackState.value
+                        preloadNextTrack(state.queueIndex, state.queue)
                     }
                 } catch (e: Exception) {
                     android.util.Log.e("SieloAudio", "Error in triggerArtistAutoplayGeneration: ${e.message}", e)
@@ -919,7 +1035,19 @@ class PlayerManager @Inject constructor(
             }
         }
         if (nextIndex in queue.indices) {
-            playTrack(queue[nextIndex], queue, resetScope = false)
+            val candidate = queue[nextIndex]
+            val ctrl = mediaController
+            val currentItemIdx = ctrl?.currentMediaItemIndex ?: -1
+            if (ctrl != null && currentItemIdx >= 0 && ctrl.mediaItemCount > currentItemIdx + 1 && ctrl.getMediaItemAt(currentItemIdx + 1).mediaId == candidate.id) {
+                // Next track is already preloaded in ExoPlayer! Seek to next media item for instantaneous transition (<1s gap)
+                ctrl.seekToNextMediaItem()
+                ctrl.play()
+            } else {
+                try {
+                    ctrl?.pause()
+                } catch (_: Exception) {}
+                playTrack(candidate, queue, resetScope = false)
+            }
         } else {
             if (currentQueueScope == QueueScope.ALBUM_ONLY) {
                 // Loop album queue to first track

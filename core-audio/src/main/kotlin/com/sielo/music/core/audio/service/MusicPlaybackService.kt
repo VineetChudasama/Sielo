@@ -96,6 +96,7 @@ class MusicPlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
 
+
         // 1. Audio Attributes for Music Stream
         val audioAttributes = AudioAttributes.Builder()
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
@@ -224,23 +225,43 @@ class MusicPlaybackService : MediaSessionService() {
                        super.isCommandAvailable(command)
             }
 
-            override fun hasNextMediaItem(): Boolean = true
-            override fun hasPreviousMediaItem(): Boolean = true
+            override fun hasNextMediaItem(): Boolean = player.hasNextMediaItem() || true
+            override fun hasPreviousMediaItem(): Boolean = player.hasPreviousMediaItem() || true
 
             override fun seekToNext() {
-                triggerSkipNext()
+                if (player.hasNextMediaItem()) {
+                    player.seekToNextMediaItem()
+                } else {
+                    triggerSkipNext()
+                }
             }
 
             override fun seekToNextMediaItem() {
-                triggerSkipNext()
+                if (player.hasNextMediaItem()) {
+                    player.seekToNextMediaItem()
+                } else {
+                    triggerSkipNext()
+                }
             }
 
             override fun seekToPrevious() {
-                triggerSkipPrevious()
+                if (player.currentPosition > 3000L) {
+                    player.seekTo(0L)
+                } else if (player.hasPreviousMediaItem()) {
+                    player.seekToPreviousMediaItem()
+                } else {
+                    triggerSkipPrevious()
+                }
             }
 
             override fun seekToPreviousMediaItem() {
-                triggerSkipPrevious()
+                if (player.currentPosition > 3000L) {
+                    player.seekTo(0L)
+                } else if (player.hasPreviousMediaItem()) {
+                    player.seekToPreviousMediaItem()
+                } else {
+                    triggerSkipPrevious()
+                }
             }
         }
 
@@ -334,12 +355,22 @@ class MusicPlaybackService : MediaSessionService() {
             when (playerCommand) {
                 Player.COMMAND_SEEK_TO_NEXT,
                 Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> {
-                    triggerSkipNext()
+                    if (player.hasNextMediaItem()) {
+                        player.seekToNextMediaItem()
+                    } else {
+                        triggerSkipNext()
+                    }
                     return SessionResult.RESULT_SUCCESS
                 }
                 Player.COMMAND_SEEK_TO_PREVIOUS,
                 Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> {
-                    triggerSkipPrevious()
+                    if (player.currentPosition > 3000L) {
+                        player.seekTo(0L)
+                    } else if (player.hasPreviousMediaItem()) {
+                        player.seekToPreviousMediaItem()
+                    } else {
+                        triggerSkipPrevious()
+                    }
                     return SessionResult.RESULT_SUCCESS
                 }
             }

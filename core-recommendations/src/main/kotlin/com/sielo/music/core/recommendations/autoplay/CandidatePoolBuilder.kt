@@ -90,6 +90,20 @@ open class CandidatePoolBuilder @Inject constructor(
 
             return false
         }
+
+        fun isArtistTitleInversion(candidateTitle: String, candidateArtist: String, targetArtist: String): Boolean {
+            if (targetArtist.isBlank()) return false
+            val t = targetArtist.lowercase().trim()
+            val cTitle = candidateTitle.lowercase().trim()
+            val cArtist = candidateArtist.lowercase().trim()
+            // If the candidate's TITLE contains the target artist (e.g. title is "Lost Stories"),
+            // but the candidate's ARTIST does NOT contain the target artist (e.g. artist is "Alas Conor"):
+            // That's an inverted match! It's someone else's song named after the artist.
+            if (cTitle.contains(t) && !cArtist.contains(t)) {
+                return true
+            }
+            return false
+        }
     }
 
     open suspend fun buildCandidatePools(
@@ -124,6 +138,9 @@ open class CandidatePoolBuilder @Inject constructor(
         today: String,
         now: Long = System.currentTimeMillis()
     ): List<SieloTrack> {
+        val seedLanguage = SongClassifier.detectLanguage(seedSong)
+        val seedVibe = SongClassifier.detectVibe(seedSong)
+
         val historyTracks = try {
             val topArtists = listeningHistoryDao.getTopArtistsSnapshot(sinceMs = 0L, limit = TOP_ARTISTS_LIMIT)
             val artistList = (listOf(seedArtist) + topArtists.map { it.artistName })
@@ -137,6 +154,10 @@ open class CandidatePoolBuilder @Inject constructor(
                     .filter { it.songId != seedSong.id }
                     .filter { isCleanStudioTrack(it.songTitle, it.artistName) }
                     .filterNot { isTitleTooSimilar(it.songTitle, seedSong.title) }
+                    .filter {
+                        val trackObj = SieloTrack(it.songId, it.songTitle, it.artistName)
+                        SongClassifier.detectLanguage(trackObj) == seedLanguage
+                    }
 
                 val ineligibleIds = recommendationHistoryDao.getIneligibleSongIds(rawSongs.map { it.songId }, today).toSet()
 
@@ -170,19 +191,41 @@ open class CandidatePoolBuilder @Inject constructor(
             return historyTracks
         }
 
-        // Cold-start / low history fallback: resolve seed artist's top tracks
+        // Cold-start / low history fallback: resolve seed artist's top tracks adhering strictly to language and vibe
         val networkTracks = try {
-            val query = if (seedArtist.isNotBlank()) "$seedArtist official songs" else "${seedSong.title} official"
+            val query = when (seedLanguage) {
+                SongLanguage.HINDI -> when (seedVibe) {
+                    SongVibe.ROMANTIC -> if (seedArtist.isNotBlank()) "$seedArtist top bollywood romantic songs" else "Best Bollywood Romantic Songs"
+                    SongVibe.SMOOTH_CALM -> if (seedArtist.isNotBlank()) "$seedArtist acoustic soothing songs" else "Hindi Acoustic Soothing Indie Songs"
+                    SongVibe.LOFI -> if (seedArtist.isNotBlank()) "$seedArtist bollywood lofi chill" else "Bollywood Lofi Chill Songs"
+                    SongVibe.RAP_HIPHOP -> if (seedArtist.isNotBlank()) "$seedArtist desi hip hop best songs" else "Desi Hip Hop Hits"
+                    SongVibe.ENERGETIC_PARTY -> if (seedArtist.isNotBlank()) "$seedArtist party dance hits" else "Bollywood Party Dance Hits"
+                    else -> if (seedArtist.isNotBlank()) "$seedArtist official songs" else "${seedSong.title} official"
+                }
+                SongLanguage.PUNJABI -> if (seedArtist.isNotBlank()) "$seedArtist top punjabi hits" else "Top Punjabi Hits"
+                SongLanguage.SOUTH_INDIAN -> if (seedArtist.isNotBlank()) "$seedArtist top hits" else "Top South Indian Hits"
+                SongLanguage.ENGLISH -> when (seedVibe) {
+                    SongVibe.ROMANTIC -> if (seedArtist.isNotBlank()) "$seedArtist love songs" else "Top Romantic English Hits"
+                    SongVibe.SMOOTH_CALM -> if (seedArtist.isNotBlank()) "$seedArtist acoustic calm indie" else "Smooth Soothing Calm Indie Songs"
+                    SongVibe.LOFI -> if (seedArtist.isNotBlank()) "$seedArtist lofi chill beats" else "Chill Lofi Study Beats"
+                    SongVibe.RAP_HIPHOP -> if (seedArtist.isNotBlank()) "$seedArtist top rap hits" else "Top Hip Hop Rap Bangers"
+                    SongVibe.ENERGETIC_PARTY -> if (seedArtist.isNotBlank()) "$seedArtist edm dance hits" else "Top EDM Festival Hits"
+                    else -> if (seedArtist.isNotBlank()) "$seedArtist greatest hits" else "${seedSong.title} official"
+                }
+                else -> if (seedArtist.isNotBlank()) "$seedArtist official songs" else "${seedSong.title} official"
+            }
             innerTubeClient.search(query)
                 .filter { it.id != seedSong.id }
                 .filter { isCleanStudioTrack(it.title, it.artist) }
                 .filterNot { isTitleTooSimilar(it.title, seedSong.title) }
+                .filterNot { isArtistTitleInversion(it.title, it.artist, seedArtist) }
+                .filter { SongClassifier.detectLanguage(it) == seedLanguage }
                 .take(10)
         } catch (_: Exception) {
             emptyList()
         }
 
-        val combined = (historyTracks + networkTracks + CuratedArtistClusters.defaultFallbackTracks())
+        val combined = (historyTracks + networkTracks + CuratedArtistClusters.defaultFallbackTracks(seedSong))
             .filter { it.id != seedSong.id }
             .filter { isCleanStudioTrack(it.title, it.artist) }
             .filterNot { isTitleTooSimilar(it.title, seedSong.title) }
@@ -196,7 +239,7 @@ open class CandidatePoolBuilder @Inject constructor(
 
     /**
      * Pool B — "Discovery" (~25% of final queue):
-     * - Similar artists from SimilarArtistsRepository -> InnerTube similar names -> Curated clusters
+     * - Similar artists tailored to the same language & vibe
      * - Concurrently fetch top tracks for top similar artists
      * - Exclude remixes, edits, and ineligible songs today
      */
@@ -206,11 +249,16 @@ open class CandidatePoolBuilder @Inject constructor(
         today: String
     ): List<SieloTrack> = coroutineScope {
         try {
+            val seedLanguage = SongClassifier.detectLanguage(seedSong)
+            val seedVibe = SongClassifier.detectVibe(seedSong)
+
             // 1. Try SimilarArtistsRepository with a short timeout
             var similarArtistNames = try {
-                kotlinx.coroutines.withTimeoutOrNull(4000L) {
+                kotlinx.coroutines.withTimeoutOrNull(3000L) {
                     val similarResult = similarArtistsRepository.getSimilarArtists(seedArtist, limit = SIMILAR_ARTISTS_LIMIT)
-                    similarResult.getOrNull()?.map { it.name }.orEmpty()
+                    similarResult.getOrNull()?.map { it.name }
+                        ?.filter { SongClassifier.isArtistCompatible(it, seedLanguage) }
+                        .orEmpty()
                 }.orEmpty()
             } catch (_: Exception) {
                 emptyList()
@@ -219,17 +267,18 @@ open class CandidatePoolBuilder @Inject constructor(
             // 2. Fallback to InnerTube similar artist names
             if (similarArtistNames.isEmpty()) {
                 similarArtistNames = try {
-                    kotlinx.coroutines.withTimeoutOrNull(3000L) {
+                    kotlinx.coroutines.withTimeoutOrNull(2500L) {
                         innerTubeClient.getSimilarArtistNames(seedArtist)
+                            .filter { SongClassifier.isArtistCompatible(it, seedLanguage) }
                     }.orEmpty()
                 } catch (_: Exception) {
                     emptyList()
                 }
             }
 
-            // 3. Fallback to curated in-memory artist clusters
+            // 3. Fallback to curated in-memory artist clusters with language & vibe awareness
             if (similarArtistNames.isEmpty()) {
-                similarArtistNames = CuratedArtistClusters.getSimilarArtists(seedArtist)
+                similarArtistNames = CuratedArtistClusters.getSimilarArtists(seedArtist, seedSong)
             }
 
             val targetArtists = similarArtistNames
@@ -237,16 +286,26 @@ open class CandidatePoolBuilder @Inject constructor(
                 .take(4)
 
             if (targetArtists.isEmpty()) {
-                return@coroutineScope emptyList()
+                return@coroutineScope CuratedArtistClusters.defaultFallbackTracks(seedSong).take(4)
             }
 
             // Fetch top tracks for target similar artists concurrently
             val tracksDeferred = targetArtists.map { artistName ->
                 async {
                     try {
-                        innerTubeClient.search("$artistName top songs")
+                        val q = when (seedVibe) {
+                            SongVibe.SMOOTH_CALM -> "$artistName acoustic songs"
+                            SongVibe.ROMANTIC -> "$artistName romantic songs"
+                            SongVibe.RAP_HIPHOP -> "$artistName rap songs"
+                            SongVibe.LOFI -> "$artistName chill lofi"
+                            else -> "$artistName top songs"
+                        }
+                        innerTubeClient.search(q)
                             .filter { it.id != seedSong.id }
                             .filter { isCleanStudioTrack(it.title, it.artist) }
+                            .filterNot { isTitleTooSimilar(it.title, seedSong.title) }
+                            .filterNot { isArtistTitleInversion(it.title, it.artist, artistName) }
+                            .filter { SongClassifier.detectLanguage(it) == seedLanguage }
                             .take(3)
                     } catch (_: Exception) {
                         emptyList()
@@ -261,12 +320,19 @@ open class CandidatePoolBuilder @Inject constructor(
                 .distinctBy { it.id }
                 .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
 
-            val ineligibleIds = recommendationHistoryDao.getIneligibleSongIds(resolvedTracks.map { it.id }, today).toSet()
-            val eligible = resolvedTracks.filter { it.id !in ineligibleIds }
-            if (eligible.isNotEmpty()) eligible else resolvedTracks
+            val poolWithFallback = if (resolvedTracks.size < 3) {
+                (resolvedTracks + CuratedArtistClusters.defaultFallbackTracks(seedSong))
+                    .distinctBy { it.id }
+            } else {
+                resolvedTracks
+            }
+
+            val ineligibleIds = recommendationHistoryDao.getIneligibleSongIds(poolWithFallback.map { it.id }, today).toSet()
+            val eligible = poolWithFallback.filter { it.id !in ineligibleIds }
+            if (eligible.isNotEmpty()) eligible else poolWithFallback
         } catch (e: Exception) {
             android.util.Log.e("CandidatePoolBuilder", "Error building Pool B: ${e.message}", e)
-            emptyList()
+            CuratedArtistClusters.defaultFallbackTracks(seedSong).take(4)
         }
     }
 
@@ -281,6 +347,7 @@ open class CandidatePoolBuilder @Inject constructor(
         today: String,
         now: Long = System.currentTimeMillis()
     ): List<SieloTrack> {
+        val seedLanguage = SongClassifier.detectLanguage(seedSong)
         val seedArtist = extractPrimaryArtist(seedSong.artist)
         val moderateSongs = try {
             val sinceMs = now - (MODERATE_ROTATION_LOOKBACK_DAYS * 24L * 60L * 60L * 1000L)
@@ -288,6 +355,10 @@ open class CandidatePoolBuilder @Inject constructor(
                 .filter { it.songId != seedSong.id }
                 .filter { isCleanStudioTrack(it.songTitle, it.artistName) }
                 .filterNot { isTitleTooSimilar(it.songTitle, seedSong.title) }
+                .filter {
+                    val trackObj = SieloTrack(it.songId, it.songTitle, it.artistName)
+                    SongClassifier.detectLanguage(trackObj) == seedLanguage
+                }
 
             if (moderateStats.isEmpty()) {
                 emptyList()
@@ -316,19 +387,21 @@ open class CandidatePoolBuilder @Inject constructor(
             return moderateSongs
         }
 
-        // Clean fallback: query seed artist top songs or similar artists, never query "radio"
+        // Clean fallback: query seed artist top songs filtered to matching language
         val fallbackSongs = try {
-            val query = if (seedArtist.isNotBlank()) "$seedArtist greatest hits" else "${seedSong.title} original"
+            val query = if (seedArtist.isNotBlank()) "$seedArtist top songs" else "${seedSong.title} official"
             innerTubeClient.search(query)
                 .filter { it.id != seedSong.id }
                 .filter { isCleanStudioTrack(it.title, it.artist) }
                 .filterNot { isTitleTooSimilar(it.title, seedSong.title) }
+                .filterNot { isArtistTitleInversion(it.title, it.artist, seedArtist) }
+                .filter { SongClassifier.detectLanguage(it) == seedLanguage }
                 .take(6)
         } catch (_: Exception) {
             emptyList()
         }
 
-        val combined = (moderateSongs + fallbackSongs)
+        val combined = (moderateSongs + fallbackSongs + CuratedArtistClusters.defaultFallbackTracks(seedSong).take(4))
             .filter { it.id != seedSong.id }
             .filter { isCleanStudioTrack(it.title, it.artist) }
             .filterNot { isTitleTooSimilar(it.title, seedSong.title) }

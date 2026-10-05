@@ -6,6 +6,10 @@ import com.sielo.music.core.network.models.SieloTrack
 import com.sielo.music.core.recommendations.autoplay.AutoplayQueueEngine
 import com.sielo.music.core.recommendations.autoplay.CandidatePoolBuilder
 import com.sielo.music.core.recommendations.autoplay.CandidatePools
+import com.sielo.music.core.recommendations.autoplay.CuratedArtistClusters
+import com.sielo.music.core.recommendations.autoplay.SongClassifier
+import com.sielo.music.core.recommendations.autoplay.SongLanguage
+import com.sielo.music.core.recommendations.autoplay.SongVibe
 import com.sielo.music.core.recommendations.repository.SimilarArtistsRepository
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -231,5 +235,69 @@ class AutoplayQueueEngineTest {
 
         // Verify marked in recommendation history
         assertEquals(20, fakeDao.recorded.size)
+    }
+
+    @Test
+    fun testTaajAcousticClassificationAndHindiQueueIntegrity() = runBlocking {
+        val taajTrack = createTrack("lost-1", "Taaj (Acoustic)", "Lost Stories")
+
+        // 1. Language detection must identify "Taaj (Acoustic)" by Lost Stories as HINDI
+        val detectedLang = SongClassifier.detectLanguage(taajTrack)
+        assertEquals("Taaj (Acoustic) by Lost Stories must be classified as HINDI", SongLanguage.HINDI, detectedLang)
+
+        // 2. Vibe detection must identify it as SMOOTH_CALM
+        val detectedVibe = SongClassifier.detectVibe(taajTrack)
+        assertEquals("Acoustic track must be classified as SMOOTH_CALM", SongVibe.SMOOTH_CALM, detectedVibe)
+
+        // 3. Similar artists must strictly be Hindi indie/acoustic artists, never English artists
+        val similar = CuratedArtistClusters.getSimilarArtists("Lost Stories", taajTrack)
+        assertTrue("Similar artists must include Indian indie artists", similar.any { it.contains("Prateek Kuhad") || it.contains("Anuv Jain") || it.contains("The Local Train") })
+        assertFalse("English artists must never be in Hindi similar artists", similar.any { it.contains("Cigarettes After Sex") || it.contains("Laufey") || it.contains("Clairo") })
+
+        // 4. Inversion detection: "Lost Stories" by "Alas Conor" must be detected as an inversion
+        assertTrue("Song titled 'Lost Stories' by foreign artist must be detected as inversion",
+            CandidatePoolBuilder.isArtistTitleInversion("Lost Stories", "Alas Conor", "Lost Stories")
+        )
+        assertFalse("Legitimate song by Lost Stories must not be detected as inversion",
+            CandidatePoolBuilder.isArtistTitleInversion("Taaj (Acoustic)", "Lost Stories", "Lost Stories")
+        )
+
+        // 5. Test AutoplayQueueEngine language gate: candidate pools have Hindi tracks and English contaminants
+        val hindi1 = createTrack("h1", "Baarishein", "Anuv Jain")
+        val hindi2 = createTrack("h2", "Kasoor", "Prateek Kuhad")
+        val hindi3 = createTrack("h3", "Choo Lo", "The Local Train")
+        val hindi4 = createTrack("h4", "Sunehra (Acoustic)", "Lost Stories")
+
+        // English contaminants that must NEVER be recommended for a Hindi seed
+        val engContaminant1 = createTrack("e1", "Lost Stories", "Alas Conor")
+        val engContaminant2 = createTrack("e2", "Calm (Acoustic)", "Vistas")
+        val engContaminant3 = createTrack("e3", "Apocalypse", "Cigarettes After Sex")
+        val engContaminant4 = createTrack("e4", "From the Start", "Laufey")
+        val engContaminant5 = createTrack("e5", "Sofia", "Clairo")
+
+        fakePoolBuilder.poolsToReturn = CandidatePools(
+            poolA = listOf(hindi1, hindi4, engContaminant1),
+            poolB = listOf(hindi2, engContaminant2, engContaminant3),
+            poolC = listOf(hindi3, engContaminant4, engContaminant5)
+        )
+
+        val batch = engine.generateBatch(
+            seedSong = taajTrack,
+            excludedSongIds = emptySet(),
+            reentryCandidates = emptyList(),
+            batchSize = 10
+        )
+
+        assertTrue("Batch must not be empty", batch.isNotEmpty())
+        for (track in batch) {
+            val trackLang = SongClassifier.detectLanguage(track)
+            assertEquals("All recommended songs in Hindi queue must be HINDI: ${track.title} by ${track.artist}", SongLanguage.HINDI, trackLang)
+        }
+
+        assertFalse("Must not contain Alas Conor", batch.any { it.artist.contains("Alas Conor", ignoreCase = true) })
+        assertFalse("Must not contain Vistas", batch.any { it.artist.contains("Vistas", ignoreCase = true) })
+        assertFalse("Must not contain Cigarettes After Sex", batch.any { it.artist.contains("Cigarettes After Sex", ignoreCase = true) })
+        assertFalse("Must not contain Laufey", batch.any { it.artist.contains("Laufey", ignoreCase = true) })
+        assertFalse("Must not contain Clairo", batch.any { it.artist.contains("Clairo", ignoreCase = true) })
     }
 }
