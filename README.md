@@ -139,7 +139,7 @@ What sets **Sielo** apart from typical streaming clients:
 │  │  • Strict Release Group Deduplication (Studio Albums vs EPs vs Soundtracks)       │  │
 │  │  • High-Resolution Original Front Cover Resolution (500px / 1200px)               │  │
 │  │  • Clean Artist Alias Verification & False-Collaboration Suppression              │  │
-│  │  └───────────────────────────────────────────┬───────────────────────────────────────┘  │
+│  └───────────────────────────────────────────┬───────────────────────────────────────┘  │
 │                                              │                                          │
 │                                              │ Validated Entities                       │
 │                                              ▼                                          │
