@@ -111,7 +111,10 @@ class SongActionsViewModel @Inject constructor(
 
     fun shareTrack(track: SieloTrack) {
         try {
-            val shareText = "Listen to \"${track.title}\" by ${track.artist} on Sielo:\nsielo://track/${track.id}"
+            val encodedTitle = java.net.URLEncoder.encode(track.title, "UTF-8")
+            val encodedArtist = java.net.URLEncoder.encode(track.artist, "UTF-8")
+            val webLink = "https://sielo-music.vercel.app/track?id=${track.id}&title=$encodedTitle&artist=$encodedArtist"
+            val shareText = "Listen to \"${track.title}\" by ${track.artist} on Sielo:\n$webLink"
             val sendIntent = Intent().apply {
                 action = Intent.ACTION_SEND
                 putExtra(Intent.EXTRA_TEXT, shareText)

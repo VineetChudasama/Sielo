@@ -229,12 +229,24 @@ class UserManager @Inject constructor(
         _isOnboardingOpen.value = false
     }
 
-    fun updateProfile(name: String, username: String? = null, bio: String? = null) {
+    fun updateProfile(
+        name: String,
+        username: String? = null,
+        bio: String? = null,
+        photoUrl: String? = null,
+        clearPhoto: Boolean = false
+    ) {
         val current = _currentUser.value ?: return
+        val newPhotoUrl = when {
+            clearPhoto -> null
+            photoUrl != null -> photoUrl
+            else -> current.photoUrl
+        }
         val updated = current.copy(
             name = name.trim().ifBlank { current.name },
             username = username?.trim()?.removePrefix("@")?.ifBlank { null },
-            bio = bio?.trim()?.ifBlank { null }
+            bio = bio?.trim()?.ifBlank { null },
+            photoUrl = newPhotoUrl
         )
         persistUser(updated)
     }

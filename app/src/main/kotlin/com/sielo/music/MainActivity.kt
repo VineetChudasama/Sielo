@@ -65,6 +65,7 @@ class MainActivity : ComponentActivity() {
     @javax.inject.Inject lateinit var playerManager: com.sielo.music.core.audio.PlayerManager
     @javax.inject.Inject lateinit var innerTubeClient: com.sielo.music.core.network.innertube.InnerTubeClient
     @javax.inject.Inject lateinit var followedArtistReleaseNotifier: com.sielo.music.core.notifications.FollowedArtistReleaseNotifier
+    @javax.inject.Inject lateinit var appUpdateManager: com.sielo.music.core.update.AppUpdateManager
 
     private val notificationPermissionLauncher = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
@@ -120,6 +121,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         intent?.data?.toString()?.let { pendingDeepLink.value = it }
         handleReleaseNotificationIntent(intent)
+        appUpdateManager.checkForUpdates()
 
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
@@ -147,9 +149,10 @@ class MainActivity : ComponentActivity() {
                 val playbackState by playerViewModel.playbackState.collectAsState()
                 val activeRoomState by listenTogetherViewModel.roomState.collectAsState()
                 val pendingRejoinSession by listenTogetherViewModel.pendingRejoinSession.collectAsState()
+                val availableUpdateVersion by appUpdateManager.availableUpdateVersion.collectAsState()
                 val isInsideRoomScreen = currentRoute == Screen.ListenTogether.route && activeRoomState != null
                 var isPlayerExpanded by remember { mutableStateOf(false) }
-                                var showLaunchReveal by remember { mutableStateOf(true) }
+                var showLaunchReveal by remember { mutableStateOf(true) }
                 var showFeedbackPopup by remember { mutableStateOf(false) }
 
                 androidx.compose.runtime.LaunchedEffect(Unit) {
@@ -183,25 +186,77 @@ class MainActivity : ComponentActivity() {
                 androidx.compose.runtime.LaunchedEffect(deepLinkUrl, showLaunchReveal) {
                     if (!showLaunchReveal) {
                         deepLinkUrl?.let { uriStr ->
-                            if (uriStr.contains("artist")) {
-                                try {
-                                    val uri = android.net.Uri.parse(uriStr)
-                                    val artistName = uri.getQueryParameter("name")
-                                        ?: uriStr.substringAfter("artist/").substringBefore("?").replace("+", " ")
-                                    if (artistName.isNotBlank()) {
-                                        navController.navigate(Screen.Home.route) {
-                                            launchSingleTop = true
+                            try {
+                                val uri = android.net.Uri.parse(uriStr)
+                                val path = uri.path.orEmpty().lowercase()
+
+                                when {
+                                    // 1. Artist Deep Link: /artist or ?artist= or sielo://artist
+                                    path.contains("artist") || uriStr.contains("artist") -> {
+                                        val artistName = uri.getQueryParameter("name")
+                                            ?: uriStr.substringAfter("artist/").substringBefore("?").replace("+", " ")
+                                        if (artistName.isNotBlank()) {
+                                            navController.navigate(Screen.Home.route) {
+                                                launchSingleTop = true
+                                            }
+                                            homeViewModel.openArtist(artistName)
                                         }
-                                        homeViewModel.openArtist(artistName)
                                     }
-                                } catch (_: Exception) {}
-                            } else if (uriStr.contains("room") || uriStr.contains("join") || uriStr.contains("sielo")) {
-                                val success = listenTogetherViewModel.joinRoom(uriStr, "", listenTogetherViewModel.getSavedUserName())
-                                if (success) {
-                                    navController.navigate(Screen.ListenTogether.route) {
-                                        launchSingleTop = true
+
+                                    // 2. Track / Song Deep Link: /track, /song, sielo://track
+                                    path.contains("track") || path.contains("song") || uriStr.contains("track") || uriStr.contains("song") -> {
+                                        val trackId = uri.getQueryParameter("id")
+                                            ?: uri.lastPathSegment?.takeIf { it != "track" && it != "song" }
+                                            ?: uriStr.substringAfter("track/").substringBefore("?").substringBefore("/")
+                                        val trackTitle = uri.getQueryParameter("title")
+                                        val trackArtist = uri.getQueryParameter("artist")
+
+                                        if (!trackId.isNullOrBlank()) {
+                                            if (!trackTitle.isNullOrBlank() && !trackArtist.isNullOrBlank()) {
+                                                val track = com.sielo.music.core.network.models.SieloTrack(
+                                                    id = trackId,
+                                                    title = trackTitle,
+                                                    artist = trackArtist
+                                                )
+                                                playerManager.playTrack(track, listOf(track))
+                                            } else {
+                                                // Resolve track via InnerTube search/lookup in background
+                                                lifecycleScope.launch(Dispatchers.IO) {
+                                                    try {
+                                                        val songs = innerTubeClient.search(trackId)
+                                                        val matched = songs.firstOrNull { it.id == trackId } ?: songs.firstOrNull()
+                                                        if (matched != null) {
+                                                            playerManager.playTrack(matched, listOf(matched))
+                                                        }
+                                                    } catch (_: Exception) {}
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // 3. Album Deep Link: /album, sielo://album
+                                    path.contains("album") || uriStr.contains("album") -> {
+                                        val albumArtist = uri.getQueryParameter("artist")
+                                        if (!albumArtist.isNullOrBlank()) {
+                                            navController.navigate(Screen.Home.route) {
+                                                launchSingleTop = true
+                                            }
+                                            homeViewModel.openArtist(albumArtist)
+                                        }
+                                    }
+
+                                    // 4. Room Deep Link: /room, /join, sielo://room
+                                    path.contains("room") || path.contains("join") || uriStr.contains("room") || uriStr.contains("join") || uriStr.contains("sielo") -> {
+                                        val success = listenTogetherViewModel.joinRoom(uriStr, "", listenTogetherViewModel.getSavedUserName())
+                                        if (success) {
+                                            navController.navigate(Screen.ListenTogether.route) {
+                                                launchSingleTop = true
+                                            }
+                                        }
                                     }
                                 }
+                            } catch (e: Exception) {
+                                android.util.Log.e("MainActivity", "Error handling deep link: ${e.message}")
                             }
                             pendingDeepLink.value = null
                         }
@@ -374,8 +429,20 @@ class MainActivity : ComponentActivity() {
                             }
                         )
                     }
+                    // App update available popup (throttled once every 24hr, with Remind Me Later and Update Now)
+                    availableUpdateVersion?.let { newVer ->
+                        if (!showLaunchReveal && !isAuthDialogOpen && !isOnboardingOpen) {
+                            val context = androidx.compose.ui.platform.LocalContext.current
+                            com.sielo.music.ui.components.AppUpdateDialog(
+                                newVersion = newVer,
+                                onRemindLater = { appUpdateManager.remindMeLater() },
+                                onUpdateNow = { appUpdateManager.updateNow(context) }
+                            )
+                        }
+                    }
+
                     // Feedback popup
-                    if (showFeedbackPopup && !showLaunchReveal && !isAuthDialogOpen && !isOnboardingOpen && pendingRejoinSession == null) {
+                    if (showFeedbackPopup && !showLaunchReveal && !isAuthDialogOpen && !isOnboardingOpen && pendingRejoinSession == null && availableUpdateVersion == null) {
                         val context = androidx.compose.ui.platform.LocalContext.current
                         com.sielo.music.ui.screens.FeedbackPopupDialog(
                             onDismiss = { neverShowAgain ->

@@ -339,8 +339,14 @@ class ProfileViewModel @Inject constructor(
         _notificationsPlayback.value = !_notificationsPlayback.value
     }
 
-    fun updateProfile(name: String, username: String?, bio: String?) {
-        userManager.updateProfile(name, username, bio)
+    fun updateProfile(
+        name: String,
+        username: String?,
+        bio: String?,
+        photoUrl: String? = null,
+        clearPhoto: Boolean = false
+    ) {
+        userManager.updateProfile(name, username, bio, photoUrl, clearPhoto)
     }
 
     fun playTrack(track: SieloTrack, queue: List<SieloTrack>) {

@@ -250,9 +250,8 @@ class ListenTogetherViewModel @Inject constructor(
     }
 
     fun shareRoomInvite(context: Context, state: ActiveRoomState) {
-        val appLink = "sielo://room/${state.roomId}?key=${state.roomKey}"
         val webLink = getInviteLink(state)
-        val shareText = "🎧 Join my Sielo Listen Together room!\n\nRoom Code: ${state.roomId}\n\nTap to join in Sielo:\n$appLink\n\nWeb Link:\n$webLink\n\n(Or open Sielo -> Listen Together -> tap Join!)"
+        val shareText = "🎧 Join my Sielo Listen Together room!\n\nRoom Code: ${state.roomId}\n\nTap to join:\n$webLink\n\n(Or open Sielo -> Listen Together -> enter code ${state.roomId})"
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_SUBJECT, "Join my Sielo Listen Together room")
@@ -265,9 +264,8 @@ class ListenTogetherViewModel @Inject constructor(
     }
 
     fun shareRoomQrWithImage(context: Context, state: ActiveRoomState) {
-        val appLink = "sielo://room/${state.roomId}?key=${state.roomKey}"
         val webLink = getInviteLink(state)
-        val shareText = "🎧 Scan or tap to join my Sielo Listen Together room!\n\nRoom Code: ${state.roomId}\n\nOpen in Sielo:\n$appLink\n\nWeb Link:\n$webLink\n\n(Or open Sielo -> Listen Together -> tap Join!)"
+        val shareText = "🎧 Scan or tap to join my Sielo Listen Together room!\n\nRoom Code: ${state.roomId}\n\nTap to join:\n$webLink\n\n(Or open Sielo -> Listen Together -> enter code ${state.roomId})"
         try {
             val qrBitmap = com.sielo.music.room.qr.QrCodeGenerator.generateQrBitmap(webLink, context, sizePx = 600)
             val sharedDir = java.io.File(context.cacheDir, "shared_qr").apply { if (!exists()) mkdirs() }

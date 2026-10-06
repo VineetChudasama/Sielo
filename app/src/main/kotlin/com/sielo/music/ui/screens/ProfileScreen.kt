@@ -2,9 +2,18 @@ package com.sielo.music.ui.screens
 
 import android.content.Context
 import android.widget.Toast
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import com.sielo.music.core.database.dao.SongStat
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material3.Surface
+import java.io.File
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -315,8 +324,8 @@ fun ProfileScreen(
         EditProfileBottomSheet(
             profile = userProfile,
             onDismiss = { showEditProfileSheet = false },
-            onSave = { name, username, bio ->
-                viewModel.updateProfile(name, username, bio)
+            onSave = { name, username, bio, photoUrl, clearPhoto ->
+                viewModel.updateProfile(name, username, bio, photoUrl, clearPhoto)
                 showEditProfileSheet = false
                 Toast.makeText(context, "Profile updated", Toast.LENGTH_SHORT).show()
             }
@@ -1260,17 +1269,122 @@ private fun SectionTitleRow(title: String, subtitle: String) {
 // MODAL BOTTOM SHEETS
 // ─────────────────────────────────────────────────────────────────────────────
 
+private fun validateAndSaveProfileImage(context: Context, uri: Uri): Result<String> {
+    return try {
+        val contentResolver = context.contentResolver
+        val mimeType = (contentResolver.getType(uri) ?: "").lowercase()
+
+        // 1. Strict format check: No GIFs allowed
+        if (mimeType == "image/gif" || mimeType.contains("gif")) {
+            return Result.failure(IllegalArgumentException("GIFs are not allowed. Please choose a JPEG, PNG, or WEBP image."))
+        }
+
+        // Deep inspect header magic bytes to prevent renamed .gif files
+        contentResolver.openInputStream(uri)?.use { stream ->
+            val header = ByteArray(6)
+            val bytesRead = stream.read(header)
+            if (bytesRead >= 6) {
+                val headerStr = String(header, 0, bytesRead, Charsets.US_ASCII)
+                if (headerStr.startsWith("GIF87a") || headerStr.startsWith("GIF89a")) {
+                    return Result.failure(IllegalArgumentException("GIFs are not allowed. Please choose a JPEG, PNG, or WEBP image."))
+                }
+            }
+        } ?: return Result.failure(IllegalArgumentException("Unable to read the selected file."))
+
+        // Verify readable image dimensions
+        val options = android.graphics.BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
+        contentResolver.openInputStream(uri)?.use { stream ->
+            android.graphics.BitmapFactory.decodeStream(stream, null, options)
+        }
+        if (options.outWidth <= 0 || options.outHeight <= 0) {
+            return Result.failure(IllegalArgumentException("Selected file is not a valid readable image."))
+        }
+        if (options.outMimeType?.equals("image/gif", ignoreCase = true) == true) {
+            return Result.failure(IllegalArgumentException("GIFs are not allowed. Please choose a JPEG, PNG, or WEBP image."))
+        }
+
+        // 2. Strict size check: Under 3MB (3 * 1024 * 1024 bytes)
+        val maxSizeBytes = 3L * 1024L * 1024L
+        var fileSize = 0L
+        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val sizeIndex = cursor.getColumnIndex(android.provider.OpenableColumns.SIZE)
+            if (sizeIndex != -1 && cursor.moveToFirst()) {
+                fileSize = cursor.getLong(sizeIndex)
+            }
+        }
+
+        if (fileSize <= 0L) {
+            contentResolver.openInputStream(uri)?.use {
+                fileSize = it.available().toLong()
+            }
+        }
+
+        if (fileSize > maxSizeBytes) {
+            val sizeMbStr = String.format(java.util.Locale.US, "%.2f MB", fileSize / (1024.0 * 1024.0))
+            return Result.failure(IllegalArgumentException("Image is too large ($sizeMbStr). Maximum size allowed is 3 MB."))
+        }
+
+        // 3. Save copy to app internal storage directory for permanent persistence across sessions
+        val avatarsDir = File(context.filesDir, "avatars").apply { if (!exists()) mkdirs() }
+        avatarsDir.listFiles()?.forEach { runCatching { it.delete() } }
+
+        val ext = when {
+            mimeType.contains("png") || options.outMimeType?.contains("png") == true -> "png"
+            mimeType.contains("webp") || options.outMimeType?.contains("webp") == true -> "webp"
+            else -> "jpg"
+        }
+        val targetFile = File(avatarsDir, "profile_${System.currentTimeMillis()}.$ext")
+
+        contentResolver.openInputStream(uri)?.use { input ->
+            targetFile.outputStream().use { output ->
+                val copied = input.copyTo(output)
+                if (copied > maxSizeBytes) {
+                    targetFile.delete()
+                    return Result.failure(IllegalArgumentException("Image exceeds the 3 MB limit."))
+                }
+            }
+        }
+
+        Result.success(targetFile.toURI().toString())
+    } catch (e: Exception) {
+        Result.failure(IllegalArgumentException(e.localizedMessage ?: "Failed to process image."))
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun EditProfileBottomSheet(
     profile: UserProfile?,
     onDismiss: () -> Unit,
-    onSave: (name: String, username: String?, bio: String?) -> Unit
+    onSave: (name: String, username: String?, bio: String?, photoUrl: String?, clearPhoto: Boolean) -> Unit
 ) {
+    val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var nameInput by remember { mutableStateOf(profile?.name ?: "") }
     var usernameInput by remember { mutableStateOf(profile?.username ?: (profile?.email?.substringBefore("@") ?: "")) }
     var bioInput by remember { mutableStateOf(profile?.bio ?: "") }
+    var avatarUri by remember { mutableStateOf<String?>(profile?.photoUrl) }
+    var isPhotoCleared by remember { mutableStateOf(false) }
+    var imageErrorMessage by remember { mutableStateOf<String?>(null) }
+
+    val imagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { selectedUri: Uri? ->
+        if (selectedUri != null) {
+            val validation = validateAndSaveProfileImage(context, selectedUri)
+            validation.onSuccess { localPath ->
+                avatarUri = localPath
+                isPhotoCleared = false
+                imageErrorMessage = null
+                Toast.makeText(context, "Profile picture selected", Toast.LENGTH_SHORT).show()
+            }.onFailure { error ->
+                imageErrorMessage = error.message ?: "Invalid image selected"
+                Toast.makeText(context, error.message ?: "Invalid image", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -1281,6 +1395,7 @@ private fun EditProfileBottomSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 24.dp)
                 .padding(bottom = 36.dp)
         ) {
@@ -1292,13 +1407,255 @@ private fun EditProfileBottomSheet(
                 fontSize = 20.sp
             )
             Text(
-                text = "Update your public display identity & music bio",
+                text = "Update your public display identity & profile picture",
                 color = TextSecondary,
                 fontFamily = UrbanistFontFamily,
                 fontSize = 13.sp
             )
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(18.dp))
+
+            // ──────────────────────────────
+            // PROFILE PICTURE SELECTION
+            // ──────────────────────────────
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(92.dp)
+                        .clip(CircleShape)
+                        .background(PaletteDarkNavy)
+                        .border(2.5.dp, PaletteSand, CircleShape)
+                        .shadow(10.dp, CircleShape)
+                        .clickable { imagePickerLauncher.launch("image/*") },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (!isPhotoCleared && !avatarUri.isNullOrBlank()) {
+                        AsyncImage(
+                            model = avatarUri,
+                            contentDescription = "Profile Picture",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                    } else {
+                        val initial = (nameInput.ifBlank { profile?.name ?: "S" }).firstOrNull()?.uppercase() ?: "S"
+                        Text(
+                            text = initial,
+                            color = PaletteSand,
+                            fontFamily = SoraFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 38.sp
+                        )
+                    }
+
+                    // Camera overlay badge at bottom of avatar
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize(),
+                        contentAlignment = Alignment.BottomCenter
+                    ) {
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(26.dp),
+                            color = PaletteDarkNavy.copy(alpha = 0.85f)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxSize(),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PhotoCamera,
+                                    contentDescription = "Change Photo",
+                                    tint = PaletteSand,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text(
+                                    text = "EDIT",
+                                    color = PaletteSand,
+                                    fontFamily = SoraFontFamily,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 9.sp,
+                                    letterSpacing = 0.5.sp
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Action buttons: "Choose Photo" & "Remove"
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Button(
+                        onClick = { imagePickerLauncher.launch("image/*") },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = PaletteSlateBlue.copy(alpha = 0.6f),
+                            contentColor = PaletteCream
+                        ),
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                        modifier = Modifier.height(34.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PhotoCamera,
+                            contentDescription = null,
+                            tint = PaletteSand,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Choose Photo",
+                            fontFamily = SoraFontFamily,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 12.sp
+                        )
+                    }
+
+                    if (!isPhotoCleared && !avatarUri.isNullOrBlank()) {
+                        TextButton(
+                            onClick = {
+                                avatarUri = null
+                                isPhotoCleared = true
+                                imageErrorMessage = null
+                            },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier.height(34.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.DeleteForever,
+                                contentDescription = null,
+                                tint = Color(0xFFEF4444),
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Remove",
+                                color = Color(0xFFEF4444),
+                                fontFamily = UrbanistFontFamily,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // ──────────────────────────────
+                // SIGN / NOTICE BANNER
+                // ──────────────────────────────
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    color = PaletteDarkNavy.copy(alpha = 0.85f),
+                    border = BorderStroke(1.dp, PaletteSand.copy(alpha = 0.35f))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .background(PaletteSand.copy(alpha = 0.15f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Info,
+                                contentDescription = "Requirements Sign",
+                                tint = PaletteSand,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(10.dp))
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "PHOTO REQUIREMENTS",
+                                    color = PaletteSand,
+                                    fontFamily = SoraFontFamily,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp,
+                                    letterSpacing = 0.5.sp
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = Color(0xFFEF4444).copy(alpha = 0.2f)
+                                ) {
+                                    Text(
+                                        text = "NO GIFS",
+                                        color = Color(0xFFF87171),
+                                        fontFamily = SoraFontFamily,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 9.sp,
+                                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Formats: JPEG, PNG, WEBP strictly • Max Size: 3 MB",
+                                color = PaletteCream.copy(alpha = 0.85f),
+                                fontFamily = UrbanistFontFamily,
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
+
+                // Error alert message if invalid image was chosen
+                AnimatedVisibility(visible = imageErrorMessage != null) {
+                    imageErrorMessage?.let { errMsg ->
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 8.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color(0xFF7F1D1D).copy(alpha = 0.6f),
+                            border = BorderStroke(1.dp, Color(0xFFEF4444))
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Info,
+                                    contentDescription = null,
+                                    tint = Color(0xFFFCA5A5),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = errMsg,
+                                    color = Color(0xFFFEE2E2),
+                                    fontFamily = UrbanistFontFamily,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(18.dp))
 
             // Display Name Field
             OutlinedTextField(
@@ -1362,7 +1719,7 @@ private fun EditProfileBottomSheet(
 
             // Save Button
             Button(
-                onClick = { onSave(nameInput, usernameInput, bioInput) },
+                onClick = { onSave(nameInput, usernameInput, bioInput, avatarUri, isPhotoCleared) },
                 colors = ButtonDefaults.buttonColors(containerColor = PaletteSand),
                 shape = RoundedCornerShape(14.dp),
                 modifier = Modifier
