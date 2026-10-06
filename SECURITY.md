@@ -6,8 +6,8 @@ We actively maintain and provide security updates for the current major releases
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 10.x.x  | :white_check_mark: |
-| < 10.0  | :x:                |
+| 11.x.x  | :white_check_mark: |
+| < 11.0  | :x:                |
 
 ---
 
