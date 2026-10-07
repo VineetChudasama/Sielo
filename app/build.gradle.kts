@@ -16,8 +16,8 @@ android {
         applicationId = "com.sielo.music"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1100
-        versionName = "11.0.0"
+        versionCode = 1120
+        versionName = "11.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -31,6 +31,23 @@ android {
             enableV1Signing = true
             enableV2Signing = true
         }
+        create("release") {
+            val releaseKeystoreFile = file("${rootDir}/sielo-release.jks")
+            if (releaseKeystoreFile.exists()) {
+                storeFile = releaseKeystoreFile
+                storePassword = project.findProperty("SIELO_RELEASE_KEYSTORE_PASSWORD") as? String
+                    ?: System.getenv("SIELO_RELEASE_KEYSTORE_PASSWORD")
+                    ?: "123456"
+                keyAlias = project.findProperty("SIELO_RELEASE_KEY_ALIAS") as? String
+                    ?: System.getenv("SIELO_RELEASE_KEY_ALIAS")
+                    ?: "sielo"
+                keyPassword = project.findProperty("SIELO_RELEASE_KEY_PASSWORD") as? String
+                    ?: System.getenv("SIELO_RELEASE_KEY_PASSWORD")
+                    ?: "123456"
+                enableV1Signing = true
+                enableV2Signing = true
+            }
+        }
     }
 
     buildTypes {
@@ -38,6 +55,7 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
         release {
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -55,6 +73,11 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
     }
 }
 

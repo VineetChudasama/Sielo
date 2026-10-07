@@ -50,7 +50,6 @@ class SettingsViewModel @Inject constructor(
 
     // ── 5. NOTIFICATIONS ──
     val notificationsPlayback: StateFlow<Boolean> = settingsRepository.notificationsPlayback
-    val notificationsNewReleases: StateFlow<Boolean> = settingsRepository.notificationsNewReleases
     val notificationsListenTogether: StateFlow<Boolean> = settingsRepository.notificationsListenTogether
 
     // ── 6. LISTEN TOGETHER ──
@@ -146,10 +145,6 @@ class SettingsViewModel @Inject constructor(
 
     fun toggleNotificationsPlayback() {
         settingsRepository.toggleNotificationsPlayback()
-    }
-
-    fun toggleNotificationsNewReleases() {
-        settingsRepository.toggleNotificationsNewReleases()
     }
 
     fun toggleNotificationsListenTogether() {

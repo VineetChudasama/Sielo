@@ -28,6 +28,7 @@
         <activity
             android:name="com.sielo.music.MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.Sielo">
             <intent-filter>
@@ -60,12 +61,13 @@
                 <data android:scheme="https" android:host="vineetchudasama.github.io" android:pathPrefix="/Sielo" />
                 <data android:scheme="http" android:host="vineetchudasama.github.io" android:pathPrefix="/Sielo" />
             </intent-filter>
-            <intent-filter>
+            <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="https" android:host="sielo-music.vercel.app" />
-                <data android:scheme="http" android:host="sielo-music.vercel.app" />
+                <data
+                    android:scheme="https"
+                    android:host="sielo-music.vercel.app" />
             </intent-filter>
         </activity>
 

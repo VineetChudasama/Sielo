@@ -426,7 +426,7 @@ private fun MainSettingsList(
                 SettingsSection(title = "NOTIFICATIONS") {
                     SettingsNavigationRow(
                         title = "Notification Preferences",
-                        description = "Playback controls, artist new releases & room alerts",
+                        description = "Playback controls & room alerts",
                         icon = Icons.Default.Notifications,
                         onClick = { onNavigateToSubScreen(SettingsSubScreen.Notifications) }
                     )
@@ -1288,12 +1288,11 @@ private fun NotificationsSubScreen(
     modifier: Modifier = Modifier
 ) {
     val notifPlayback by viewModel.notificationsPlayback.collectAsState()
-    val notifNewReleases by viewModel.notificationsNewReleases.collectAsState()
     val notifListenTogether by viewModel.notificationsListenTogether.collectAsState()
 
     SubScreenScaffold(
         title = "Notifications",
-        subtitle = "System media session, release alerts & room requests",
+        subtitle = "System media session & room requests",
         onBack = onBack,
         modifier = modifier
     ) {
@@ -1304,14 +1303,6 @@ private fun NotificationsSubScreen(
                 icon = Icons.Default.NotificationsActive,
                 isChecked = notifPlayback,
                 onCheckedChange = { viewModel.toggleNotificationsPlayback() }
-            )
-            SettingsDivider()
-            SettingsToggleRow(
-                title = "New Releases from Followed Artists",
-                description = "Receive updates when your favorite artists drop new tracks or albums",
-                icon = Icons.Default.Notifications,
-                isChecked = notifNewReleases,
-                onCheckedChange = { viewModel.toggleNotificationsNewReleases() }
             )
             SettingsDivider()
             SettingsToggleRow(

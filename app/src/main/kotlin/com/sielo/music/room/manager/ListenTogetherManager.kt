@@ -2007,6 +2007,6 @@ class ListenTogetherManager @Inject constructor(
     }
 
     fun getInviteLink(state: ActiveRoomState): String {
-        return "https://sielo-music.vercel.app/room?id=${state.roomId}&key=${state.roomKey}"
+        return "https://sielo-music.vercel.app/listen/${state.roomId}?key=${state.roomKey}"
     }
 }

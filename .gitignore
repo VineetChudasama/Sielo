@@ -14,3 +14,6 @@ captures/
 .cxx
 *.apk
 *.aab
+
+*.jks
+sielo-release.jks

@@ -95,9 +95,6 @@ class SettingsRepository @Inject constructor(
     private val _notificationsPlayback = MutableStateFlow(prefs.getBoolean(KEY_NOTIF_PLAYBACK, true))
     val notificationsPlayback: StateFlow<Boolean> = _notificationsPlayback.asStateFlow()
 
-    private val _notificationsNewReleases = MutableStateFlow(prefs.getBoolean(KEY_NOTIF_NEW_RELEASES, true))
-    val notificationsNewReleases: StateFlow<Boolean> = _notificationsNewReleases.asStateFlow()
-
     private val _notificationsListenTogether = MutableStateFlow(prefs.getBoolean(KEY_NOTIF_LISTEN_TOGETHER, true))
     val notificationsListenTogether: StateFlow<Boolean> = _notificationsListenTogether.asStateFlow()
 
@@ -258,12 +255,6 @@ class SettingsRepository @Inject constructor(
         _notificationsPlayback.value = next
     }
 
-    fun toggleNotificationsNewReleases() {
-        val next = !_notificationsNewReleases.value
-        prefs.edit().putBoolean(KEY_NOTIF_NEW_RELEASES, next).apply()
-        _notificationsNewReleases.value = next
-    }
-
     fun toggleNotificationsListenTogether() {
         val next = !_notificationsListenTogether.value
         prefs.edit().putBoolean(KEY_NOTIF_LISTEN_TOGETHER, next).apply()
@@ -359,7 +350,6 @@ class SettingsRepository @Inject constructor(
         private const val KEY_DYNAMIC_ARTWORK_TINT = "setting_dynamic_artwork_tint"
         private const val KEY_HIGH_FPS_VISUALS = "setting_high_fps_visuals"
         private const val KEY_NOTIF_PLAYBACK = "setting_notif_playback"
-        private const val KEY_NOTIF_NEW_RELEASES = "setting_notif_new_releases"
         private const val KEY_NOTIF_LISTEN_TOGETHER = "setting_notif_listen_together"
         private const val KEY_ALLOW_ROOM_INVITES = "setting_allow_room_invites"
         private const val KEY_AUTO_REJOIN_SESSION = "setting_auto_rejoin_session"

@@ -66,8 +66,14 @@ class ListenTogetherViewModel @Inject constructor(
             }
         }
 
-        // 2. Look for room URL pattern: sielo.app/room/XXXXXX or sielo://room/XXXXXX
-        if (trimmed.contains("room/")) {
+        // 2. Look for room URL pattern: sielo-music.vercel.app/listen/XXXXXX, sielo.app/room/XXXXXX or sielo://room/XXXXXX
+        if (trimmed.contains("listen/")) {
+            val afterRoom = trimmed.substringAfter("listen/")
+            val candidate = afterRoom.substringBefore("?").substringBefore("#").substringBefore("/").substringBefore(" ").substringBefore("\n").trim()
+            if (candidate.isNotBlank()) {
+                parsedId = candidate
+            }
+        } else if (trimmed.contains("room/")) {
             val afterRoom = trimmed.substringAfter("room/")
             val candidate = afterRoom.substringBefore("?").substringBefore("#").substringBefore("/").substringBefore(" ").substringBefore("\n").trim()
             if (candidate.isNotBlank()) {

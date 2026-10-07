@@ -2419,7 +2419,7 @@ private fun RoomQrDialog(
     onShare: () -> Unit
 ) {
     val context = LocalContext.current
-    val inviteLink = "https://vineetchudasama.github.io/Sielo/room/?id=${state.roomId}&key=${state.roomKey}"
+    val inviteLink = "https://sielo-music.vercel.app/listen/${state.roomId}?key=${state.roomKey}"
 
     val qrBitmap = remember(inviteLink) {
         QrCodeGenerator.generateQrImageBitmap(inviteLink, context = context, sizePx = 480)

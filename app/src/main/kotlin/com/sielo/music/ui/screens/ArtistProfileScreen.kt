@@ -2899,7 +2899,7 @@ private fun ArtistAlbumDetailView(
                     onMore = {
                         val encodedAlbumId = java.net.URLEncoder.encode(effectiveAlbum.id, "UTF-8")
                         val encodedArtist = java.net.URLEncoder.encode(effectiveAlbum.artist, "UTF-8")
-                        val webLink = "https://sielo-music.vercel.app/album?id=$encodedAlbumId&artist=$encodedArtist"
+                        val webLink = "https://sielo-music.vercel.app/album/$encodedAlbumId?artist=$encodedArtist"
                         val shareIntent = Intent(Intent.ACTION_SEND).apply {
                             type = "text/plain"
                             putExtra(Intent.EXTRA_SUBJECT, effectiveAlbum.title)

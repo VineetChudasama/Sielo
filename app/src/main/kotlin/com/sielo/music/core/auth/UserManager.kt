@@ -20,8 +20,7 @@ import javax.inject.Singleton
 class UserManager @Inject constructor(
     @ApplicationContext private val context: Context,
     private val databaseCleaner: com.sielo.music.core.database.DatabaseCleaner,
-    private val playerManager: com.sielo.music.core.audio.PlayerManager,
-    private val releaseNotifier: dagger.Lazy<com.sielo.music.core.notifications.FollowedArtistReleaseNotifier>
+    private val playerManager: com.sielo.music.core.audio.PlayerManager
 ) {
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true }
@@ -302,13 +301,6 @@ class UserManager @Inject constructor(
             artistTasteWeights = updatedWeights
         )
         persistUser(updated)
-        if (!isFollowed) {
-            scope.launch {
-                try {
-                    releaseNotifier.get().onArtistFollowed(clean)
-                } catch (_: Exception) {}
-            }
-        }
         return !isFollowed
     }
 

@@ -2558,6 +2558,118 @@ class InnerTubeClient @Inject constructor(
         }
     }
 
+    /**
+     * Resolves a complete SieloTrack model given only a song ID (YouTube videoId or JioSaavn pid).
+     */
+    suspend fun resolveTrackById(trackId: String): SieloTrack? = withContext(Dispatchers.IO) {
+        val cleanId = trackId.trim()
+        if (cleanId.isBlank()) return@withContext null
+
+        // 1. If it's a JioSaavn track ID or non-YouTube ID
+        try {
+            val saavnUrl = "https://www.jiosaavn.com/api.php?__call=song.getDetails&pids=${URLEncoder.encode(cleanId, "UTF-8")}&_format=json&cc=in"
+            val saavnReq = Request.Builder()
+                .url(saavnUrl)
+                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .build()
+            val saavnResp = client.newCall(saavnReq).execute()
+            val saavnBody = saavnResp.body?.string().orEmpty()
+            if (saavnBody.isNotBlank()) {
+                val root = json.parseToJsonElement(saavnBody).jsonObject
+                val songObj = root[cleanId]?.jsonObject
+                if (songObj != null) {
+                    val title = unescapeHtml(songObj["song"]?.jsonPrimitive?.content ?: songObj["title"]?.jsonPrimitive?.content ?: "")
+                    val artist = unescapeHtml(songObj["primary_artists"]?.jsonPrimitive?.content ?: songObj["singers"]?.jsonPrimitive?.content ?: "Artist")
+                    val album = unescapeHtml(songObj["album"]?.jsonPrimitive?.content ?: "")
+                    val image = (songObj["image"]?.jsonPrimitive?.content ?: "")
+                        .replace("50x50", "500x500")
+                        .replace("150x150", "500x500")
+                    val durStr = songObj["duration"]?.jsonPrimitive?.content
+                    val durSec = durStr?.toLongOrNull() ?: 0L
+                    val durFormatted = if (durSec > 0) "${durSec / 60}:${(durSec % 60).toString().padStart(2, '0')}" else null
+                    val encUrl = songObj["encrypted_media_url"]?.jsonPrimitive?.content
+                    val streamUrl = if (!encUrl.isNullOrBlank()) decryptDesUrl(encUrl) else null
+
+                    if (title.isNotBlank()) {
+                        return@withContext SieloTrack(
+                            id = cleanId,
+                            title = title,
+                            artist = artist,
+                            album = album,
+                            durationText = durFormatted,
+                            durationSeconds = durSec,
+                            thumbnailUrl = image,
+                            streamUrl = streamUrl
+                        )
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+
+        // 2. YouTube InnerTube player endpoint resolution for videoId
+        try {
+            val visitorData = getVisitorData()
+            val requestBody = """
+                {
+                    "context": {
+                        "client": {
+                            "clientName": "ANDROID",
+                            "clientVersion": "21.10.38",
+                            "hl": "en",
+                            "gl": "US"
+                        }
+                    },
+                    "videoId": "$cleanId"
+                }
+            """.trimIndent()
+
+            val ytReq = Request.Builder()
+                .url("https://www.youtube.com/youtubei/v1/player")
+                .post(requestBody.toRequestBody(JSON_MEDIA))
+                .header("User-Agent", StreamClientUtils.USER_AGENT_ANDROID)
+                .header("X-YouTube-Client-Name", "3")
+                .header("X-YouTube-Client-Version", "21.10.38")
+                .apply { if (!visitorData.isNullOrBlank()) header("X-Goog-Visitor-Id", visitorData) }
+                .build()
+
+            val ytResp = client.newCall(ytReq).execute()
+            val ytBody = ytResp.body?.string().orEmpty()
+            if (ytBody.isNotBlank()) {
+                val root = json.parseToJsonElement(ytBody).jsonObject
+                val videoDetails = root["videoDetails"]?.jsonObject
+                if (videoDetails != null) {
+                    val rawTitle = videoDetails["title"]?.jsonPrimitive?.content.orEmpty()
+                    val rawAuthor = videoDetails["author"]?.jsonPrimitive?.content.orEmpty()
+                    val lengthSec = videoDetails["lengthSeconds"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
+                    val durFormatted = if (lengthSec > 0) "${lengthSec / 60}:${(lengthSec % 60).toString().padStart(2, '0')}" else null
+                    val thumbUrl = "https://i.ytimg.com/vi/$cleanId/hqdefault.jpg"
+
+                    if (rawTitle.isNotBlank()) {
+                        return@withContext SieloTrack(
+                            id = cleanId,
+                            title = rawTitle,
+                            artist = if (rawAuthor.isNotBlank()) rawAuthor else "Artist",
+                            durationText = durFormatted,
+                            durationSeconds = lengthSec,
+                            thumbnailUrl = thumbUrl
+                        )
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+
+        // 3. Fallback search by ID
+        try {
+            val searchTracks = search(cleanId)
+            val matched = searchTracks.firstOrNull { it.id == cleanId } ?: searchTracks.firstOrNull()
+            if (matched != null) {
+                return@withContext matched
+            }
+        } catch (_: Exception) {}
+
+        null
+    }
+
     fun getYouTubePlaylistSongs(playlistId: String): List<SieloTrack> {
         return try {
             val cleanId = playlistId.substringAfter("list=").substringBefore("&").trim()

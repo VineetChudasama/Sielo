@@ -64,16 +64,11 @@ class MainActivity : ComponentActivity() {
     @javax.inject.Inject lateinit var userManager: com.sielo.music.core.auth.UserManager
     @javax.inject.Inject lateinit var playerManager: com.sielo.music.core.audio.PlayerManager
     @javax.inject.Inject lateinit var innerTubeClient: com.sielo.music.core.network.innertube.InnerTubeClient
-    @javax.inject.Inject lateinit var followedArtistReleaseNotifier: com.sielo.music.core.notifications.FollowedArtistReleaseNotifier
     @javax.inject.Inject lateinit var appUpdateManager: com.sielo.music.core.update.AppUpdateManager
 
     private val notificationPermissionLauncher = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        if (isGranted) {
-            triggerReleaseCheck()
-        }
-    }
+    ) { /* Notification permission for foreground media playback session */ }
 
     private val homeViewModel: HomeViewModel by viewModels()
     private val searchViewModel: SearchViewModel by viewModels()
@@ -86,51 +81,31 @@ class MainActivity : ComponentActivity() {
     private val listenTogetherViewModel: com.sielo.music.viewmodel.ListenTogetherViewModel by viewModels()
 
     private val pendingDeepLink = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    private var lastHandledDeepLink: String? = null
 
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        intent.data?.toString()?.let { pendingDeepLink.value = it }
-        handleReleaseNotificationIntent(intent)
-    }
-
-    private fun handleReleaseNotificationIntent(intent: android.content.Intent?) {
-        val trackId = intent?.getStringExtra(com.sielo.music.core.notifications.FollowedArtistReleaseNotifier.EXTRA_TRACK_ID) ?: return
-        val title = intent.getStringExtra(com.sielo.music.core.notifications.FollowedArtistReleaseNotifier.EXTRA_TRACK_TITLE) ?: "Unknown"
-        val artist = intent.getStringExtra(com.sielo.music.core.notifications.FollowedArtistReleaseNotifier.EXTRA_TRACK_ARTIST) ?: "Unknown"
-        val thumb = intent.getStringExtra(com.sielo.music.core.notifications.FollowedArtistReleaseNotifier.EXTRA_TRACK_THUMB)
-        val track = com.sielo.music.core.network.models.SieloTrack(
-            id = trackId,
-            title = title,
-            artist = artist,
-            thumbnailUrl = thumb
-        )
-        playerManager.playTrack(track)
-    }
-
-    private fun triggerReleaseCheck() {
-        lifecycleScope.launch(Dispatchers.IO) {
-            val followed = userManager.getFavoriteArtists()
-            if (followed.isNotEmpty()) {
-                followedArtistReleaseNotifier.checkForNewReleases(followed)
+        intent.data?.toString()?.let { uriStr ->
+            if (uriStr != lastHandledDeepLink) {
+                pendingDeepLink.value = uriStr
             }
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        intent?.data?.toString()?.let { pendingDeepLink.value = it }
-        handleReleaseNotificationIntent(intent)
+        if (savedInstanceState == null) {
+            intent?.data?.toString()?.let { uriStr ->
+                pendingDeepLink.value = uriStr
+            }
+        }
         appUpdateManager.checkForUpdates()
 
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
-            } else {
-                triggerReleaseCheck()
             }
-        } else {
-            triggerReleaseCheck()
         }
 
         // Connect player recommendation engine with dynamic user taste learning
@@ -185,80 +160,119 @@ class MainActivity : ComponentActivity() {
                 val deepLinkUrl by pendingDeepLink.collectAsState()
                 androidx.compose.runtime.LaunchedEffect(deepLinkUrl, showLaunchReveal) {
                     if (!showLaunchReveal) {
-                        deepLinkUrl?.let { uriStr ->
-                            try {
-                                val uri = android.net.Uri.parse(uriStr)
-                                val path = uri.path.orEmpty().lowercase()
+                        val uriStr = deepLinkUrl
+                        if (!uriStr.isNullOrBlank()) {
+                            // Immediately clear pending event to avoid re-triggering across recompositions
+                            pendingDeepLink.value = null
+                            if (uriStr != lastHandledDeepLink) {
+                                lastHandledDeepLink = uriStr
+                                try {
+                                    val uri = android.net.Uri.parse(uriStr)
+                                    val scheme = uri.scheme?.lowercase().orEmpty()
+                                    val host = uri.host?.lowercase().orEmpty()
+                                    val isSieloHost = host == "sielo-music.vercel.app"
+                                    val isSieloCustomScheme = scheme == "sielo"
+                                    val isLegacyHost = host == "sielo.app" || host == "vineetchudasama.github.io"
 
-                                when {
-                                    // 1. Artist Deep Link: /artist or ?artist= or sielo://artist
-                                    path.contains("artist") || uriStr.contains("artist") -> {
-                                        val artistName = uri.getQueryParameter("name")
-                                            ?: uriStr.substringAfter("artist/").substringBefore("?").replace("+", " ")
-                                        if (artistName.isNotBlank()) {
-                                            navController.navigate(Screen.Home.route) {
-                                                launchSingleTop = true
-                                            }
-                                            homeViewModel.openArtist(artistName)
-                                        }
-                                    }
+                                    if (isSieloHost || isSieloCustomScheme || isLegacyHost) {
+                                        val pathSegments = uri.pathSegments ?: emptyList()
+                                        val firstSegment = pathSegments.getOrNull(0)?.lowercase().orEmpty()
+                                        val secondSegment = pathSegments.getOrNull(1)
 
-                                    // 2. Track / Song Deep Link: /track, /song, sielo://track
-                                    path.contains("track") || path.contains("song") || uriStr.contains("track") || uriStr.contains("song") -> {
-                                        val trackId = uri.getQueryParameter("id")
-                                            ?: uri.lastPathSegment?.takeIf { it != "track" && it != "song" }
-                                            ?: uriStr.substringAfter("track/").substringBefore("?").substringBefore("/")
-                                        val trackTitle = uri.getQueryParameter("title")
-                                        val trackArtist = uri.getQueryParameter("artist")
+                                        when {
+                                            // 1. Track / Song Deep Link: /song/{songId} or /track/{songId}
+                                            firstSegment == "song" || firstSegment == "track" || (uri.getQueryParameter("id") != null && uriStr.contains("track")) -> {
+                                                val songId = secondSegment?.takeIf { it.isNotBlank() }
+                                                    ?: uri.getQueryParameter("id")
+                                                val trackTitle = uri.getQueryParameter("title")
+                                                val trackArtist = uri.getQueryParameter("artist")
 
-                                        if (!trackId.isNullOrBlank()) {
-                                            if (!trackTitle.isNullOrBlank() && !trackArtist.isNullOrBlank()) {
-                                                val track = com.sielo.music.core.network.models.SieloTrack(
-                                                    id = trackId,
-                                                    title = trackTitle,
-                                                    artist = trackArtist
-                                                )
-                                                playerManager.playTrack(track, listOf(track))
-                                            } else {
-                                                // Resolve track via InnerTube search/lookup in background
-                                                lifecycleScope.launch(Dispatchers.IO) {
-                                                    try {
-                                                        val songs = innerTubeClient.search(trackId)
-                                                        val matched = songs.firstOrNull { it.id == trackId } ?: songs.firstOrNull()
-                                                        if (matched != null) {
-                                                            playerManager.playTrack(matched, listOf(matched))
+                                                if (!songId.isNullOrBlank()) {
+                                                    if (!trackTitle.isNullOrBlank() && !trackArtist.isNullOrBlank()) {
+                                                        val track = com.sielo.music.core.network.models.SieloTrack(
+                                                            id = songId,
+                                                            title = trackTitle,
+                                                            artist = trackArtist
+                                                        )
+                                                        playerManager.playTrack(track, listOf(track))
+                                                    }
+                                                    lifecycleScope.launch(Dispatchers.IO) {
+                                                        try {
+                                                            val resolved = innerTubeClient.resolveTrackById(songId)
+                                                            if (resolved != null) {
+                                                                if (trackTitle.isNullOrBlank() || trackArtist.isNullOrBlank()) {
+                                                                    playerManager.playTrack(resolved, listOf(resolved))
+                                                                }
+                                                            }
+                                                        } catch (e: Exception) {
+                                                            android.util.Log.e("MainActivity", "Failed to resolve deep-link track $songId: ${e.message}")
                                                         }
-                                                    } catch (_: Exception) {}
+                                                    }
+                                                }
+                                            }
+
+                                            // 2. Album Deep Link: /album/{albumId}
+                                            firstSegment == "album" || uriStr.contains("album") -> {
+                                                val albumId = secondSegment?.takeIf { it.isNotBlank() }
+                                                    ?: uri.getQueryParameter("id")
+                                                val albumArtist = uri.getQueryParameter("artist")
+
+                                                navController.navigate(Screen.Home.route) {
+                                                    launchSingleTop = true
+                                                }
+
+                                                if (!albumArtist.isNullOrBlank()) {
+                                                    homeViewModel.openArtist(albumArtist)
+                                                } else if (!albumId.isNullOrBlank()) {
+                                                    lifecycleScope.launch(Dispatchers.IO) {
+                                                        try {
+                                                            val tracks = innerTubeClient.getAlbumSongs(albumId)
+                                                            if (tracks.isNotEmpty()) {
+                                                                val artist = tracks.firstOrNull()?.artist
+                                                                if (!artist.isNullOrBlank()) {
+                                                                    launch(Dispatchers.Main) {
+                                                                        homeViewModel.openArtist(artist)
+                                                                    }
+                                                                } else {
+                                                                    playerManager.playTrack(tracks.first(), tracks)
+                                                                }
+                                                            }
+                                                        } catch (e: Exception) {
+                                                            android.util.Log.e("MainActivity", "Failed to resolve deep-link album $albumId: ${e.message}")
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            // 3. Listen Together Deep Link: /listen/{roomId} or /room/{roomId} or /join/{roomId}
+                                            firstSegment == "listen" || firstSegment == "room" || firstSegment == "join" || uriStr.contains("listen") || uriStr.contains("room") -> {
+                                                val roomKey = uri.getQueryParameter("key").orEmpty()
+                                                val success = listenTogetherViewModel.joinRoom(uriStr, roomKey, listenTogetherViewModel.getSavedUserName())
+                                                if (success) {
+                                                    navController.navigate(Screen.ListenTogether.route) {
+                                                        launchSingleTop = true
+                                                    }
+                                                }
+                                            }
+
+                                            // 4. Artist Deep Link: /artist/{name} or ?name=
+                                            firstSegment == "artist" || uriStr.contains("artist") -> {
+                                                val artistName = uri.getQueryParameter("name")
+                                                    ?: secondSegment
+                                                    ?: uriStr.substringAfter("artist/").substringBefore("?").replace("+", " ")
+                                                if (!artistName.isNullOrBlank()) {
+                                                    navController.navigate(Screen.Home.route) {
+                                                        launchSingleTop = true
+                                                    }
+                                                    homeViewModel.openArtist(artistName.replace("+", " "))
                                                 }
                                             }
                                         }
                                     }
-
-                                    // 3. Album Deep Link: /album, sielo://album
-                                    path.contains("album") || uriStr.contains("album") -> {
-                                        val albumArtist = uri.getQueryParameter("artist")
-                                        if (!albumArtist.isNullOrBlank()) {
-                                            navController.navigate(Screen.Home.route) {
-                                                launchSingleTop = true
-                                            }
-                                            homeViewModel.openArtist(albumArtist)
-                                        }
-                                    }
-
-                                    // 4. Room Deep Link: /room, /join, sielo://room
-                                    path.contains("room") || path.contains("join") || uriStr.contains("room") || uriStr.contains("join") || uriStr.contains("sielo") -> {
-                                        val success = listenTogetherViewModel.joinRoom(uriStr, "", listenTogetherViewModel.getSavedUserName())
-                                        if (success) {
-                                            navController.navigate(Screen.ListenTogether.route) {
-                                                launchSingleTop = true
-                                            }
-                                        }
-                                    }
+                                } catch (e: Exception) {
+                                    android.util.Log.e("MainActivity", "Error handling deep link: ${e.message}")
                                 }
-                            } catch (e: Exception) {
-                                android.util.Log.e("MainActivity", "Error handling deep link: ${e.message}")
                             }
-                            pendingDeepLink.value = null
                         }
                     }
                 }
