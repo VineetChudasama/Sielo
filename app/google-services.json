@@ -14,11 +14,11 @@
       },
       "oauth_client": [
         {
-          "client_id": "61989343599-0gic12n2mqi83m8vqmijrd3038k6mrab.apps.googleusercontent.com",
+          "client_id": "61989343599-3pvns8lv87hrc09l73jjof3cifr3ov7s.apps.googleusercontent.com",
           "client_type": 1,
           "android_info": {
             "package_name": "com.sielo.music",
-            "certificate_hash": "b210424ae918d4a4cbb9b4285206f9d0743f2035"
+            "certificate_hash": "0f72308ef474ca390c62d7b995d8a6c6d983bcba"
           }
         },
         {

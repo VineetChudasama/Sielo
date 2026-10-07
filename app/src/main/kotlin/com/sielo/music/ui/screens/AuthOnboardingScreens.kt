@@ -55,12 +55,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.common.api.ApiException
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.auth.GoogleAuthProvider
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
@@ -162,20 +163,31 @@ fun AuthDialog(
     var emailInput by remember { mutableStateOf("") }
     var passwordInput by remember { mutableStateOf("") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
-    var isGoogleAccountPickerOpen by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
-    val webClientId = "61989343599-737bujb5d1dvp3t3tr93ibfroc1v3ht0.apps.googleusercontent.com"
+    val clipboardManager = LocalClipboardManager.current
+    var showSha1InfoDialog by remember { mutableStateOf(false) }
 
-    val gso = remember {
-        GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
-            .requestIdToken(webClientId)
-            .requestEmail()
-            .requestProfile()
-            .build()
+    val defaultWebClientId = remember {
+        try {
+            val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
+            if (resId != 0) context.getString(resId) else null
+        } catch (_: Exception) {
+            null
+        }
     }
 
-    val googleSignInClient = remember { GoogleSignIn.getClient(context, gso) }
+    val gso = remember(defaultWebClientId) {
+        val builder = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+            .requestEmail()
+            .requestProfile()
+        if (!defaultWebClientId.isNullOrBlank()) {
+            builder.requestIdToken(defaultWebClientId)
+        }
+        builder.build()
+    }
+
+    val googleSignInClient = remember(gso) { GoogleSignIn.getClient(context, gso) }
 
     val googleLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -184,38 +196,30 @@ fun AuthDialog(
         try {
             val account = task.getResult(ApiException::class.java)
             if (account != null) {
-                val idToken = account.idToken
                 val name = account.displayName ?: "Google User"
                 val email = account.email ?: "user@gmail.com"
                 val photoUrl = account.photoUrl?.toString()
-
-                if (!idToken.isNullOrBlank()) {
-                    try {
-                        val credential = GoogleAuthProvider.getCredential(idToken, null)
-                        FirebaseAuth.getInstance().signInWithCredential(credential)
-                            .addOnCompleteListener { fbTask ->
-                                val fbUser = FirebaseAuth.getInstance().currentUser
-                                val finalName = fbUser?.displayName ?: name
-                                val finalEmail = fbUser?.email ?: email
-                                val finalPhoto = fbUser?.photoUrl?.toString() ?: photoUrl
-                                userManager.signInWithGoogle(finalName, finalEmail, finalPhoto)
-                                onDismiss()
-                            }
-                    } catch (_: Exception) {
-                        userManager.signInWithGoogle(name, email, photoUrl)
-                        onDismiss()
-                    }
-                } else {
-                    userManager.signInWithGoogle(name, email, photoUrl)
-                    onDismiss()
-                }
+                userManager.signInWithGoogle(name, email, photoUrl)
+                onDismiss()
             }
         } catch (e: Exception) {
-            // If user explicitly cancelled, do nothing; otherwise open fallback account chooser
             if (e is ApiException && (e.statusCode == 12501 || e.statusCode == 12502)) {
-                // User cancelled
+                // User explicitly cancelled account chooser
+            } else if (e is ApiException && e.statusCode == 10) {
+                // DEVELOPER_ERROR (10): Release keystore SHA-1 not registered in Firebase Console
+                showSha1InfoDialog = true
             } else {
-                isGoogleAccountPickerOpen = true
+                val lastAccount = GoogleSignIn.getLastSignedInAccount(context)
+                if (lastAccount != null) {
+                    val name = lastAccount.displayName ?: "Google User"
+                    val email = lastAccount.email ?: "user@gmail.com"
+                    val photoUrl = lastAccount.photoUrl?.toString()
+                    userManager.signInWithGoogle(name, email, photoUrl)
+                    onDismiss()
+                } else {
+                    val msg = if (e is ApiException) "Google Sign-In failed (${e.statusCode})" else "Google Sign-In failed"
+                    android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+                }
             }
         }
     }
@@ -297,8 +301,8 @@ fun AuthDialog(
                                 googleSignInClient.signOut().addOnCompleteListener {
                                     googleLauncher.launch(googleSignInClient.signInIntent)
                                 }
-                            } catch (e: Exception) {
-                                isGoogleAccountPickerOpen = true
+                            } catch (_: Exception) {
+                                googleLauncher.launch(googleSignInClient.signInIntent)
                             }
                         },
                         colors = ButtonDefaults.buttonColors(
@@ -543,162 +547,118 @@ fun AuthDialog(
         }
     }
 
-    // Google OAuth Account Chooser Sheet
-    if (isGoogleAccountPickerOpen) {
-        GoogleAccountChooserDialog(
-            onAccountSelected = { name, email, photo ->
-                isGoogleAccountPickerOpen = false
-                userManager.signInWithGoogle(name, email, photo)
-                onDismiss()
-            },
-            onDismiss = { isGoogleAccountPickerOpen = false }
-        )
-    }
-}
-
-/**
- * Google Account Selector Modal (Google OAuth UI)
- */
-@Composable
-fun GoogleAccountChooserDialog(
-    onAccountSelected: (name: String, email: String, photo: String?) -> Unit,
-    onDismiss: () -> Unit
-) {
-    val suggestedAccounts = listOf(
-        Triple("Vineet Kumar", "vineet.music@gmail.com", "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=200&auto=format&fit=crop&q=80"),
-        Triple("Audiophile User", "audiophile.listener@gmail.com", "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=200&auto=format&fit=crop&q=80")
-    )
-
-    var customName by remember { mutableStateOf("") }
-    var customEmail by remember { mutableStateOf("") }
-    var isAddingCustom by remember { mutableStateOf(false) }
-
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            shape = RoundedCornerShape(20.dp),
-            color = Color(0xFF1E2430),
-            modifier = Modifier
-                .fillMaxWidth()
-                .border(1.dp, BorderGlass, RoundedCornerShape(20.dp))
+    if (showSha1InfoDialog) {
+        Dialog(
+            onDismissRequest = { showSha1InfoDialog = false },
+            properties = DialogProperties(dismissOnBackPress = true, dismissOnClickOutside = true)
         ) {
-            Column(
-                modifier = Modifier.padding(22.dp)
+            Surface(
+                shape = RoundedCornerShape(24.dp),
+                color = PaletteDarkNavy,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+                    .border(1.dp, BorderGlass, RoundedCornerShape(24.dp))
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                Column(
+                    modifier = Modifier.padding(22.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(24.dp)
-                                .clip(CircleShape)
-                                .background(Color.White),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(text = "G", color = Color(0xFF4285F4), fontWeight = FontWeight.Black, fontSize = 15.sp)
-                        }
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = "Choose a Google Account",
-                            color = PaletteCream,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                    IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
-                        Icon(Icons.Default.Close, contentDescription = null, tint = TextSecondary)
-                    }
-                }
+                    Text(
+                        text = "Google Sign-In Setup (Code 10)",
+                        color = PaletteCream,
+                        fontFamily = SoraFontFamily,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center
+                    )
 
-                Spacer(modifier = Modifier.height(14.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
 
-                Text(
-                    text = "to continue to Sielo",
-                    color = TextSecondary,
-                    fontSize = 12.5.sp
-                )
+                    Text(
+                        text = "Google Play Services requires your Release SHA-1 fingerprint to be added to Firebase Console under Android apps:",
+                        color = TextSecondary,
+                        fontSize = 13.sp,
+                        textAlign = TextAlign.Center,
+                        lineHeight = 18.sp
+                    )
 
-                Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(14.dp))
 
-                suggestedAccounts.forEach { (name, email, photo) ->
-                    Row(
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFF1F2937),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable { onAccountSelected(name, email, photo) }
-                            .padding(vertical = 10.dp, horizontal = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                            .clickable {
+                                clipboardManager.setText(AnnotatedString("0F:72:30:8E:F4:74:CA:39:0C:62:D7:B9:95:D8:A6:C6:D9:83:BC:BA"))
+                                android.widget.Toast.makeText(context, "SHA-1 copied to clipboard!", android.widget.Toast.LENGTH_SHORT).show()
+                            }
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(40.dp)
-                                .clip(CircleShape)
-                                .background(PaletteDarkNavy)
-                                .border(1.dp, BorderSubtle, CircleShape),
-                            contentAlignment = Alignment.Center
-                        ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
                             Text(
-                                text = name.take(1),
+                                text = "Release SHA-1 (Tap to copy):",
                                 color = PaletteSand,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 16.sp
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column {
-                            Text(
-                                text = name,
-                                color = PaletteCream,
-                                fontSize = 14.sp,
+                                fontSize = 11.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
+                            Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = email,
-                                color = TextMuted,
-                                fontSize = 12.sp
+                                text = "0F:72:30:8E:F4:74:CA:39:0C:62:D7:B9:95:D8:A6:C6:D9:83:BC:BA",
+                                color = PaletteCream,
+                                fontSize = 11.sp,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                             )
                         }
                     }
-                    Spacer(modifier = Modifier.height(4.dp))
-                }
 
-                if (isAddingCustom) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = customName,
-                        onValueChange = { customName = it },
-                        label = { Text("Name", color = TextSecondary) },
-                        singleLine = true,
-                        colors = OutlinedTextFieldDefaults.colors(focusedTextColor = PaletteCream, unfocusedTextColor = PaletteCream),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    OutlinedTextField(
-                        value = customEmail,
-                        onValueChange = { customEmail = it },
-                        label = { Text("Google Email", color = TextSecondary) },
-                        singleLine = true,
-                        colors = OutlinedTextFieldDefaults.colors(focusedTextColor = PaletteCream, unfocusedTextColor = PaletteCream),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(16.dp))
+
                     Button(
                         onClick = {
-                            if (customEmail.isNotBlank()) {
-                                onAccountSelected(if (customName.isNotBlank()) customName else "Google User", customEmail, null)
-                            }
+                            clipboardManager.setText(AnnotatedString("0F:72:30:8E:F4:74:CA:39:0C:62:D7:B9:95:D8:A6:C6:D9:83:BC:BA"))
+                            android.widget.Toast.makeText(context, "SHA-1 copied! Add it to Firebase Console -> Project Settings -> SHA fingerprints", android.widget.Toast.LENGTH_LONG).show()
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = PaletteSand, contentColor = PaletteDarkNavy),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = PaletteSand,
+                            contentColor = PaletteDarkNavy
+                        ),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(46.dp)
+                    ) {
+                        Text("Copy SHA-1 to Clipboard", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Button(
+                        onClick = {
+                            showSha1InfoDialog = false
+                            userManager.signInAsGuest()
+                            onDismiss()
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF1F2937),
+                            contentColor = PaletteCream
+                        ),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp)
+                            .border(1.dp, BorderGlass, RoundedCornerShape(14.dp))
+                    ) {
+                        Text("Continue as Guest", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    TextButton(
+                        onClick = { showSha1InfoDialog = false },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Continue with Account", fontWeight = FontWeight.Bold)
-                    }
-                } else {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    TextButton(onClick = { isAddingCustom = true }) {
-                        Text("+ Use another Google account", color = PaletteSageGreen, fontSize = 13.sp)
+                        Text("Close", color = TextSecondary, fontSize = 13.sp)
                     }
                 }
             }
