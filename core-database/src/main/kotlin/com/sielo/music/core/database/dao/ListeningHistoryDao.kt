@@ -44,6 +44,9 @@ interface ListeningHistoryDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertEvent(event: ListeningEventEntity): Long
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertEvents(events: List<ListeningEventEntity>)
+
     @Query("SELECT * FROM listening_history ORDER BY timestampMs DESC LIMIT :limit")
     fun getRecentHistory(limit: Int = 20): Flow<List<ListeningEventEntity>>
 

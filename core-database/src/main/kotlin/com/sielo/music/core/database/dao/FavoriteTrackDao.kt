@@ -13,11 +13,17 @@ interface FavoriteTrackDao {
     @Query("SELECT * FROM favorites ORDER BY addedAt DESC")
     fun getAllFavorites(): Flow<List<FavoriteTrackEntity>>
 
+    @Query("SELECT * FROM favorites ORDER BY addedAt DESC")
+    suspend fun getAllFavoritesList(): List<FavoriteTrackEntity>
+
     @Query("SELECT EXISTS(SELECT 1 FROM favorites WHERE id = :id)")
     fun isFavorite(id: String): Flow<Boolean>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertFavorite(track: FavoriteTrackEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertFavorites(tracks: List<FavoriteTrackEntity>)
 
     @Delete
     suspend fun deleteFavorite(track: FavoriteTrackEntity)

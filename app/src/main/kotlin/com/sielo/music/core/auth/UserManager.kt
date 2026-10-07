@@ -20,7 +20,8 @@ import javax.inject.Singleton
 class UserManager @Inject constructor(
     @ApplicationContext private val context: Context,
     private val databaseCleaner: com.sielo.music.core.database.DatabaseCleaner,
-    private val playerManager: com.sielo.music.core.audio.PlayerManager
+    private val playerManager: com.sielo.music.core.audio.PlayerManager,
+    private val cloudSyncManager: com.sielo.music.core.sync.CloudSyncManager
 ) {
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true }
@@ -82,6 +83,7 @@ class UserManager @Inject constructor(
         } catch (e: Exception) {
             e.printStackTrace()
         }
+        cloudSyncManager.backupUserData(profile)
     }
 
     fun openAuthDialog() {
@@ -103,25 +105,56 @@ class UserManager @Inject constructor(
     fun signInWithGoogle(name: String, email: String, photoUrl: String?) {
         val cleanEmail = email.trim().lowercase()
         val existingJson = prefs.getString("$KEY_ALL_USERS_PREFIX$cleanEmail", null)
-        val profile = if (!existingJson.isNullOrBlank()) {
+        val localProfile = if (!existingJson.isNullOrBlank()) {
             try {
                 val existing = json.decodeFromString<UserProfile>(existingJson)
-                existing.copy(name = name, photoUrl = photoUrl ?: existing.photoUrl, provider = AuthProvider.GOOGLE)
+                val finalPhoto = existing.photoUrl?.takeIf { it.isNotBlank() } ?: photoUrl
+                val finalName = existing.name.takeIf { it.isNotBlank() } ?: name
+                existing.copy(
+                    name = finalName,
+                    photoUrl = finalPhoto,
+                    provider = AuthProvider.GOOGLE,
+                    hasCompletedOnboarding = true
+                )
             } catch (_: Exception) {
-                createNewUserProfile(name, cleanEmail, photoUrl, AuthProvider.GOOGLE)
+                null
             }
-        } else {
-            createNewUserProfile(name, cleanEmail, photoUrl, AuthProvider.GOOGLE)
-        }
+        } else null
 
+        val profile = localProfile ?: createNewUserProfile(name, cleanEmail, photoUrl, AuthProvider.GOOGLE)
         persistUser(profile)
         _isAuthDialogOpen.value = false
-        if (!profile.hasCompletedOnboarding) {
+
+        // Returning users who already completed onboarding should NEVER see onboarding again
+        if (localProfile != null || profile.hasCompletedOnboarding) {
+            _isOnboardingOpen.value = false
+        } else {
             _isOnboardingOpen.value = true
+        }
+
+        // Trigger cloud restore in background
+        scope.launch {
+            val restored = cloudSyncManager.restoreUserData(cleanEmail)
+            if (restored != null) {
+                val merged = (currentUser.value ?: profile).copy(
+                    name = restored.name.takeIf { it.isNotBlank() } ?: profile.name,
+                    username = restored.username ?: profile.username,
+                    bio = restored.bio ?: profile.bio,
+                    photoUrl = restored.photoUrl ?: profile.photoUrl,
+                    favoriteArtists = if (restored.favoriteArtists.isNotEmpty()) restored.favoriteArtists else profile.favoriteArtists,
+                    favoriteGenres = if (restored.favoriteGenres.isNotEmpty()) restored.favoriteGenres else profile.favoriteGenres,
+                    artistTasteWeights = if (restored.artistTasteWeights.isNotEmpty()) restored.artistTasteWeights else profile.artistTasteWeights,
+                    genreTasteWeights = if (restored.genreTasteWeights.isNotEmpty()) restored.genreTasteWeights else profile.genreTasteWeights,
+                    hasCompletedOnboarding = true,
+                    createdAt = if (restored.createdAt > 0L) restored.createdAt else profile.createdAt
+                )
+                persistUser(merged)
+                _isOnboardingOpen.value = false
+            }
         }
     }
 
-    fun signInWithEmail(email: String, password: String):Result<UserProfile> {
+    fun signInWithEmail(email: String, password: String): Result<UserProfile> {
         val cleanEmail = email.trim().lowercase()
         if (!android.util.Patterns.EMAIL_ADDRESS.matcher(cleanEmail).matches()) {
             return Result.failure(IllegalArgumentException("Please enter a valid email address."))
@@ -131,23 +164,48 @@ class UserManager @Inject constructor(
         }
 
         val existingJson = prefs.getString("$KEY_ALL_USERS_PREFIX$cleanEmail", null)
-        val profile = if (!existingJson.isNullOrBlank()) {
+        val localProfile = if (!existingJson.isNullOrBlank()) {
             try {
-                json.decodeFromString<UserProfile>(existingJson)
+                json.decodeFromString<UserProfile>(existingJson).copy(hasCompletedOnboarding = true)
             } catch (_: Exception) {
-                val derivedName = cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() }
-                createNewUserProfile(derivedName, cleanEmail, null, AuthProvider.EMAIL_PASSWORD)
+                null
             }
-        } else {
-            val derivedName = cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() }
-            createNewUserProfile(derivedName, cleanEmail, null, AuthProvider.EMAIL_PASSWORD)
-        }
+        } else null
+
+        val derivedName = cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() }
+        val profile = localProfile ?: createNewUserProfile(derivedName, cleanEmail, null, AuthProvider.EMAIL_PASSWORD)
 
         persistUser(profile)
         _isAuthDialogOpen.value = false
-        if (!profile.hasCompletedOnboarding) {
+
+        // Returning users do not see onboarding
+        if (localProfile != null || profile.hasCompletedOnboarding) {
+            _isOnboardingOpen.value = false
+        } else {
             _isOnboardingOpen.value = true
         }
+
+        // Trigger cloud restore in background
+        scope.launch {
+            val restored = cloudSyncManager.restoreUserData(cleanEmail)
+            if (restored != null) {
+                val merged = (currentUser.value ?: profile).copy(
+                    name = restored.name.takeIf { it.isNotBlank() } ?: profile.name,
+                    username = restored.username ?: profile.username,
+                    bio = restored.bio ?: profile.bio,
+                    photoUrl = restored.photoUrl ?: profile.photoUrl,
+                    favoriteArtists = if (restored.favoriteArtists.isNotEmpty()) restored.favoriteArtists else profile.favoriteArtists,
+                    favoriteGenres = if (restored.favoriteGenres.isNotEmpty()) restored.favoriteGenres else profile.favoriteGenres,
+                    artistTasteWeights = if (restored.artistTasteWeights.isNotEmpty()) restored.artistTasteWeights else profile.artistTasteWeights,
+                    genreTasteWeights = if (restored.genreTasteWeights.isNotEmpty()) restored.genreTasteWeights else profile.genreTasteWeights,
+                    hasCompletedOnboarding = true,
+                    createdAt = if (restored.createdAt > 0L) restored.createdAt else profile.createdAt
+                )
+                persistUser(merged)
+                _isOnboardingOpen.value = false
+            }
+        }
+
         return Result.success(profile)
     }
 
@@ -164,10 +222,25 @@ class UserManager @Inject constructor(
             return Result.failure(IllegalArgumentException("Password must be at least 4 characters."))
         }
 
-        val profile = createNewUserProfile(cleanName, cleanEmail, null, AuthProvider.EMAIL_PASSWORD)
+        // If an account already exists locally, reuse it instead of wiping!
+        val existingJson = prefs.getString("$KEY_ALL_USERS_PREFIX$cleanEmail", null)
+        val profile = if (!existingJson.isNullOrBlank()) {
+            try {
+                json.decodeFromString<UserProfile>(existingJson).copy(name = cleanName)
+            } catch (_: Exception) {
+                createNewUserProfile(cleanName, cleanEmail, null, AuthProvider.EMAIL_PASSWORD)
+            }
+        } else {
+            createNewUserProfile(cleanName, cleanEmail, null, AuthProvider.EMAIL_PASSWORD)
+        }
+
         persistUser(profile)
         _isAuthDialogOpen.value = false
-        _isOnboardingOpen.value = true
+        if (!profile.hasCompletedOnboarding) {
+            _isOnboardingOpen.value = true
+        } else {
+            _isOnboardingOpen.value = false
+        }
         return Result.success(profile)
     }
 
@@ -334,6 +407,10 @@ class UserManager @Inject constructor(
     }
 
     fun signOut() {
+        val userToBackup = _currentUser.value
+        if (userToBackup != null) {
+            cloudSyncManager.backupUserData(userToBackup)
+        }
         _currentUser.value = null
         prefs.edit().remove(KEY_CURRENT_USER).apply()
         _isAuthDialogOpen.value = true

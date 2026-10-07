@@ -16,8 +16,8 @@ android {
         applicationId = "com.sielo.music"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1131
-        versionName = "11.3.1"
+        versionCode = 1132
+        versionName = "11.3.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -122,6 +122,7 @@ dependencies {
     // Firebase & Google Authentication
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.auth)
+    implementation(libs.firebase.firestore)
     implementation(libs.play.services.auth)
     implementation(libs.androidx.credentials)
     implementation(libs.androidx.credentials.play.services.auth)

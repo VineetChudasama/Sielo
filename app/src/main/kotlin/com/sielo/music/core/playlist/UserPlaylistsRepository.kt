@@ -49,6 +49,21 @@ class UserPlaylistsRepository @Inject constructor(
         return defaultList
     }
 
+    fun restorePlaylists(playlists: List<UserPlaylist>) {
+        if (playlists.isEmpty()) return
+        val current = _playlists.value
+        val mergedMap = current.associateBy { it.id }.toMutableMap()
+        for (pl in playlists) {
+            mergedMap[pl.id] = pl
+        }
+        val mergedList = mergedMap.values.toList()
+        savePlaylistsInternal(mergedList)
+    }
+
+    fun getAllPlaylists(): List<UserPlaylist> {
+        return _playlists.value
+    }
+
     private fun savePlaylistsInternal(list: List<UserPlaylist>) {
         try {
             val encoded = json.encodeToString(list)
