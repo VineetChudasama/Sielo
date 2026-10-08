@@ -1340,12 +1340,13 @@ class InnerTubeClient @Inject constructor(
                     else -> "Album"
                 }
 
+                val curatedCover = ArtistMetadataResolver.resolveCuratedAlbumCover(title, artistName)
                 SieloAlbum(
                     id = albumId,
                     title = title,
                     artist = artistName,
                     year = year,
-                    thumbnailUrl = image,
+                    thumbnailUrl = curatedCover ?: image,
                     type = type,
                     songCount = songCount
                 )
@@ -1529,12 +1530,14 @@ class InnerTubeClient @Inject constructor(
                 else -> "Album"
             }
 
+            val curatedCover = ArtistMetadataResolver.resolveCuratedAlbumCover(title, artistName)
+
             SieloAlbum(
                 id = browseId,
                 title = title,
                 artist = artistName,
                 year = year,
-                thumbnailUrl = thumbUrl,
+                thumbnailUrl = curatedCover ?: thumbUrl,
                 type = type,
                 songCount = if (type == "Single") 1 else 0
             )
@@ -1603,12 +1606,14 @@ class InnerTubeClient @Inject constructor(
                 else -> "Album"
             }
 
+            val curatedCoverTwoRow = ArtistMetadataResolver.resolveCuratedAlbumCover(title, artistName)
+
             SieloAlbum(
                 id = browseId,
                 title = title,
                 artist = artistName,
                 year = year,
-                thumbnailUrl = thumbUrl,
+                thumbnailUrl = curatedCoverTwoRow ?: thumbUrl,
                 type = type,
                 songCount = if (type == "Single") 1 else 0
             )
@@ -1660,8 +1665,10 @@ class InnerTubeClient @Inject constructor(
                     else -> if (maxSongCount <= 1) "Single" else "Album"
                 }
 
+                val curatedCover = ArtistMetadataResolver.resolveCuratedAlbumCover(base.title, artistName)
                 base.copy(
                     tracks = mergedTracks,
+                    thumbnailUrl = curatedCover ?: base.thumbnailUrl,
                     type = type,
                     songCount = maxSongCount
                 )
@@ -2181,6 +2188,99 @@ class InnerTubeClient @Inject constructor(
         null
     }
 
+    private fun isYouTubeVideoId(id: String): Boolean {
+        return id.length == 11 && id.matches(Regex("^[a-zA-Z0-9_-]{11}$"))
+    }
+
+    private fun searchYouTubeWebVideo(title: String, artist: String): String? {
+        return try {
+            val cleanTitle = TrackMatchValidator.cleanTitle(title)
+            val query = if (artist.isNotBlank()) "$cleanTitle $artist".trim() else cleanTitle
+            if (query.isBlank()) return null
+
+            val requestBody = """
+                {
+                    "context": {
+                        "client": {
+                            "clientName": "WEB",
+                            "clientVersion": "2.20240105.01.00",
+                            "hl": "en",
+                            "gl": "US"
+                        }
+                    },
+                    "query": "${query.replace("\"", "\\\"")}",
+                    "params": "EgIQAQ%3D%3D"
+                }
+            """.trimIndent()
+
+            val request = Request.Builder()
+                .url("https://www.youtube.com/youtubei/v1/search")
+                .post(requestBody.toRequestBody(JSON_MEDIA))
+                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
+                .build()
+
+            val response = client.newCall(request).execute()
+            val bodyString = response.body?.string() ?: return null
+            val root = json.parseToJsonElement(bodyString).jsonObject
+            val sectionContents = root["contents"]?.jsonObject
+                ?.get("twoColumnSearchResultsRenderer")?.jsonObject
+                ?.get("primaryContents")?.jsonObject
+                ?.get("sectionListRenderer")?.jsonObject
+                ?.get("contents")?.jsonArray
+                ?.firstOrNull()?.jsonObject
+                ?.get("itemSectionRenderer")?.jsonObject
+                ?.get("contents")?.jsonArray ?: return null
+
+            // First pass: match title and artist fuzzy match
+            for (elem in sectionContents) {
+                val vidRenderer = elem.jsonObject["videoRenderer"]?.jsonObject ?: continue
+                val vidId = vidRenderer["videoId"]?.jsonPrimitive?.content ?: continue
+                if (!isYouTubeVideoId(vidId)) continue
+
+                val titleText = vidRenderer["title"]?.jsonObject
+                    ?.get("runs")?.jsonArray?.firstOrNull()?.jsonObject
+                    ?.get("text")?.jsonPrimitive?.content ?: ""
+                val durText = vidRenderer["lengthText"]?.jsonObject
+                    ?.get("simpleText")?.jsonPrimitive?.content ?: ""
+                val durSec = parseDurationToSeconds(durText)
+
+                // Reject shorts or long mixes (> 12 mins or < 25 secs)
+                if (durSec in 1..25 || durSec > 720) continue
+
+                if (TrackMatchValidator.isFuzzyMatch(cleanTitle, titleText, artist, null) ||
+                    (artist.isNotBlank() && TrackMatchValidator.isSongByOrFeaturingArtist(titleText, "", artist))
+                ) {
+                    android.util.Log.d("InnerTubeClient", "searchYouTubeWebVideo matched: id=$vidId, title='$titleText' for '$cleanTitle' by '$artist'")
+                    return vidId
+                }
+            }
+
+            // Second pass: pick first reasonable length video
+            for (elem in sectionContents) {
+                val vidRenderer = elem.jsonObject["videoRenderer"]?.jsonObject ?: continue
+                val vidId = vidRenderer["videoId"]?.jsonPrimitive?.content ?: continue
+                if (!isYouTubeVideoId(vidId)) continue
+
+                val durText = vidRenderer["lengthText"]?.jsonObject
+                    ?.get("simpleText")?.jsonPrimitive?.content ?: ""
+                val durSec = parseDurationToSeconds(durText)
+
+                if (durSec in 30..600) {
+                    val titleText = vidRenderer["title"]?.jsonObject
+                        ?.get("runs")?.jsonArray?.firstOrNull()?.jsonObject
+                        ?.get("text")?.jsonPrimitive?.content ?: ""
+                    android.util.Log.d("InnerTubeClient", "searchYouTubeWebVideo fallback candidate: id=$vidId, title='$titleText' for '$cleanTitle' by '$artist'")
+                    return vidId
+                }
+            }
+
+            null
+        } catch (e: Exception) {
+            android.util.Log.e("InnerTubeClient", "searchYouTubeWebVideo error: ${e.message}", e)
+            null
+        }
+    }
+
     suspend fun getStreamUrl(videoId: String, title: String? = null, artist: String? = null): String? = withContext(Dispatchers.IO) {
         val cleanId = videoId.trim()
         if (cleanId.isNotBlank()) {
@@ -2192,18 +2292,19 @@ class InnerTubeClient @Inject constructor(
         }
         android.util.Log.d("InnerTubeClient", "getStreamUrl start: videoId=$cleanId, title=$title, artist=$artist")
 
-        // 1. If title and artist are present, verify if there is an official uncensored/explicit version on YouTube Music!
-        var targetVideoId = cleanId
-        if (!title.isNullOrBlank() && !artist.isNullOrBlank()) {
-            val explicitId = resolveExplicitTrackId(title, artist)
-            if (!explicitId.isNullOrBlank() && explicitId != cleanId) {
-                targetVideoId = explicitId
-                android.util.Log.d("InnerTubeClient", "Upgraded track to explicit uncensored version: id=$explicitId for '$title' by '$artist'")
-            }
-        }
+        val isDirectYtId = isYouTubeVideoId(cleanId)
 
-        // 2. Primary: YouTube InnerTube stream for the target uncensored track (full length)
-        if (targetVideoId.isNotBlank()) {
+        // 1. If this is already a direct YouTube video ID, optionally check for explicit upgrade
+        if (isDirectYtId) {
+            var targetVideoId = cleanId
+            if (!title.isNullOrBlank() && !artist.isNullOrBlank()) {
+                val explicitId = resolveExplicitTrackId(title, artist)
+                if (!explicitId.isNullOrBlank() && explicitId != cleanId) {
+                    targetVideoId = explicitId
+                    android.util.Log.d("InnerTubeClient", "Upgraded track to explicit uncensored version: id=$explicitId for '$title' by '$artist'")
+                }
+            }
+
             val ytStream = resolveYouTubeStream(targetVideoId)
             if (!ytStream.isNullOrBlank()) {
                 android.util.Log.d("InnerTubeClient", "YouTube stream resolved for $targetVideoId")
@@ -2211,17 +2312,17 @@ class InnerTubeClient @Inject constructor(
                 cacheStreamUrl(targetVideoId, ytStream)
                 return@withContext ytStream
             }
-        }
 
-        if (cleanId.isNotBlank() && cleanId != targetVideoId) {
-            val ytStream = resolveYouTubeStream(cleanId)
-            if (!ytStream.isNullOrBlank()) {
-                cacheStreamUrl(cleanId, ytStream)
-                return@withContext ytStream
+            if (cleanId != targetVideoId) {
+                val fallbackYtStream = resolveYouTubeStream(cleanId)
+                if (!fallbackYtStream.isNullOrBlank()) {
+                    cacheStreamUrl(cleanId, fallbackYtStream)
+                    return@withContext fallbackYtStream
+                }
             }
         }
 
-        // 3. Secondary: JioSaavn direct high-bitrate stream with strict title/artist validation
+        // 2. Secondary: JioSaavn direct high-bitrate stream with strict title/artist validation
         if (!title.isNullOrBlank() || !artist.isNullOrBlank()) {
             val saavnStream = resolveJioSaavnStream(title, artist, cleanId)
             if (!saavnStream.isNullOrBlank()) {
@@ -2231,7 +2332,50 @@ class InnerTubeClient @Inject constructor(
             }
         }
 
-        android.util.Log.w("InnerTubeClient", "Failed to resolve stream for videoId=$cleanId, title=$title")
+        // 3. Tertiary: Fallback search on YouTube Music for non-YouTube IDs (MusicBrainz mb_rec_*, JioSaavn numeric IDs, etc.)
+        // or when direct stream resolution failed
+        if (!title.isNullOrBlank() && !artist.isNullOrBlank()) {
+            val cleanTitle = TrackMatchValidator.cleanTitle(title)
+            val ytMusicCandidates = searchYouTube("$cleanTitle $artist")
+            val matchingCandidate = ytMusicCandidates.firstOrNull { cand ->
+                isYouTubeVideoId(cand.id) &&
+                TrackMatchValidator.isFuzzyMatch(cleanTitle, cand.title, artist, cand.artist)
+            } ?: ytMusicCandidates.firstOrNull { cand -> isYouTubeVideoId(cand.id) }
+
+            if (matchingCandidate != null) {
+                val resolvedStream = resolveYouTubeStream(matchingCandidate.id)
+                if (!resolvedStream.isNullOrBlank()) {
+                    android.util.Log.d("InnerTubeClient", "YouTube Music search stream resolved: id=${matchingCandidate.id} for '$title' by '$artist'")
+                    cacheStreamUrl(cleanId, resolvedStream)
+                    cacheStreamUrl(matchingCandidate.id, resolvedStream)
+                    return@withContext resolvedStream
+                }
+            }
+
+            // 4. Quaternary: Fallback search on YouTube Web (crucial for underground, mixtapes, DHH, unofficial releases)
+            val webVideoId = searchYouTubeWebVideo(title, artist)
+            if (!webVideoId.isNullOrBlank()) {
+                val resolvedStream = resolveYouTubeStream(webVideoId)
+                if (!resolvedStream.isNullOrBlank()) {
+                    android.util.Log.d("InnerTubeClient", "YouTube Web search stream resolved: id=$webVideoId for '$title' by '$artist'")
+                    cacheStreamUrl(cleanId, resolvedStream)
+                    cacheStreamUrl(webVideoId, resolvedStream)
+                    return@withContext resolvedStream
+                }
+            }
+        } else if (cleanId.isNotBlank() && !isDirectYtId) {
+            val webVideoId = searchYouTubeWebVideo(cleanId, "")
+            if (!webVideoId.isNullOrBlank()) {
+                val resolvedStream = resolveYouTubeStream(webVideoId)
+                if (!resolvedStream.isNullOrBlank()) {
+                    cacheStreamUrl(cleanId, resolvedStream)
+                    cacheStreamUrl(webVideoId, resolvedStream)
+                    return@withContext resolvedStream
+                }
+            }
+        }
+
+        android.util.Log.w("InnerTubeClient", "Failed to resolve stream for videoId=$cleanId, title=$title, artist=$artist")
         null
     }
 

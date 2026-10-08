@@ -47,22 +47,22 @@ interface ListeningHistoryDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertEvents(events: List<ListeningEventEntity>)
 
-    @Query("SELECT * FROM listening_history ORDER BY timestampMs DESC LIMIT :limit")
+    @Query("SELECT * FROM listening_history WHERE durationPlayedMs >= 20000 ORDER BY timestampMs DESC LIMIT :limit")
     fun getRecentHistory(limit: Int = 20): Flow<List<ListeningEventEntity>>
 
-    @Query("SELECT SUM(durationPlayedMs) FROM listening_history WHERE timestampMs >= :sinceMs")
+    @Query("SELECT SUM(durationPlayedMs) FROM listening_history WHERE timestampMs >= :sinceMs AND durationPlayedMs >= 20000")
     fun getTotalListeningTime(sinceMs: Long): Flow<Long?>
 
-    @Query("SELECT COUNT(DISTINCT songId) FROM listening_history WHERE timestampMs >= :sinceMs")
+    @Query("SELECT COUNT(DISTINCT songId) FROM listening_history WHERE timestampMs >= :sinceMs AND durationPlayedMs >= 20000")
     fun getTotalUniqueSongs(sinceMs: Long): Flow<Int>
 
-    @Query("SELECT COUNT(DISTINCT artistName) FROM listening_history WHERE timestampMs >= :sinceMs")
+    @Query("SELECT COUNT(DISTINCT artistName) FROM listening_history WHERE timestampMs >= :sinceMs AND durationPlayedMs >= 20000")
     fun getTotalUniqueArtists(sinceMs: Long): Flow<Int>
 
     @Query("""
         SELECT artistName, COUNT(*) as playCount, SUM(durationPlayedMs) as totalDurationMs, MAX(thumbnailUrl) as thumbnailUrl 
         FROM listening_history 
-        WHERE timestampMs >= :sinceMs 
+        WHERE timestampMs >= :sinceMs AND durationPlayedMs >= 20000
         GROUP BY artistName 
         ORDER BY playCount DESC 
         LIMIT :limit
@@ -72,27 +72,28 @@ interface ListeningHistoryDao {
     @Query("""
         SELECT songId, songTitle, artistName, COUNT(*) as playCount, SUM(durationPlayedMs) as totalDurationMs, MAX(thumbnailUrl) as thumbnailUrl 
         FROM listening_history 
-        WHERE timestampMs >= :sinceMs 
+        WHERE timestampMs >= :sinceMs AND durationPlayedMs >= 20000
         GROUP BY songId 
         ORDER BY playCount DESC 
         LIMIT :limit
     """)
     fun getTopSongs(sinceMs: Long, limit: Int = 10): Flow<List<SongStat>>
 
-    @Query("SELECT COUNT(*) FROM listening_history WHERE month = :month AND year = :year")
+    @Query("SELECT COUNT(*) FROM listening_history WHERE month = :month AND year = :year AND durationPlayedMs >= 20000")
     suspend fun getPlayCountForMonth(month: Int, year: Int): Int
 
-    @Query("SELECT SUM(durationPlayedMs) FROM listening_history WHERE month = :month AND year = :year")
+    @Query("SELECT SUM(durationPlayedMs) FROM listening_history WHERE month = :month AND year = :year AND durationPlayedMs >= 20000")
     suspend fun getListeningDurationForMonth(month: Int, year: Int): Long?
 
-    @Query("SELECT hourOfDay, COUNT(*) as count, SUM(durationPlayedMs) as totalDurationMs FROM listening_history WHERE timestampMs >= :sinceMs GROUP BY hourOfDay")
+    @Query("SELECT hourOfDay, COUNT(*) as count, SUM(durationPlayedMs) as totalDurationMs FROM listening_history WHERE timestampMs >= :sinceMs AND durationPlayedMs >= 20000 GROUP BY hourOfDay")
     fun getHourlyDistribution(sinceMs: Long): Flow<List<HourCount>>
 
     @Query("""
         SELECT * FROM listening_history 
         WHERE timestampMs < :twoDaysAgoMs 
+          AND durationPlayedMs >= 20000
           AND songId NOT IN (
-              SELECT DISTINCT songId FROM listening_history WHERE timestampMs >= :twoDaysAgoMs
+              SELECT DISTINCT songId FROM listening_history WHERE timestampMs >= :twoDaysAgoMs AND durationPlayedMs >= 20000
           )
         GROUP BY songId 
         ORDER BY timestampMs DESC 
@@ -112,19 +113,23 @@ interface ListeningHistoryDao {
     @Query("UPDATE listening_history SET durationPlayedMs = durationPlayedMs + :deltaMs WHERE eventId = :eventId")
     suspend fun incrementDurationPlayed(eventId: Long, deltaMs: Long)
 
-    @Query("SELECT * FROM listening_history WHERE timestampMs >= :sinceMs ORDER BY timestampMs DESC LIMIT :limit")
+    @Query("SELECT * FROM listening_history WHERE timestampMs >= :sinceMs AND durationPlayedMs >= 20000 ORDER BY timestampMs DESC LIMIT :limit")
     fun getStreamHistory(sinceMs: Long, limit: Int = 100): Flow<List<ListeningEventEntity>>
 
-    @Query("SELECT COUNT(*) FROM listening_history WHERE timestampMs >= :sinceMs")
+    @Query("SELECT COUNT(*) FROM listening_history WHERE timestampMs >= :sinceMs AND durationPlayedMs >= 20000")
     fun getTotalStreamCount(sinceMs: Long): Flow<Int>
 
     @Query("UPDATE listening_history SET durationPlayedMs = 15000 WHERE durationPlayedMs >= 200000")
     suspend fun sanitizeLegacyRecords()
 
+    @Query("DELETE FROM listening_history WHERE durationPlayedMs < 20000")
+    suspend fun purgeSubThresholdRecords()
+
     @Query("""
         SELECT * FROM listening_history 
-        WHERE eventId IN (
-            SELECT MAX(eventId) FROM listening_history GROUP BY songId
+        WHERE durationPlayedMs >= 20000
+          AND eventId IN (
+            SELECT MAX(eventId) FROM listening_history WHERE durationPlayedMs >= 20000 GROUP BY songId
         )
         ORDER BY timestampMs DESC 
         LIMIT :limit
@@ -134,7 +139,7 @@ interface ListeningHistoryDao {
     @Query("""
         SELECT songId, songTitle, artistName, albumName, thumbnailUrl, COUNT(*) as playCount, MAX(timestampMs) as lastPlayedMs
         FROM listening_history
-        WHERE artistName IN (:artistNames)
+        WHERE artistName IN (:artistNames) AND durationPlayedMs >= 20000
         GROUP BY songId
         ORDER BY playCount DESC
     """)
@@ -143,7 +148,7 @@ interface ListeningHistoryDao {
     @Query("""
         SELECT songId, songTitle, artistName, albumName, thumbnailUrl, COUNT(*) as playCount, MAX(timestampMs) as lastPlayedMs
         FROM listening_history
-        WHERE timestampMs >= :sinceMs
+        WHERE timestampMs >= :sinceMs AND durationPlayedMs >= 20000
         GROUP BY songId
         HAVING COUNT(*) >= :minPlays AND COUNT(*) <= :maxPlays
         ORDER BY lastPlayedMs DESC
@@ -153,7 +158,7 @@ interface ListeningHistoryDao {
     @Query("""
         SELECT artistName, COUNT(*) as playCount, SUM(durationPlayedMs) as totalDurationMs, MAX(thumbnailUrl) as thumbnailUrl 
         FROM listening_history 
-        WHERE timestampMs >= :sinceMs 
+        WHERE timestampMs >= :sinceMs AND durationPlayedMs >= 20000
         GROUP BY artistName 
         ORDER BY playCount DESC 
         LIMIT :limit

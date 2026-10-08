@@ -212,6 +212,16 @@ class SettingsViewModel @Inject constructor(
     fun recordFeedbackPopupShown(neverShowAgain: Boolean) {
         settingsRepository.recordFeedbackPopupShown(neverShowAgain)
     }
+
+    /** Returns the last version the user has acknowledged in What's New, or null if never shown. */
+    fun getLastSeenVersion(): String? {
+        return settingsRepository.getLastSeenVersion()
+    }
+
+    /** Persists the current version as the last seen, so the popup won't show again until next update. */
+    fun markVersionSeen(version: String) {
+        settingsRepository.markVersionSeen(version)
+    }
 }
 
 

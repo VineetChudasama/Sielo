@@ -1,5 +1,6 @@
 package com.sielo.music.core.network.metadata
 
+import com.sielo.music.core.network.innertube.ArtistMetadataResolver
 import com.sielo.music.core.network.models.SieloAlbum
 import com.sielo.music.core.network.models.SieloArtist
 import com.sielo.music.core.network.models.SieloTrack
@@ -88,7 +89,9 @@ object MusicBrainzMapper {
             ReleaseType.UNKNOWN -> "Album"
         }
 
-        val artwork = coverUrls?.medium ?: coverUrls?.large ?: coverUrls?.thumbnail ?: fallbackArtworkUrl
+        val curatedCover = ArtistMetadataResolver.getCuratedCoverByMbid(rg.id)
+            ?: ArtistMetadataResolver.resolveCuratedAlbumCover(rg.title, artistDisplay)
+        val artwork = curatedCover ?: coverUrls?.medium ?: coverUrls?.large ?: coverUrls?.thumbnail ?: fallbackArtworkUrl
         val calculatedCount = when {
             tracks.isNotEmpty() -> tracks.size
             explicitTrackCount != null && explicitTrackCount > 0 -> explicitTrackCount

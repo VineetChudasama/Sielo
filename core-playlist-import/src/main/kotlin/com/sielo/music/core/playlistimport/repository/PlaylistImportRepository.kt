@@ -78,9 +78,33 @@ class PlaylistImportRepository @Inject constructor(
 
             try {
                 val results = innerTubeClient.search(query)
-                val topMatch = results.firstOrNull()
-                if (topMatch != null) {
-                    resolvedTracks.add(topMatch)
+                val isRequestedCover = com.sielo.music.core.network.innertube.TrackMatchValidator.isCoverOrKaraokeTrack(
+                    candidate.title,
+                    candidate.artistGuess
+                )
+
+                // 1. If user did NOT ask for a cover/karaoke, strictly prefer non-cover tracks
+                // where the artist matches the requested artist.
+                val match = if (!isRequestedCover) {
+                    results.firstOrNull { res ->
+                        !com.sielo.music.core.network.innertube.TrackMatchValidator.isCoverOrKaraokeTrack(res.title, res.artist) &&
+                        com.sielo.music.core.network.innertube.TrackMatchValidator.isSongByOrFeaturingArtist(res.title, res.artist, candidate.artistGuess) &&
+                        com.sielo.music.core.network.innertube.TrackMatchValidator.isFuzzyMatch(candidate.title, res.title, candidate.artistGuess, res.artist)
+                    } ?: results.firstOrNull { res ->
+                        !com.sielo.music.core.network.innertube.TrackMatchValidator.isCoverOrKaraokeTrack(res.title, res.artist) &&
+                        com.sielo.music.core.network.innertube.TrackMatchValidator.isSongByOrFeaturingArtist(res.title, res.artist, candidate.artistGuess)
+                    } ?: results.firstOrNull { res ->
+                        !com.sielo.music.core.network.innertube.TrackMatchValidator.isCoverOrKaraokeTrack(res.title, res.artist) &&
+                        com.sielo.music.core.network.innertube.TrackMatchValidator.isFuzzyMatch(candidate.title, res.title)
+                    } ?: results.firstOrNull { res ->
+                        !com.sielo.music.core.network.innertube.TrackMatchValidator.isCoverOrKaraokeTrack(res.title, res.artist)
+                    } ?: results.firstOrNull()
+                } else {
+                    results.firstOrNull()
+                }
+
+                if (match != null) {
+                    resolvedTracks.add(match)
                 }
             } catch (e: Exception) {
                 // Silently skip if search fails

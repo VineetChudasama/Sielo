@@ -59,6 +59,7 @@ class FakeCandidatePoolBuilder : CandidatePoolBuilder(
         override fun getStreamHistory(sinceMs: Long, limit: Int) = kotlinx.coroutines.flow.emptyFlow<List<com.sielo.music.core.database.entity.ListeningEventEntity>>()
         override fun getTotalStreamCount(sinceMs: Long) = kotlinx.coroutines.flow.emptyFlow<Int>()
         override suspend fun sanitizeLegacyRecords() {}
+        override suspend fun purgeSubThresholdRecords() {}
         override fun getRecentUniquePlayedSongs(limit: Int) = kotlinx.coroutines.flow.emptyFlow<List<com.sielo.music.core.database.entity.ListeningEventEntity>>()
         override suspend fun getSongsByArtists(artistNames: List<String>) = emptyList<com.sielo.music.core.database.dao.CandidateSongStat>()
         override suspend fun getSongsByPlayCountRange(sinceMs: Long, minPlays: Int, maxPlays: Int) = emptyList<com.sielo.music.core.database.dao.CandidateSongStat>()

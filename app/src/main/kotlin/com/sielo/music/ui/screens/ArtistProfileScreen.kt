@@ -2899,7 +2899,7 @@ private fun ArtistAlbumDetailView(
                     onMore = {
                         val encodedAlbumId = java.net.URLEncoder.encode(effectiveAlbum.id, "UTF-8")
                         val encodedArtist = java.net.URLEncoder.encode(effectiveAlbum.artist, "UTF-8")
-                        val webLink = "https://sielo-music.vercel.app/album/$encodedAlbumId?artist=$encodedArtist"
+                        val webLink = "https://www.sielo.site/album/$encodedAlbumId?artist=$encodedArtist"
                         val shareIntent = Intent(Intent.ACTION_SEND).apply {
                             type = "text/plain"
                             putExtra(Intent.EXTRA_SUBJECT, effectiveAlbum.title)
@@ -3770,7 +3770,7 @@ private fun buildShareText(artist: ArtistDetails): String {
         }
     }
     val encoded = Uri.encode(artist.name)
-    val webArtistLink = "https://sielo-music.vercel.app/artist?name=$encoded"
+    val webArtistLink = "https://www.sielo.site/artist?name=$encoded"
     sb.append("\n📲 Open directly in Sielo App:\n")
     sb.append("$webArtistLink\n")
     if (!artist.wikiUrl.isNullOrBlank()) {
@@ -3788,7 +3788,7 @@ private fun extractYear(yearStr: String?): Int {
 
 private fun copyArtistLinkToClipboard(context: Context, artist: ArtistDetails) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    val clip = ClipData.newPlainText("Sielo Artist Link", "https://sielo-music.vercel.app/artist?name=${Uri.encode(artist.name)}")
+    val clip = ClipData.newPlainText("Sielo Artist Link", "https://www.sielo.site/artist?name=${Uri.encode(artist.name)}")
     clipboard.setPrimaryClip(clip)
     Toast.makeText(context, "Sielo link copied to clipboard!", Toast.LENGTH_SHORT).show()
 }

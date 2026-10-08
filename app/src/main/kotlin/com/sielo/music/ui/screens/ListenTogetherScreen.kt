@@ -702,6 +702,8 @@ private fun ActiveRoomContent(
         onNavigateBack()
     }
 
+    val playbackState by viewModel.playbackState.collectAsState()
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -832,6 +834,7 @@ private fun ActiveRoomContent(
         // SYNCED PLAYER CARD WITH PREVIOUS, PLAY/PAUSE, NEXT CONTROLS
         RoomPlayerCard(
             state = state,
+            playbackState = playbackState,
             onPrevious = { viewModel.skipPrevious() },
             onTogglePlay = { viewModel.togglePlayPause() },
             onNext = { viewModel.skipTrack() }
@@ -965,11 +968,30 @@ private fun ActiveRoomContent(
 @Composable
 private fun RoomPlayerCard(
     state: ActiveRoomState,
+    playbackState: com.sielo.music.core.audio.model.PlaybackState,
     onPrevious: () -> Unit,
     onTogglePlay: () -> Unit,
     onNext: () -> Unit
 ) {
     val track = state.currentTrack
+    val durationMs = if (track != null && track.durationSeconds > 0) {
+        track.durationSeconds * 1000L
+    } else if (playbackState.durationMs > 0) {
+        playbackState.durationMs
+    } else {
+        0L
+    }
+    val currentPosMs = if (playbackState.currentTrack?.id == track?.id && playbackState.currentPositionMs > 0) {
+        playbackState.currentPositionMs
+    } else {
+        state.currentPositionMs
+    }
+    val progress = if (durationMs > 0) {
+        (currentPosMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+    val isLoading = playbackState.isBuffering && playbackState.currentTrack?.id == track?.id
 
     Box(
         modifier = Modifier
@@ -978,10 +1000,28 @@ private fun RoomPlayerCard(
             .clip(RoundedCornerShape(18.dp))
             .background(SurfaceDark)
             .border(1.dp, BorderGlass, RoundedCornerShape(18.dp))
-            .padding(14.dp)
     ) {
+        // Thin progress bar for the song at the very top of the player card
+        if (track != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(2.5.dp)
+                    .background(SurfaceElevated)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(fraction = progress)
+                        .height(2.5.dp)
+                        .background(PaletteSand)
+                )
+            }
+        }
+
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             // Song artwork
@@ -1055,7 +1095,7 @@ private fun RoomPlayerCard(
                     )
                 }
 
-                // Play / Pause Button
+                // Play / Pause Button with Loading Indicator
                 Box(
                     modifier = Modifier
                         .size(44.dp)
@@ -1064,12 +1104,20 @@ private fun RoomPlayerCard(
                         .clickable { onTogglePlay() },
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = if (state.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                        contentDescription = if (state.isPlaying) "Pause" else "Play",
-                        tint = PaletteDarkNavy,
-                        modifier = Modifier.size(24.dp)
-                    )
+                    if (isLoading) {
+                        CircularProgressIndicator(
+                            color = PaletteDarkNavy,
+                            strokeWidth = 2.5.dp,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = if (state.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                            contentDescription = if (state.isPlaying) "Pause" else "Play",
+                            tint = PaletteDarkNavy,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
                 }
 
                 // Next Button
@@ -2419,7 +2467,7 @@ private fun RoomQrDialog(
     onShare: () -> Unit
 ) {
     val context = LocalContext.current
-    val inviteLink = "https://sielo-music.vercel.app/listen/${state.roomId}?key=${state.roomKey}"
+    val inviteLink = "https://www.sielo.site/listen/${state.roomId}?key=${state.roomKey}"
 
     val qrBitmap = remember(inviteLink) {
         QrCodeGenerator.generateQrImageBitmap(inviteLink, context = context, sizePx = 480)

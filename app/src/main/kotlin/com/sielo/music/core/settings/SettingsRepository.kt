@@ -359,6 +359,7 @@ class SettingsRepository @Inject constructor(
     }
     private val KEY_LAST_FEEDBACK_TIME = "last_feedback_popup_time"
     private val KEY_NEVER_SHOW_FEEDBACK = "never_show_feedback_popup"
+    private val KEY_LAST_SEEN_VERSION = "last_seen_whats_new_version"
 
     fun shouldShowFeedbackPopup(): Boolean {
         if (prefs.getBoolean(KEY_NEVER_SHOW_FEEDBACK, false)) return false
@@ -374,6 +375,16 @@ class SettingsRepository @Inject constructor(
             putBoolean(KEY_NEVER_SHOW_FEEDBACK, neverShowAgain)
             apply()
         }
+    }
+
+    /** Returns the last version for which the user has seen the What's New dialog. */
+    fun getLastSeenVersion(): String? {
+        return prefs.getString(KEY_LAST_SEEN_VERSION, null)
+    }
+
+    /** Persists [version] as the last version the user has seen What's New for. */
+    fun markVersionSeen(version: String) {
+        prefs.edit().putString(KEY_LAST_SEEN_VERSION, version).apply()
     }
 }
 

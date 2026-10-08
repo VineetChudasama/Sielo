@@ -154,6 +154,10 @@ object YouTubeArtistImageResolver {
         if (lower.contains("default") || lower.contains("placeholder") || lower.contains("default-film") || lower.contains("default-music") || lower.contains("default-artist") || lower.contains("artist-default")) {
             return false
         }
+        // Reject album cover URLs returned as artist images (e.g. c.saavncdn.com/265/Crucified-English-2017-50x50.jpg)
+        if (lower.contains("saavncdn.com") && !lower.contains("/artists/")) {
+            return false
+        }
         if (lower.contains("wikimedia.org") || lower.contains("wikipedia.org")) return true
         if (lower.contains("saavncdn.com/artists/")) return true
         if (lower.contains("dzcdn.net") || lower.contains("deezer.com")) return true
@@ -168,7 +172,8 @@ object YouTubeArtistImageResolver {
     private fun isStrictArtistMatch(candidate: String, target: String): Boolean {
         val c = normalizeForMatch(candidate)
         val t = normalizeForMatch(target)
-        return c == t || c.contains(t) || t.contains(c)
+        if (c.isBlank() || t.isBlank()) return false
+        return c == t
     }
 
     private fun normalizeForMatch(str: String): String {

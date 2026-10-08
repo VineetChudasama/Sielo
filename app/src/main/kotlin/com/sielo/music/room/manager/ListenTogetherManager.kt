@@ -56,7 +56,7 @@ private const val EMPTY_ROOM_GRACE_PERIOD_MS = 120_000L
 @Singleton
 class ListenTogetherManager @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val playerManager: PlayerManager
+    val playerManager: PlayerManager
 ) {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true }
     private val scope = CoroutineScope(Dispatchers.IO + Job())
@@ -1900,32 +1900,6 @@ class ListenTogetherManager @Inject constructor(
      * participant joins during that window, the shutdown is cancelled.
      */
     fun leaveRoom(isIntentional: Boolean = true) {
-        val state = _roomState.value
-        if (isIntentional && state != null && state.isHost && state.participants.size == 1) {
-            if (roomShutdownJob?.isActive == true) return
-
-            Log.d(TAG, "Host is the only participant. Scheduling room shutdown in 10s.")
-            roomShutdownJob = scope.launch {
-                delay(EMPTY_ROOM_GRACE_PERIOD_MS)
-
-                val current = _roomState.value
-                val stillOnlyHost = current != null &&
-                        current.isHost &&
-                        current.participants.size == 1 &&
-                        current.participants.any { it.id == current.localUserId && it.isHost }
-
-                if (stillOnlyHost) {
-                    Log.d(TAG, "10s host-only grace period expired. Closing room ${current.roomId}.")
-                    roomShutdownJob = null
-                    leaveRoomNow(isIntentional = true)
-                } else {
-                    Log.d(TAG, "Room shutdown cancelled because another participant is present.")
-                    roomShutdownJob = null
-                }
-            }
-            return
-        }
-
         leaveRoomNow(isIntentional)
     }
 
@@ -2007,6 +1981,6 @@ class ListenTogetherManager @Inject constructor(
     }
 
     fun getInviteLink(state: ActiveRoomState): String {
-        return "https://sielo-music.vercel.app/listen/${state.roomId}?key=${state.roomKey}"
+        return "https://www.sielo.site/listen/${state.roomId}?key=${state.roomKey}"
     }
 }

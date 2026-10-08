@@ -91,6 +91,8 @@ class PlayerManager @Inject constructor(
     private var progressTrackerJob: Job? = null
     private var currentEventId: Long? = null
     private var currentTrackAccumulatedPlayedMs: Long = 0L
+    private var hasRecordedPlayThreshold: Boolean = false
+    private var currentTrackingTrack: SieloTrack? = null
     private var lastTrackingTimestamp: Long = 0L
     private var lastDbFlushTimestamp: Long = 0L
     private var autoplayJob: Job? = null
@@ -129,6 +131,7 @@ class PlayerManager @Inject constructor(
             withContext(Dispatchers.IO) {
                 try {
                     listeningHistoryDao.sanitizeLegacyRecords()
+                    listeningHistoryDao.purgeSubThresholdRecords()
                 } catch (_: Exception) {}
             }
         }
@@ -330,10 +333,12 @@ class PlayerManager @Inject constructor(
                 }
 
                 if (playbackState == Player.STATE_ENDED) {
-                    flushCurrentListeningDuration()
-                    val cur = _playbackState.value.currentTrack
-                    if (cur != null) {
-                        recordTrackCompleted(cur)
+                    if (hasRecordedPlayThreshold) {
+                        flushCurrentListeningDuration()
+                        val cur = _playbackState.value.currentTrack
+                        if (cur != null) {
+                            recordTrackCompleted(cur)
+                        }
                     }
                     skipNext()
                 }
@@ -352,12 +357,17 @@ class PlayerManager @Inject constructor(
                     val nextTrack = queue[targetIndex]
                     Log.d("SieloPlayer", "Seamless onMediaItemTransition to: ${nextTrack.title} (reason=$reason)")
 
-                    flushCurrentListeningDuration()
-                    if (cur != null) {
-                        recordTrackCompleted(cur)
+                    if (hasRecordedPlayThreshold) {
+                        flushCurrentListeningDuration()
+                        if (cur != null) {
+                            recordTrackCompleted(cur)
+                        }
                     }
 
                     currentTrackAccumulatedPlayedMs = 0L
+                    hasRecordedPlayThreshold = false
+                    currentEventId = null
+                    currentTrackingTrack = nextTrack
                     lastTrackingTimestamp = System.currentTimeMillis()
                     lastDbFlushTimestamp = System.currentTimeMillis()
 
@@ -374,7 +384,6 @@ class PlayerManager @Inject constructor(
                     }
 
                     savePlaybackState(nextTrack, queue, targetIndex, 0L, expectedDurationMs)
-                    recordTrackStart(nextTrack)
 
                     // Prune played items from ExoPlayer so current item is index 0
                     mediaController?.let { ctrl ->
@@ -533,7 +542,15 @@ class PlayerManager @Inject constructor(
                 }
             }
 
-            recordTrackStart(track)
+            if (hasRecordedPlayThreshold) {
+                flushCurrentListeningDuration()
+            }
+            currentTrackAccumulatedPlayedMs = 0L
+            hasRecordedPlayThreshold = false
+            currentEventId = null
+            currentTrackingTrack = track
+            lastTrackingTimestamp = System.currentTimeMillis()
+            lastDbFlushTimestamp = System.currentTimeMillis()
 
             Log.d("SieloPlayer", "Stream resolution started: trackId=${track.id}, title='${track.title}', generation=$generation")
 
@@ -865,7 +882,7 @@ class PlayerManager @Inject constructor(
         return if (!cleaned.isNullOrBlank()) cleaned else rawArtist.trim()
     }
 
-    private fun recordTrackStart(track: SieloTrack) {
+    private fun recordPlayThresholdReached(track: SieloTrack) {
         if (isPrivateListeningEnabled) {
             currentEventId = null
             return
@@ -882,7 +899,7 @@ class PlayerManager @Inject constructor(
                         artistName = primaryArtist,
                         albumName = track.album,
                         thumbnailUrl = track.thumbnailUrl,
-                        durationPlayedMs = 0L,
+                        durationPlayedMs = currentTrackAccumulatedPlayedMs,
                         songDurationMs = expectedDurationMs
                     )
                 )
@@ -906,7 +923,7 @@ class PlayerManager @Inject constructor(
     }
 
     private fun flushCurrentListeningDuration() {
-        if (isPrivateListeningEnabled) return
+        if (isPrivateListeningEnabled || !hasRecordedPlayThreshold) return
         val eventId = currentEventId ?: return
         val durationMs = currentTrackAccumulatedPlayedMs
         if (durationMs >= 35_000L) {
@@ -920,7 +937,7 @@ class PlayerManager @Inject constructor(
                 }
             }
         }
-        if (durationMs > 0L) {
+        if (durationMs >= 20_000L) {
             scope.launch(Dispatchers.IO) {
                 try {
                     listeningHistoryDao.updateDurationPlayed(eventId, durationMs)
@@ -1333,10 +1350,21 @@ class PlayerManager @Inject constructor(
                     currentTrackAccumulatedPlayedMs += delta
                     lastTrackingTimestamp = now
 
+                    // Count as 1 play only when 20 seconds (20,000ms) on the song is played
+                    if (!hasRecordedPlayThreshold && currentTrackAccumulatedPlayedMs >= 20_000L) {
+                        hasRecordedPlayThreshold = true
+                        val trackToRecord = currentTrackingTrack ?: _playbackState.value.currentTrack
+                        if (trackToRecord != null) {
+                            recordPlayThresholdReached(trackToRecord)
+                        }
+                    }
+
                     // Periodic DB & Prefs sync every 2 seconds
                     if (now - lastDbFlushTimestamp >= 2000L) {
                         lastDbFlushTimestamp = now
-                        flushCurrentListeningDuration()
+                        if (hasRecordedPlayThreshold) {
+                            flushCurrentListeningDuration()
+                        }
                         savePositionOnly(current, dur)
                     }
                 } else {
@@ -1366,6 +1394,8 @@ class PlayerManager @Inject constructor(
         originalQueue = null
         currentEventId = null
         currentTrackAccumulatedPlayedMs = 0L
+        hasRecordedPlayThreshold = false
+        currentTrackingTrack = null
         try {
             val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
             prefs.edit().clear().apply()

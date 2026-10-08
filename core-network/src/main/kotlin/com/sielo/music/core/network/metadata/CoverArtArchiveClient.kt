@@ -1,6 +1,7 @@
 package com.sielo.music.core.network.metadata
 
 import android.util.Log
+import com.sielo.music.core.network.innertube.ArtistMetadataResolver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -44,6 +45,15 @@ class CoverArtArchiveClient @Inject constructor() {
      * This avoids any upfront network calls when loading artist profiles.
      */
     fun getDirectReleaseGroupUrls(releaseGroupMbid: String): CoverArtUrls {
+        val curated = ArtistMetadataResolver.getCuratedCoverByMbid(releaseGroupMbid)
+        if (curated != null) {
+            return CoverArtUrls(
+                thumbnail = curated,
+                medium = curated,
+                large = curated,
+                original = curated
+            )
+        }
         return CoverArtUrls(
             thumbnail = "$BASE_URL/release-group/$releaseGroupMbid/front-250",
             medium = "$BASE_URL/release-group/$releaseGroupMbid/front-500",
@@ -67,6 +77,18 @@ class CoverArtArchiveClient @Inject constructor() {
      */
     suspend fun getReleaseGroupArtwork(releaseGroupMbid: String): CoverArtUrls? = withContext(Dispatchers.IO) {
         if (releaseGroupMbid.isBlank()) return@withContext null
+
+        val curated = ArtistMetadataResolver.getCuratedCoverByMbid(releaseGroupMbid)
+        if (curated != null) {
+            val urls = CoverArtUrls(
+                thumbnail = curated,
+                medium = curated,
+                large = curated,
+                original = curated
+            )
+            artworkCache[releaseGroupMbid] = urls
+            return@withContext urls
+        }
 
         if (artworkCache.containsKey(releaseGroupMbid)) {
             return@withContext artworkCache[releaseGroupMbid]

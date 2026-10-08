@@ -53,6 +53,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayCircleOutline
 import androidx.compose.material.icons.filled.Radio
@@ -125,6 +126,7 @@ sealed class SettingsSubScreen {
     data object PrivacyData : SettingsSubScreen()
     data object Recommendations : SettingsSubScreen()
     data object About : SettingsSubScreen()
+    data object WhatsNew : SettingsSubScreen()
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -238,6 +240,12 @@ fun SettingsScreen(
             }
             SettingsSubScreen.About -> {
                 AboutSubScreen(
+                    onBack = { currentSubScreen = SettingsSubScreen.None },
+                    modifier = modifier
+                )
+            }
+            SettingsSubScreen.WhatsNew -> {
+                WhatsNewSubScreen(
                     onBack = { currentSubScreen = SettingsSubScreen.None },
                     modifier = modifier
                 )
@@ -476,6 +484,13 @@ private fun MainSettingsList(
                         description = "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) • Licenses, support & engine",
                         icon = Icons.Default.Info,
                         onClick = { onNavigateToSubScreen(SettingsSubScreen.About) }
+                    )
+                    SettingsDivider()
+                    SettingsNavigationRow(
+                        title = "New Features",
+                        description = "See what's changed in this version of Sielo",
+                        icon = Icons.Default.NewReleases,
+                        onClick = { onNavigateToSubScreen(SettingsSubScreen.WhatsNew) }
                     )
                 }
             }
@@ -1962,6 +1977,65 @@ private fun SingleChoiceBottomSheet(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT'S NEW SUB SCREEN
+// ─────────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun WhatsNewSubScreen(
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val allEntries = com.sielo.music.core.update.WhatsNewChangelog.entries.entries.toList()
+
+    SubScreenScaffold(
+        title = "New Features",
+        subtitle = "What's changed in Sielo",
+        onBack = onBack,
+        modifier = modifier
+    ) {
+        if (allEntries.isEmpty()) {
+            SettingsSection(title = "CHANGELOG") {
+                androidx.compose.foundation.layout.Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "No changelog entries available.",
+                        color = TextMuted,
+                        fontFamily = UrbanistFontFamily,
+                        fontSize = 14.sp
+                    )
+                }
+            }
+        } else {
+            allEntries.forEach { (version, changes) ->
+                SettingsSection(title = "VERSION $version") {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        changes.forEach { change ->
+                            Text(
+                                text = change,
+                                color = PaletteCream.copy(alpha = 0.88f),
+                                fontFamily = UrbanistFontFamily,
+                                fontSize = 14.sp,
+                                lineHeight = 20.sp
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(6.dp))
             }
         }
     }

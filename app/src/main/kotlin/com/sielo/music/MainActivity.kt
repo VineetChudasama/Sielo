@@ -129,10 +129,28 @@ class MainActivity : ComponentActivity() {
                 var isPlayerExpanded by remember { mutableStateOf(false) }
                 var showLaunchReveal by remember { mutableStateOf(true) }
                 var showFeedbackPopup by remember { mutableStateOf(false) }
+                var showWhatsNewDialog by remember { mutableStateOf(false) }
+                var whatsNewChanges by remember {
+                    mutableStateOf<List<Pair<String, List<String>>>>(emptyList())
+                }
 
                 androidx.compose.runtime.LaunchedEffect(Unit) {
                     if (settingsViewModel.shouldShowFeedbackPopup()) {
                         showFeedbackPopup = true
+                    }
+                    // Check if the user has updated to a newer version since they last saw What's New
+                    val currentVersion = com.sielo.music.BuildConfig.VERSION_NAME
+                    val lastSeen = settingsViewModel.getLastSeenVersion()
+                    if (lastSeen != currentVersion) {
+                        val changes = com.sielo.music.core.update.WhatsNewChangelog
+                            .getChangesSince(lastSeen, currentVersion)
+                        if (changes.isNotEmpty()) {
+                            whatsNewChanges = changes
+                            showWhatsNewDialog = true
+                        } else {
+                            // No tracked changelog entries yet, just mark as seen
+                            settingsViewModel.markVersionSeen(currentVersion)
+                        }
                     }
                 }
 
@@ -170,7 +188,7 @@ class MainActivity : ComponentActivity() {
                                     val uri = android.net.Uri.parse(uriStr)
                                     val scheme = uri.scheme?.lowercase().orEmpty()
                                     val host = uri.host?.lowercase().orEmpty()
-                                    val isSieloHost = host == "sielo-music.vercel.app"
+                                    val isSieloHost = host == "www.sielo.site" || host == "sielo.site" || host == "sielo-music.vercel.app"
                                     val isSieloCustomScheme = scheme == "sielo"
                                     val isLegacyHost = host == "sielo.app" || host == "vineetchudasama.github.io"
 
@@ -455,8 +473,20 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
+                    // What's New popup (shown once per version update, after all other blocking dialogs)
+                    if (showWhatsNewDialog && !showLaunchReveal && !isAuthDialogOpen && !isOnboardingOpen && availableUpdateVersion == null) {
+                        com.sielo.music.ui.components.WhatsNewDialog(
+                            version = com.sielo.music.BuildConfig.VERSION_NAME,
+                            changes = whatsNewChanges,
+                            onDismiss = {
+                                showWhatsNewDialog = false
+                                settingsViewModel.markVersionSeen(com.sielo.music.BuildConfig.VERSION_NAME)
+                            }
+                        )
+                    }
+
                     // Feedback popup
-                    if (showFeedbackPopup && !showLaunchReveal && !isAuthDialogOpen && !isOnboardingOpen && pendingRejoinSession == null && availableUpdateVersion == null) {
+                    if (showFeedbackPopup && !showLaunchReveal && !isAuthDialogOpen && !isOnboardingOpen && pendingRejoinSession == null && availableUpdateVersion == null && !showWhatsNewDialog) {
                         val context = androidx.compose.ui.platform.LocalContext.current
                         com.sielo.music.ui.screens.FeedbackPopupDialog(
                             onDismiss = { neverShowAgain ->

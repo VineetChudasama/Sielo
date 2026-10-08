@@ -647,6 +647,10 @@ class MusicMetadataRepository @Inject constructor(
 
         val mbid = album.musicBrainzId ?: if (isUuid(album.id)) album.id else null
 
+        val effectiveArtwork = ArtistMetadataResolver.getCuratedCoverByMbid(mbid ?: "")
+            ?: ArtistMetadataResolver.resolveCuratedAlbumCover(album.title, album.artist)
+            ?: album.thumbnailUrl
+
         if (mbid != null) {
             try {
                 Log.d(TAG, "Fetching album tracks from MusicBrainz for RG: $mbid (${album.title})")
@@ -667,7 +671,7 @@ class MusicMetadataRepository @Inject constructor(
                                 track = track,
                                 albumTitle = album.title,
                                 albumId = mbid,
-                                albumArtworkUrl = album.thumbnailUrl
+                                albumArtworkUrl = effectiveArtwork
                             )
                         }
                         Log.d(TAG, "Successfully retrieved ${mappedTracks.size} tracks for album: ${album.title}")
@@ -681,7 +685,14 @@ class MusicMetadataRepository @Inject constructor(
         }
 
         // Fallback to InnerTubeClient album lookup
-        val fallbackTracks = innerTubeClient.getAlbumSongs(album.id, album.title, album.artist)
+        val rawFallbackTracks = innerTubeClient.getAlbumSongs(album.id, album.title, album.artist)
+        val fallbackTracks = if (effectiveArtwork != null) {
+            rawFallbackTracks.map { t ->
+                if (t.thumbnailUrl.isNullOrBlank() || t.thumbnailUrl != effectiveArtwork) {
+                    t.copy(thumbnailUrl = effectiveArtwork)
+                } else t
+            }
+        } else rawFallbackTracks
         if (fallbackTracks.isNotEmpty()) {
             albumTracksCache[cacheKey] = fallbackTracks
         }

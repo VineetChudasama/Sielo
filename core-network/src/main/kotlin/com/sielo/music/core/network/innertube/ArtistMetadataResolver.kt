@@ -48,9 +48,55 @@ object ArtistMetadataResolver {
             description = "Indian Rapper, Singer & Songwriter • MTV Hustle Winner",
             origin = "Dehradun, Uttarakhand, India",
             activeYears = "2018–present",
-            wikiUrl = null
+            wikiUrl = null,
+            photoUrl = "https://yt3.googleusercontent.com/EH_pBL3xnybcndLe06zWBTY44z9W7aPr6N7YX6UNDvExTo3-Ak6qBgoAe3pLp_Mb4s7YurlE=s800-c-k-c0x00ffffff-no-rj"
         )
     )
+
+    private val curatedReleaseGroupCovers = mapOf(
+        // Bella - Home: The Album (MusicBrainz RG 92b40514-54ce-4187-a3ac-247ddcb67d30)
+        "92b40514-54ce-4187-a3ac-247ddcb67d30" to "https://i.ytimg.com/vi/4lcMJ2RIlFE/maxresdefault.jpg",
+        // Bella - One Hit Wonder / One Hit Worker (MusicBrainz RG 0b4dfa5b-7d1b-4942-8451-1adfbd7fbad3)
+        "0b4dfa5b-7d1b-4942-8451-1adfbd7fbad3" to "https://ia801403.us.archive.org/12/items/mbid-a00977c2-c72a-4ea3-ab9f-85c05fb9a0ca/mbid-a00977c2-c72a-4ea3-ab9f-85c05fb9a0ca-44715383525.jpg"
+    )
+
+    private val curatedAlbumCovers = mapOf(
+        "bella|home the album" to "https://i.ytimg.com/vi/4lcMJ2RIlFE/maxresdefault.jpg",
+        "bella|home : the album" to "https://i.ytimg.com/vi/4lcMJ2RIlFE/maxresdefault.jpg",
+        "bella|home the ablum" to "https://i.ytimg.com/vi/4lcMJ2RIlFE/maxresdefault.jpg",
+        "bella|one hit wonder" to "https://ia801403.us.archive.org/12/items/mbid-a00977c2-c72a-4ea3-ab9f-85c05fb9a0ca/mbid-a00977c2-c72a-4ea3-ab9f-85c05fb9a0ca-44715383525.jpg",
+        "bella|one hit worker" to "https://ia801403.us.archive.org/12/items/mbid-a00977c2-c72a-4ea3-ab9f-85c05fb9a0ca/mbid-a00977c2-c72a-4ea3-ab9f-85c05fb9a0ca-44715383525.jpg"
+    )
+
+    fun getCuratedCoverByMbid(mbid: String): String? {
+        return curatedReleaseGroupCovers[mbid.trim().lowercase()]
+    }
+
+    fun resolveCuratedAlbumCover(albumTitle: String, artistName: String): String? {
+        val cleanArtist = artistName.trim().lowercase()
+        val cleanTitle = albumTitle.trim().lowercase()
+            .replace(Regex("[:\\-_()\\[\\]]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+        val exactKey = "$cleanArtist|$cleanTitle"
+        curatedAlbumCovers[exactKey]?.let { return it }
+
+        for ((mapKey, url) in curatedAlbumCovers) {
+            val parts = mapKey.split("|", limit = 2)
+            if (parts.size == 2) {
+                val mapArtist = parts[0]
+                val mapTitle = parts[1]
+                val artistMatches = cleanArtist.equals(mapArtist, ignoreCase = true) ||
+                        cleanArtist.contains(mapArtist) || mapArtist.contains(cleanArtist)
+                val titleMatches = cleanTitle.contains(mapTitle) || mapTitle.contains(cleanTitle)
+                if (artistMatches && titleMatches) {
+                    return url
+                }
+            }
+        }
+        return null
+    }
 
     suspend fun fetchWikipediaBio(artistName: String): VerifiedArtistBio? = withContext(Dispatchers.IO) {
         val cleanName = artistName.trim()

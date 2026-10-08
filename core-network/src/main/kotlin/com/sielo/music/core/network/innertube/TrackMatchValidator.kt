@@ -45,19 +45,30 @@ object TrackMatchValidator {
             }
         }
 
-        // Artist check: if both artists are specified and have tokens, they MUST share at least one keyword
+        // Artist check: STRICT — candidate artist must contain ALL tokens of the requested artist
+        // as whole words. A single shared token ("pink" from BLACKPINK ≠ "Pink Floyd") is not enough.
         if (!requestedArtist.isNullOrBlank() && !candidateArtist.isNullOrBlank()) {
-            val reqArtistTokens = cleanArtist(requestedArtist).lowercase().split("\\s+".toRegex()).filter { it.length >= 2 }
-            val candArtistTokens = cleanArtist(candidateArtist).lowercase().split("\\s+".toRegex()).filter { it.length >= 2 }
+            val reqArtistClean = cleanArtist(requestedArtist).lowercase()
+            val candArtistClean = cleanArtist(candidateArtist).lowercase()
+            val reqArtistTokens = reqArtistClean.split("\\s+".toRegex()).filter { it.length >= 2 }
+            val candArtistTokens = candArtistClean.split("\\s+".toRegex()).filter { it.length >= 2 }
             if (reqArtistTokens.isNotEmpty() && candArtistTokens.isNotEmpty()) {
-                val hasArtistOverlap = reqArtistTokens.any { reqTok ->
-                    candArtistTokens.any { candTok -> reqTok == candTok || reqTok.contains(candTok) || candTok.contains(reqTok) }
+                // Strategy 1: candidate contains the full normalized requested artist name as substring
+                val reqNorm = reqArtistClean.replace(Regex("[^a-z0-9]"), "")
+                val candNorm = candArtistClean.replace(Regex("[^a-z0-9]"), "")
+                val fullNameMatch = candNorm.contains(reqNorm) || reqNorm.contains(candNorm)
+
+                // Strategy 2: ALL tokens of requested artist must appear in candidate artist
+                val allTokensMatch = reqArtistTokens.all { reqTok ->
+                    candArtistTokens.any { candTok -> reqTok == candTok }
                 }
-                if (!hasArtistOverlap) {
+
+                if (!fullNameMatch && !allTokensMatch) {
                     return false
                 }
             }
         }
+
 
         return true
     }
@@ -351,6 +362,8 @@ object TrackMatchValidator {
             val hasExplicitInGroup = group.any { it.isExplicit }
             val bestTrack = group.minWithOrNull(
                 compareBy<com.sielo.music.core.network.models.SieloTrack> { track ->
+                    if (isCoverOrKaraokeTrack(track.title, track.artist)) 1 else 0
+                }.thenBy { track ->
                     if (track.isExplicit) 0 else 1
                 }.thenBy { track ->
                     if (isCleanOrCensored(track.title)) 1 else 0
@@ -375,6 +388,51 @@ object TrackMatchValidator {
 
     fun isCleanOrCensored(title: String): Boolean {
         return title.contains(Regex("(?i)\\b(clean|clean version|radio edit|censored|edited)\\b"))
+    }
+
+    fun isCoverOrKaraokeTrack(title: String?, artist: String?): Boolean {
+        val t = title.orEmpty().lowercase()
+        val a = artist.orEmpty().lowercase()
+
+        // 1. Title indicates it's a cover or karaoke
+        if (t.contains("karaoke") ||
+            t.contains("originally performed by") ||
+            t.contains("originally performed") ||
+            t.contains("made famous by") ||
+            t.contains("in the style of") ||
+            t.contains("tribute to") ||
+            t.contains("tribute version") ||
+            t.contains("cover version") ||
+            t.contains("(cover)") ||
+            t.contains("[cover]") ||
+            t.contains(" acoustic cover") ||
+            t.contains(" rock cover") ||
+            t.contains(" piano cover") ||
+            t.contains(" instrumental cover") ||
+            t.contains("guitar cover") ||
+            t.contains("drum cover") ||
+            t.contains(" instrumental version") ||
+            t.contains("backing track")
+        ) {
+            return true
+        }
+
+        // 2. Artist is a known karaoke or cover production company/account
+        if (a.contains("karaoke") ||
+            a.contains("tribute") ||
+            a.contains("sound-a-like") ||
+            a.contains("soundalike") ||
+            a.contains("backing track") ||
+            a.contains("cover band") ||
+            a.contains("sing2piano") ||
+            a.contains("sing2guitar") ||
+            a.contains("sing king") ||
+            a.contains("zzang")
+        ) {
+            return true
+        }
+
+        return false
     }
 
     fun isSongByOrFeaturingArtist(

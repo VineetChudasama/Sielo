@@ -33,6 +33,7 @@ class ListenTogetherViewModel @Inject constructor(
     val roomState: StateFlow<ActiveRoomState?> = roomManager.roomState
     val roomNotification: StateFlow<String?> = roomManager.roomNotification
     val pendingRejoinSession: StateFlow<SavedRoomSession?> = roomManager.pendingRejoinSession
+    val playbackState: StateFlow<com.sielo.music.core.audio.model.PlaybackState> = roomManager.playerManager.playbackState
 
     fun checkPendingRejoinSession() {
         roomManager.checkPendingRejoinSession()
@@ -66,7 +67,7 @@ class ListenTogetherViewModel @Inject constructor(
             }
         }
 
-        // 2. Look for room URL pattern: sielo-music.vercel.app/listen/XXXXXX, sielo.app/room/XXXXXX or sielo://room/XXXXXX
+        // 2. Look for room URL pattern: www.sielo.site/listen/XXXXXX, sielo.app/room/XXXXXX or sielo://room/XXXXXX
         if (trimmed.contains("listen/")) {
             val afterRoom = trimmed.substringAfter("listen/")
             val candidate = afterRoom.substringBefore("?").substringBefore("#").substringBefore("/").substringBefore(" ").substringBefore("\n").trim()

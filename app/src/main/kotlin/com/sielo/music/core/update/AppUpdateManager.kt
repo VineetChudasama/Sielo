@@ -25,7 +25,7 @@ class AppUpdateManager @Inject constructor(
 ) {
     companion object {
         private const val TAG = "AppUpdateManager"
-        const val UPDATE_WEBSITE_URL = "https://sielo-music.vercel.app"
+        const val UPDATE_WEBSITE_URL = "https://www.sielo.site"
         private const val PREFS_NAME = "sielo_app_update_prefs"
         private const val KEY_LAST_UPDATE_PROMPT_TIME = "last_update_prompt_time"
         private const val REMIND_DELAY_MS = 24 * 60 * 60 * 1000L // 24 hours
