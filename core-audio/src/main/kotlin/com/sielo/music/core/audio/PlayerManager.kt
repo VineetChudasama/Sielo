@@ -16,6 +16,7 @@ import com.sielo.music.core.audio.model.PlaybackState
 import com.sielo.music.core.audio.service.MusicPlaybackService
 import com.sielo.music.core.database.dao.FavoriteTrackDao
 import com.sielo.music.core.database.dao.ListeningHistoryDao
+import com.sielo.music.core.database.dao.RecommendationHistoryDao
 import com.sielo.music.core.database.entity.ListeningEventEntity
 import com.sielo.music.core.network.innertube.InnerTubeClient
 import com.sielo.music.core.network.innertube.JioSaavnSongArtworkResolver
@@ -58,12 +59,15 @@ class PlayerManager @Inject constructor(
     private val innerTubeClient: InnerTubeClient,
     private val listeningHistoryDao: ListeningHistoryDao,
     private val favoriteTrackDao: FavoriteTrackDao,
+    private val recommendationHistoryDao: RecommendationHistoryDao,
     private val autoplayQueueEngine: AutoplayQueueEngine,
     private val autoplaySession: AutoplaySession
 ) {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true }
     private val _playbackState = MutableStateFlow(PlaybackState())
     val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
+
+    private val songsPlayedToday = mutableSetOf<String>()
 
     @Volatile
     var currentlyLoadingTrackId: String? = null
@@ -340,7 +344,22 @@ class PlayerManager @Inject constructor(
                             recordTrackCompleted(cur)
                         }
                     }
-                    skipNext()
+                    if (_playbackState.value.isLooping) {
+                        // Loop: restart the current track from the beginning
+                        val ctrl = mediaController
+                        if (ctrl != null) {
+                            ctrl.seekTo(0L)
+                            ctrl.play()
+                            currentTrackAccumulatedPlayedMs = 0L
+                            hasRecordedPlayThreshold = false
+                            currentEventId = null
+                            lastTrackingTimestamp = System.currentTimeMillis()
+                            lastDbFlushTimestamp = System.currentTimeMillis()
+                            _playbackState.update { it.copy(currentPositionMs = 0L) }
+                        }
+                    } else {
+                        skipNext()
+                    }
                 }
             }
 
@@ -356,6 +375,14 @@ class PlayerManager @Inject constructor(
                 if (targetIndex != -1) {
                     val nextTrack = queue[targetIndex]
                     Log.d("SieloPlayer", "Seamless onMediaItemTransition to: ${nextTrack.title} (reason=$reason)")
+
+                    val today = java.time.LocalDate.now(java.time.ZoneId.systemDefault()).toString()
+                    songsPlayedToday.add(nextTrack.id)
+                    scope.launch(Dispatchers.IO) {
+                        try {
+                            recommendationHistoryDao.markRecommended(listOf(nextTrack.id), today)
+                        } catch (_: Exception) {}
+                    }
 
                     if (hasRecordedPlayThreshold) {
                         flushCurrentListeningDuration()
@@ -480,6 +507,14 @@ class PlayerManager @Inject constructor(
                 0L
             }
 
+            val today = java.time.LocalDate.now(java.time.ZoneId.systemDefault()).toString()
+            songsPlayedToday.add(track.id)
+            scope.launch(Dispatchers.IO) {
+                try {
+                    recommendationHistoryDao.markRecommended(listOf(track.id), today)
+                } catch (_: Exception) {}
+            }
+
             val currentQueue = _playbackState.value.queue
             val prevIndex = _playbackState.value.queueIndex
             val isSameQueue = currentQueue.size == queue.size && currentQueue.zip(queue).all { it.first.id == it.second.id }
@@ -488,10 +523,17 @@ class PlayerManager @Inject constructor(
             originalQueue = queue
             val activeQueue = if (resetScope && currentQueueScope == QueueScope.OPEN) {
                 listOf(track)
+            } else if (isSameQueue) {
+                // Keep the exact same queue order — never re-shuffle upcoming tracks
+                queue
             } else if (_playbackState.value.isShuffle && queue.size > 1) {
                 val pastTracks = queue.take(originalIdx)
-                val upcomingTracks = queue.drop(originalIdx + 1).shuffled()
-                pastTracks + listOf(track) + upcomingTracks
+                val playNextCount = _playbackState.value.playNextCount.coerceAtLeast(0)
+                val playNextStart = (originalIdx + 1).coerceAtMost(queue.size)
+                val playNextEnd = (originalIdx + 1 + playNextCount).coerceAtMost(queue.size)
+                val playNextTracks = queue.subList(playNextStart, playNextEnd)
+                val dynamicTracks = queue.drop(playNextEnd).shuffled()
+                pastTracks + listOf(track) + playNextTracks + dynamicTracks
             } else {
                 queue
             }
@@ -715,17 +757,29 @@ class PlayerManager @Inject constructor(
         autoplayJob = scope.launch(Dispatchers.IO) {
             autoplayMutex.withLock {
                 try {
+                    val today = java.time.LocalDate.now(java.time.ZoneId.systemDefault()).toString()
+                    val startOfDayMs = java.time.LocalDate.now(java.time.ZoneId.systemDefault())
+                        .atStartOfDay(java.time.ZoneId.systemDefault())
+                        .toInstant()
+                        .toEpochMilli()
+                    val playedTodayFromDb = try {
+                        listeningHistoryDao.getSongIdsPlayedSince(startOfDayMs).toSet()
+                    } catch (_: Exception) {
+                        emptySet()
+                    }
+                    val allPlayedToday = (playedTodayFromDb + autoplaySession.getPlayedSongIds() + songsPlayedToday + seedTrack.id).toSet()
+
                     val batch = if (isReseed) {
                         val reseedContext = autoplaySession.startOrReseedSession(seedTrack)
                         autoplayQueueEngine.generateBatch(
                             seedSong = reseedContext.seedSong,
-                            excludedSongIds = reseedContext.excludedSongIds,
+                            excludedSongIds = allPlayedToday + reseedContext.excludedSongIds,
                             reentryCandidates = reseedContext.reentryCandidates
                         )
                     } else {
                         autoplayQueueEngine.generateBatch(
                             seedSong = seedTrack,
-                            excludedSongIds = emptySet(),
+                            excludedSongIds = allPlayedToday,
                             reentryCandidates = emptyList()
                         )
                     }
@@ -745,6 +799,7 @@ class PlayerManager @Inject constructor(
                                     bTrack.id !in existingIds &&
                                     bTrack.id != currentTrack.id &&
                                     bTrack.id !in penalizedSongIds &&
+                                    bTrack.id !in allPlayedToday &&
                                     !(bTrack.title.trim().equals(currentTitle, ignoreCase = true) &&
                                       bTrack.artist.trim().equals(currentArtist, ignoreCase = true)) &&
                                     !isTitleSimilar(bTrack.title, currentTitle) &&
@@ -809,6 +864,17 @@ class PlayerManager @Inject constructor(
                     val existingIds = currentQueue.map { it.id }.toSet()
                     val existingKeys = currentQueue.map { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }.toSet()
 
+                    val startOfDayMs = java.time.LocalDate.now(java.time.ZoneId.systemDefault())
+                        .atStartOfDay(java.time.ZoneId.systemDefault())
+                        .toInstant()
+                        .toEpochMilli()
+                    val playedTodayFromDb = try {
+                        listeningHistoryDao.getSongIdsPlayedSince(startOfDayMs).toSet()
+                    } catch (_: Exception) {
+                        emptySet()
+                    }
+                    val allPlayedToday = (playedTodayFromDb + autoplaySession.getPlayedSongIds() + songsPlayedToday + seedTrack.id).toSet()
+
                     val artistDetails = try {
                         innerTubeClient.getArtistDetails(artistName)
                     } catch (_: Exception) { null }
@@ -835,6 +901,7 @@ class PlayerManager @Inject constructor(
                         isArtistMatch &&
                             bTrack.id !in existingIds &&
                             bTrack.id !in penalizedSongIds &&
+                            bTrack.id !in allPlayedToday &&
                             "${bTrack.title.trim().lowercase()}|${bTrack.artist.trim().lowercase()}" !in existingKeys
                     }.distinctBy { it.id }
                      .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
@@ -883,12 +950,15 @@ class PlayerManager @Inject constructor(
     }
 
     private fun recordPlayThresholdReached(track: SieloTrack) {
+        val today = java.time.LocalDate.now(java.time.ZoneId.systemDefault()).toString()
+        songsPlayedToday.add(track.id)
         if (isPrivateListeningEnabled) {
             currentEventId = null
             return
         }
         scope.launch(Dispatchers.IO) {
             try {
+                recommendationHistoryDao.markRecommended(listOf(track.id), today)
                 val primaryArtist = extractPrimaryArtist(track.artist)
                 onTrackPlayedTasteListener?.invoke(primaryArtist, track.album)
                 val expectedDurationMs = if (track.durationSeconds > 0) track.durationSeconds * 1000L else 0L
@@ -1172,15 +1242,31 @@ class PlayerManager @Inject constructor(
             if (currentState.currentTrack == null || currentState.queue.isEmpty()) {
                 playTrack(track, listOf(track))
             } else {
-                val currentIdx = currentState.queueIndex
-                val newQueue = currentState.queue.toMutableList()
+                val queue = currentState.queue
+                val currentTrack = currentState.currentTrack
+                val currentIdx = if (currentTrack != null) {
+                    queue.indexOfFirst { it.id == currentTrack.id }.takeIf { it >= 0 } ?: currentState.queueIndex
+                } else {
+                    currentState.queueIndex
+                }
+                val newQueue = queue.toMutableList()
                 val insertIdx = (currentIdx + 1 + currentState.playNextCount).coerceAtMost(newQueue.size)
                 newQueue.add(insertIdx, track)
-                _playbackState.update { it.copy(queue = newQueue, playNextCount = it.playNextCount + 1) }
+
+                // Also keep originalQueue in sync so disabling shuffle does not discard playNext tracks
+                originalQueue?.let { orig ->
+                    val origMutable = orig.toMutableList()
+                    val origIdx = if (currentTrack != null) orig.indexOfFirst { it.id == currentTrack.id }.takeIf { it >= 0 } ?: currentIdx else currentIdx
+                    val origInsertIdx = (origIdx + 1 + currentState.playNextCount).coerceIn(0, origMutable.size)
+                    origMutable.add(origInsertIdx, track)
+                    originalQueue = origMutable
+                }
+
+                _playbackState.update { it.copy(queue = newQueue, queueIndex = currentIdx, playNextCount = it.playNextCount + 1) }
                 savePlaybackState(
-                    currentState.currentTrack,
+                    currentTrack,
                     newQueue,
-                    currentState.queueIndex,
+                    currentIdx,
                     currentState.currentPositionMs,
                     currentState.durationMs
                 )
@@ -1275,24 +1361,26 @@ class PlayerManager @Inject constructor(
         val newShuffle = !currentState.isShuffle
         if (newShuffle) {
             originalQueue = currentState.queue
-            val currentIdx = currentState.queueIndex
             val queue = currentState.queue
-            if (queue.isNotEmpty() && currentIdx in queue.indices) {
-                val currentTrack = queue[currentIdx]
+            if (queue.isEmpty()) return
+            val currentTrack = currentState.currentTrack
+            val currentIdx = if (currentTrack != null) {
+                queue.indexOfFirst { it.id == currentTrack.id }.takeIf { it >= 0 } ?: currentState.queueIndex
+            } else {
+                currentState.queueIndex
+            }
+            if (currentIdx in queue.indices) {
+                val trackAtIdx = queue[currentIdx]
                 val pastTracks = queue.take(currentIdx)
                 val playNextCount = currentState.playNextCount.coerceAtLeast(0)
-                val playNextTracks = queue.subList(
-                    (currentIdx + 1).coerceAtMost(queue.size),
-                    (currentIdx + 1 + playNextCount).coerceAtMost(queue.size)
-                )
-                val dynamicTracks = queue.drop(currentIdx + 1 + playNextCount).shuffled()
-                val shuffledQueue = pastTracks + listOf(currentTrack) + playNextTracks + dynamicTracks
+                val playNextStart = (currentIdx + 1).coerceAtMost(queue.size)
+                val playNextEnd = (currentIdx + 1 + playNextCount).coerceAtMost(queue.size)
+                val playNextTracks = queue.subList(playNextStart, playNextEnd)
+                val dynamicTracks = queue.drop(playNextEnd).shuffled()
+                val shuffledQueue = pastTracks + listOf(trackAtIdx) + playNextTracks + dynamicTracks
                 val newIdx = pastTracks.size
                 _playbackState.update { it.copy(isShuffle = true, queue = shuffledQueue, queueIndex = newIdx) }
-                savePlaybackState(currentTrack, shuffledQueue, newIdx, currentState.currentPositionMs, currentState.durationMs)
-            } else {
-                val shuffledQueue = queue.shuffled()
-                _playbackState.update { it.copy(isShuffle = true, queue = shuffledQueue) }
+                savePlaybackState(trackAtIdx, shuffledQueue, newIdx, currentState.currentPositionMs, currentState.durationMs)
             }
         } else {
             val currentTrack = currentState.currentTrack
@@ -1307,31 +1395,37 @@ class PlayerManager @Inject constructor(
 
     fun shuffleQueue() {
         val currentState = _playbackState.value
-        val currentIdx = currentState.queueIndex
         val queue = currentState.queue
-        if (queue.isNotEmpty() && currentIdx in queue.indices) {
-            val currentTrack = queue[currentIdx]
+        if (queue.isEmpty()) return
+        val currentTrack = currentState.currentTrack
+        val currentIdx = if (currentTrack != null) {
+            queue.indexOfFirst { it.id == currentTrack.id }.takeIf { it >= 0 } ?: currentState.queueIndex
+        } else {
+            currentState.queueIndex
+        }
+        if (currentIdx in queue.indices) {
+            val trackAtIdx = queue[currentIdx]
             val pastTracks = queue.take(currentIdx)
             val playNextCount = currentState.playNextCount.coerceAtLeast(0)
-            val playNextTracks = queue.subList(
-                (currentIdx + 1).coerceAtMost(queue.size),
-                (currentIdx + 1 + playNextCount).coerceAtMost(queue.size)
-            )
-            val currentTitleClean = currentTrack.title.trim()
-            val currentArtistClean = currentTrack.artist.trim()
-            val dynamicTracks = queue.drop(currentIdx + 1 + playNextCount).filter { qTrack ->
-                qTrack.id != currentTrack.id &&
+            val playNextStart = (currentIdx + 1).coerceAtMost(queue.size)
+            val playNextEnd = (currentIdx + 1 + playNextCount).coerceAtMost(queue.size)
+            val playNextTracks = queue.subList(playNextStart, playNextEnd)
+            val currentTitleClean = trackAtIdx.title.trim()
+            val currentArtistClean = trackAtIdx.artist.trim()
+            val dynamicTracks = queue.drop(playNextEnd).filter { qTrack ->
+                qTrack.id != trackAtIdx.id &&
                 !(qTrack.title.trim().equals(currentTitleClean, ignoreCase = true) &&
                   qTrack.artist.trim().equals(currentArtistClean, ignoreCase = true))
             }.shuffled()
-            val shuffledQueue = pastTracks + listOf(currentTrack) + playNextTracks + dynamicTracks
+            val shuffledQueue = pastTracks + listOf(trackAtIdx) + playNextTracks + dynamicTracks
             val newIdx = pastTracks.size
             _playbackState.update { it.copy(queue = shuffledQueue, queueIndex = newIdx) }
-            savePlaybackState(currentTrack, shuffledQueue, newIdx, currentState.currentPositionMs, currentState.durationMs)
-        } else if (queue.isNotEmpty()) {
-            val shuffledQueue = queue.shuffled()
-            _playbackState.update { it.copy(queue = shuffledQueue) }
+            savePlaybackState(trackAtIdx, shuffledQueue, newIdx, currentState.currentPositionMs, currentState.durationMs)
         }
+    }
+
+    fun toggleLoop() {
+        _playbackState.update { it.copy(isLooping = !it.isLooping) }
     }
 
     private fun startProgressTracking() {

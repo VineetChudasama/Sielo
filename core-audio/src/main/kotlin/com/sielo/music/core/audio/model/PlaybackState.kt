@@ -12,5 +12,6 @@ data class PlaybackState(
     val queue: List<SieloTrack> = emptyList(),
     val queueIndex: Int = 0,
     val isShuffle: Boolean = false,
+    val isLooping: Boolean = false,
     val playNextCount: Int = 0
 )

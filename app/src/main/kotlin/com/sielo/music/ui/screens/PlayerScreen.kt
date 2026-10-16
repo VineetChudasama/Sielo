@@ -46,7 +46,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.CircularProgressIndicator
@@ -499,23 +500,19 @@ private fun NowPlayingPageView(
                     )
                 }
 
-                // Shuffle Button (Plays custom animated shuffle icon frames on tap)
+                // Loop Button (Toggles single song looping on/off)
                 IconButton(
                     onClick = {
-                        viewModel.shuffleQueue()
-                        shuffleAnimState.playAnimation(durationMs = 1150)
+                        viewModel.toggleLoop()
                     },
                     modifier = Modifier.size(48.dp)
                 ) {
-                    val activeColor = androidx.compose.ui.graphics.lerp(
-                        TextSecondary,
-                        AccentCoral,
-                        shuffleAnimState.highlight.value
-                    )
-                    AnimatedShuffleIcon(
-                        size = 28.dp,
-                        tint = activeColor,
-                        progress = shuffleAnimState.progress.value
+                    val isLooping = playbackState.isLooping
+                    Icon(
+                        imageVector = if (isLooping) Icons.Default.RepeatOne else Icons.Default.Repeat,
+                        contentDescription = if (isLooping) "Loop enabled" else "Loop disabled",
+                        tint = if (isLooping) AccentCoral else TextSecondary,
+                        modifier = Modifier.size(26.dp)
                     )
                 }
             }

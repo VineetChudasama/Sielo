@@ -66,7 +66,7 @@ class AutoplayQueueEngine @Inject constructor(
 
         // 4. Allocate slots: 60% Pool A, 25% Pool B, 15% Pool C (rounding / backfilling as needed)
         val seedLanguage = SongClassifier.detectLanguage(seedSong)
-        val candidateSlots = allocatePoolSlots(poolA, poolB, poolC, batchSize, seedSong)
+        val candidateSlots = allocatePoolSlots(poolA, poolB, poolC, batchSize, seedSong, hardExcluded, today)
         val selectedCandidates = candidateSlots
             .filter { CandidatePoolBuilder.isCleanStudioTrack(it.title, it.artist) }
             .filterNot { CandidatePoolBuilder.isTitleTooSimilar(it.title, seedSong.title) }
@@ -74,11 +74,13 @@ class AutoplayQueueEngine @Inject constructor(
 
         val finalCandidates = if (selectedCandidates.size < batchSize) {
             val fallback = CuratedArtistClusters.defaultFallbackTracks(seedSong)
-                .filter { it.id != seedSong.id }
+                .filter { it.id != seedSong.id && it.id !in hardExcluded }
                 .filter { CandidatePoolBuilder.isCleanStudioTrack(it.title, it.artist) }
                 .filterNot { CandidatePoolBuilder.isTitleTooSimilar(it.title, seedSong.title) }
                 .filter { SongClassifier.detectLanguage(it) == seedLanguage }
-            (selectedCandidates + fallback).distinctBy { it.id }.take(batchSize)
+            val fallbackIneligibles = recommendationHistoryDao.getIneligibleSongIds(fallback.map { it.id }, today).toSet()
+            val cleanFallback = fallback.filter { it.id !in fallbackIneligibles }
+            (selectedCandidates + cleanFallback).distinctBy { it.id }.take(batchSize)
         } else {
             selectedCandidates.take(batchSize)
         }
@@ -138,12 +140,14 @@ class AutoplayQueueEngine @Inject constructor(
      * Allocates candidates according to 60% Pool A, 25% Pool B, 15% Pool C.
      * Pro-rates / backfills if any pool has insufficient tracks.
      */
-    private fun allocatePoolSlots(
+    private suspend fun allocatePoolSlots(
         poolA: List<SieloTrack>,
         poolB: List<SieloTrack>,
         poolC: List<SieloTrack>,
         batchSize: Int,
-        seedSong: SieloTrack
+        seedSong: SieloTrack,
+        hardExcluded: Set<String> = emptySet(),
+        today: String = ""
     ): List<SieloTrack> {
         val targetA = (batchSize * 0.60).roundToInt()
         val targetB = (batchSize * 0.25).roundToInt()
@@ -166,8 +170,13 @@ class AutoplayQueueEngine @Inject constructor(
             val backfill = remainingPool.take(deficit)
             val result = (selectedA + selectedB + selectedC + backfill).toMutableList()
             if (result.size < batchSize) {
-                val emergencyFallback = CuratedArtistClusters.defaultFallbackTracks(seedSong).filter { it.id !in result.map { r -> r.id } }
-                result.addAll(emergencyFallback.take(batchSize - result.size))
+                val emergencyFallback = CuratedArtistClusters.defaultFallbackTracks(seedSong)
+                    .filter { it.id !in result.map { r -> r.id } && it.id !in hardExcluded }
+                val emergencyIneligibles = if (today.isNotBlank()) {
+                    recommendationHistoryDao.getIneligibleSongIds(emergencyFallback.map { it.id }, today).toSet()
+                } else emptySet()
+                val cleanEmergency = emergencyFallback.filter { it.id !in emergencyIneligibles }
+                result.addAll(cleanEmergency.take(batchSize - result.size))
             }
             return result
         }

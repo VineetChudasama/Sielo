@@ -353,7 +353,7 @@ class MainActivity : ComponentActivity() {
                         composable(Screen.UserPlaylists.route) {
                             UserPlaylistsScreen(viewModel = userPlaylistsViewModel, importViewModel = playlistImportViewModel,
                                 onBack = { navController.popBackStack() },
-                                onPlayTrack = { track, queue -> profileViewModel.playTrack(track, queue) },
+                                onPlayTrack = { track, queue -> profileViewModel.playAlbum(track, queue) },
                                 modifier = Modifier.fillMaxSize()
                             )
                         }
@@ -382,7 +382,7 @@ class MainActivity : ComponentActivity() {
                             onSkipPrevious = { playerViewModel.skipPrevious() },
                             onSkipNext = { playerViewModel.skipNext() },
                             onSeek = { playerViewModel.seekTo(it) },
-                            onShuffle = { playerViewModel.shuffleQueue() },
+                            onToggleLoop = { playerViewModel.toggleLoop() },
                             onClick = { isPlayerExpanded = true }
                         )
                     }

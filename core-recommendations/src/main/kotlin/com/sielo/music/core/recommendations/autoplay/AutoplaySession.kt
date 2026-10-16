@@ -20,6 +20,7 @@ class AutoplaySession @Inject constructor() {
     val currentSeed: StateFlow<SieloTrack?> = _currentSeed.asStateFlow()
 
     private val playedSongIds = mutableSetOf<String>()
+    private val sessionPlayedIds = mutableSetOf<String>()
     private val generatedQueue = mutableListOf<SieloTrack>()
 
     private val lock = Any()
@@ -31,7 +32,9 @@ class AutoplaySession @Inject constructor() {
      * remaining UNPLAYED recommendations become reentryCandidates.
      */
     fun startOrReseedSession(newSeed: SieloTrack): ReseedContext = synchronized(lock) {
-        val excludedSongIds = playedSongIds.toSet()
+        sessionPlayedIds.addAll(playedSongIds)
+        sessionPlayedIds.add(newSeed.id)
+        val excludedSongIds = sessionPlayedIds.toSet()
         val reentryCandidates = generatedQueue.filter { it.id !in excludedSongIds && it.id != newSeed.id }
 
         playedSongIds.clear()
@@ -51,6 +54,7 @@ class AutoplaySession @Inject constructor() {
      */
     fun onTrackPlaying(track: SieloTrack) = synchronized(lock) {
         playedSongIds.add(track.id)
+        sessionPlayedIds.add(track.id)
         generatedQueue.removeAll { it.id == track.id }
     }
 
@@ -58,7 +62,7 @@ class AutoplaySession @Inject constructor() {
      * Appends newly generated batch recommendations to the active queue.
      */
     fun appendBatch(batch: List<SieloTrack>) = synchronized(lock) {
-        val newItems = batch.filter { it.id !in playedSongIds && it.id !in generatedQueue.map { g -> g.id } }
+        val newItems = batch.filter { it.id !in playedSongIds && it.id !in sessionPlayedIds && it.id !in generatedQueue.map { g -> g.id } }
         generatedQueue.addAll(newItems)
     }
 
@@ -67,6 +71,13 @@ class AutoplaySession @Inject constructor() {
      */
     fun isTrackInGeneratedQueue(trackId: String): Boolean = synchronized(lock) {
         generatedQueue.any { it.id == trackId }
+    }
+
+    /**
+     * Returns all songs played across this entire listening session.
+     */
+    fun getPlayedSongIds(): Set<String> = synchronized(lock) {
+        (playedSongIds + sessionPlayedIds).toSet()
     }
 
     /**
@@ -81,6 +92,7 @@ class AutoplaySession @Inject constructor() {
      */
     fun reset() = synchronized(lock) {
         playedSongIds.clear()
+        sessionPlayedIds.clear()
         generatedQueue.clear()
         _currentSeed.value = null
     }

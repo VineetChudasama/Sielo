@@ -310,8 +310,8 @@ fun ImportPlaylistDialog(
                         OutlinedTextField(
                             value = sourceLink,
                             onValueChange = { sourceLink = it },
-                            label = { Text("YouTube URL or Spotify Link/Text") },
-                            placeholder = { Text("e.g. https://open.spotify.com/playlist/... or YouTube playlist link", color = TextMuted) },
+                            label = { Text("YouTube / YouTube Music URL or Spotify Link/Text") },
+                            placeholder = { Text("e.g. YouTube / YouTube Music playlist link or Spotify playlist", color = TextMuted) },
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = PaletteSand,
                                 focusedLabelColor = PaletteSand,
@@ -355,7 +355,7 @@ fun ImportPlaylistDialog(
                         if (albumName.isNotBlank() && sourceLink.isNotBlank()) {
                             if (sourceLink.contains("spotify.com") || sourceLink.contains("spotify:")) {
                                 viewModel.importFromPastedText(sourceLink, albumName)
-                            } else if (sourceLink.contains("youtube.com") || sourceLink.contains("youtu.be") || sourceLink.contains("list=") || sourceLink.startsWith("PL") || sourceLink.startsWith("VL")) {
+                            } else if (sourceLink.contains("youtube.com") || sourceLink.contains("youtu.be") || sourceLink.contains("list=") || sourceLink.startsWith("PL") || sourceLink.startsWith("VL") || sourceLink.startsWith("OLAK") || sourceLink.startsWith("MPREb_")) {
                                 viewModel.importFromYouTube(sourceLink, albumName)
                             } else {
                                 viewModel.importFromPastedText(sourceLink, albumName)

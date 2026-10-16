@@ -198,7 +198,7 @@ fun HomeScreen(
             tracks = playlistTracks,
             isLoading = isPlaylistLoading,
             onBack = { viewModel.closePlaylist() },
-            onPlayTrack = { track, q -> viewModel.playTrack(track, q) },
+            onPlayTrack = { track, q -> viewModel.playAlbum(track, q) },
             modifier = modifier
         )
         return

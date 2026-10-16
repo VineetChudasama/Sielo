@@ -40,15 +40,16 @@ class PlaylistImportRepository @Inject constructor(
                 )
             }
 
-            // 2. Fallback to API if YOUTUBE_API_KEY is configured
-            if (BuildConfig.YOUTUBE_API_KEY.isNotBlank()) {
+            // 2. Fallback to API if a real YOUTUBE_API_KEY is configured
+            val apiKey = BuildConfig.YOUTUBE_API_KEY.trim()
+            if (apiKey.isNotBlank() && !apiKey.contains("YOUR_API_KEY") && apiKey != "\"\"") {
                 val candidates = fetchCandidatesFromYouTubeApi(playlistId)
                 if (candidates.isNotEmpty()) {
                     return resolveCandidatesAndCreatePlaylist(candidates, albumName, playlistCreator, onProgress)
                 }
             }
 
-            throw Exception("Could not fetch YouTube playlist tracks. Make sure the playlist is Public or Unlisted.")
+            throw Exception("Could not fetch YouTube/YouTube Music playlist tracks. Ensure the playlist is Public/Unlisted and accessible, or try copying the playlist link directly from YouTube Music.")
         }
 
         // For Spotify or manual text paste
@@ -174,11 +175,32 @@ class PlaylistImportRepository @Inject constructor(
 
     private fun extractYouTubePlaylistId(url: String): String? {
         val trimmed = url.trim()
-        val regex = Regex("[?&]list=([^#\\&\\?]+)")
-        val match = regex.find(trimmed)?.groupValues?.get(1)
-        if (!match.isNullOrBlank()) return match
-        if (!trimmed.contains("http") && (trimmed.startsWith("PL") || trimmed.startsWith("VL") || trimmed.length in 12..50)) {
-            return trimmed
+        // 1. Direct query parameter: ?list=... or &list=... (works for youtube.com, music.youtube.com, etc.)
+        val listRegex = Regex("[?&]list=([^#\\&\\?]+)")
+        val match = listRegex.find(trimmed)?.groupValues?.get(1)?.trim()
+        if (!match.isNullOrBlank()) {
+            return match
+        }
+
+        // 2. Direct path-based playlist/album ID: e.g. /playlist?list=... or /browse/VL... or /browse/MPREb_...
+        val browseRegex = Regex("""/(?:browse|album|playlist)/([a-zA-Z0-9_\-]+)""")
+        val browseMatch = browseRegex.find(trimmed)?.groupValues?.get(1)?.trim()
+        if (!browseMatch.isNullOrBlank() && (browseMatch.startsWith("PL") || browseMatch.startsWith("VL") || browseMatch.startsWith("OLAK") || browseMatch.startsWith("MPREb_") || browseMatch.length in 12..60)) {
+            return browseMatch
+        }
+
+        // 3. Raw IDs passed without URL scheme (e.g., PL..., VL..., OLAK5uy_..., MPREb_...)
+        if (!trimmed.contains("http://") && !trimmed.contains("https://")) {
+            val cleanCandidate = trimmed.substringAfter("list=").substringBefore("&").trim()
+            if (cleanCandidate.startsWith("PL") ||
+                cleanCandidate.startsWith("VL") ||
+                cleanCandidate.startsWith("OLAK") ||
+                cleanCandidate.startsWith("MPREb_") ||
+                cleanCandidate.startsWith("RD") ||
+                cleanCandidate.length in 12..60
+            ) {
+                return cleanCandidate
+            }
         }
         return null
     }

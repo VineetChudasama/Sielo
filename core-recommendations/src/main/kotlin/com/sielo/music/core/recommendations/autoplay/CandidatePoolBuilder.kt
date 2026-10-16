@@ -233,8 +233,7 @@ open class CandidatePoolBuilder @Inject constructor(
             .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
 
         val ineligibleIds = recommendationHistoryDao.getIneligibleSongIds(combined.map { it.id }, today).toSet()
-        val eligible = combined.filter { it.id !in ineligibleIds }
-        return if (eligible.isNotEmpty()) eligible else combined
+        return combined.filter { it.id !in ineligibleIds }
     }
 
     /**
@@ -286,7 +285,9 @@ open class CandidatePoolBuilder @Inject constructor(
                 .take(4)
 
             if (targetArtists.isEmpty()) {
-                return@coroutineScope CuratedArtistClusters.defaultFallbackTracks(seedSong).take(4)
+                val fallback = CuratedArtistClusters.defaultFallbackTracks(seedSong).take(4)
+                val ineligibles = recommendationHistoryDao.getIneligibleSongIds(fallback.map { it.id }, today).toSet()
+                return@coroutineScope fallback.filter { it.id !in ineligibles }
             }
 
             // Fetch top tracks for target similar artists concurrently
@@ -328,11 +329,12 @@ open class CandidatePoolBuilder @Inject constructor(
             }
 
             val ineligibleIds = recommendationHistoryDao.getIneligibleSongIds(poolWithFallback.map { it.id }, today).toSet()
-            val eligible = poolWithFallback.filter { it.id !in ineligibleIds }
-            if (eligible.isNotEmpty()) eligible else poolWithFallback
+            poolWithFallback.filter { it.id !in ineligibleIds }
         } catch (e: Exception) {
             android.util.Log.e("CandidatePoolBuilder", "Error building Pool B: ${e.message}", e)
-            CuratedArtistClusters.defaultFallbackTracks(seedSong).take(4)
+            val fallback = CuratedArtistClusters.defaultFallbackTracks(seedSong).take(4)
+            val ineligibles = recommendationHistoryDao.getIneligibleSongIds(fallback.map { it.id }, today).toSet()
+            fallback.filter { it.id !in ineligibles }
         }
     }
 
@@ -409,8 +411,7 @@ open class CandidatePoolBuilder @Inject constructor(
             .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
 
         val ineligibleIds = recommendationHistoryDao.getIneligibleSongIds(combined.map { it.id }, today).toSet()
-        val eligible = combined.filter { it.id !in ineligibleIds }
-        return if (eligible.isNotEmpty()) eligible else combined
+        return combined.filter { it.id !in ineligibleIds }
     }
 
     private fun extractPrimaryArtist(rawArtist: String): String {

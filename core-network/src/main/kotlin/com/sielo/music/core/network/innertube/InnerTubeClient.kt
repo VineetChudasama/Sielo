@@ -2854,43 +2854,51 @@ class InnerTubeClient @Inject constructor(
                 ?: contents?.get("twoColumnBrowseResultsRenderer")?.jsonObject
                     ?.get("tabs")?.jsonArray
 
-            val sectionList = tabs?.getOrNull(0)?.jsonObject
-                ?.get("tabRenderer")?.jsonObject
-                ?.get("content")?.jsonObject
-                ?.get("sectionListRenderer")?.jsonObject
-                ?.get("contents")?.jsonArray
-                ?: contents?.get("twoColumnBrowseResultsRenderer")?.jsonObject
-                    ?.get("secondaryContents")?.jsonObject
-                    ?.get("sectionListRenderer")?.jsonObject
-                    ?.get("contents")?.jsonArray
-
             val tracks = mutableListOf<SieloTrack>()
 
-            sectionList?.forEach { section ->
-                val shelf = section.jsonObject["musicPlaylistShelfRenderer"]?.jsonObject
-                    ?: section.jsonObject["musicShelfRenderer"]?.jsonObject
-                shelf?.get("contents")?.jsonArray?.forEach { item ->
-                    val responsiveItem = item.jsonObject["musicResponsiveListItemRenderer"]?.jsonObject ?: return@forEach
-                    parseResponsiveItem(responsiveItem, isAlbumOrPlaylist = true)?.let { tracks.add(it) }
+            // 1. Gather all possible section lists
+            val allSectionLists = mutableListOf<kotlinx.serialization.json.JsonArray>()
+            tabs?.forEach { tab ->
+                val tabContent = tab.jsonObject["tabRenderer"]?.jsonObject?.get("content")?.jsonObject
+                tabContent?.get("sectionListRenderer")?.jsonObject?.get("contents")?.jsonArray?.let {
+                    allSectionLists.add(it)
+                }
+            }
+            contents?.get("twoColumnBrowseResultsRenderer")?.jsonObject
+                ?.get("secondaryContents")?.jsonObject
+                ?.get("sectionListRenderer")?.jsonObject
+                ?.get("contents")?.jsonArray?.let {
+                    allSectionLists.add(it)
+                }
+            contents?.get("singleColumnBrowseResultsRenderer")?.jsonObject
+                ?.get("tabs")?.jsonArray?.forEach { tab ->
+                    val tabContent = tab.jsonObject["tabRenderer"]?.jsonObject?.get("content")?.jsonObject
+                    tabContent?.get("sectionListRenderer")?.jsonObject?.get("contents")?.jsonArray?.let {
+                        allSectionLists.add(it)
+                    }
+                }
+
+            // 2. Extract items from all shelves across all gathered section lists
+            allSectionLists.forEach { sl ->
+                sl.forEach { section ->
+                    val shelf = section.jsonObject["musicPlaylistShelfRenderer"]?.jsonObject
+                        ?: section.jsonObject["musicShelfRenderer"]?.jsonObject
+                    shelf?.get("contents")?.jsonArray?.forEach { item ->
+                        val responsiveItem = item.jsonObject["musicResponsiveListItemRenderer"]?.jsonObject ?: return@forEach
+                        parseResponsiveItem(responsiveItem, isAlbumOrPlaylist = true)?.let { tracks.add(it) }
+                    }
                 }
             }
 
-            val directShelf = tabs?.getOrNull(0)?.jsonObject
-                ?.get("tabRenderer")?.jsonObject
-                ?.get("content")?.jsonObject
-                ?.get("musicPlaylistShelfRenderer")?.jsonObject
-                ?: tabs?.getOrNull(0)?.jsonObject
-                    ?.get("tabRenderer")?.jsonObject
-                    ?.get("content")?.jsonObject
-                    ?.get("musicShelfRenderer")?.jsonObject
-                ?: contents?.get("twoColumnBrowseResultsRenderer")?.jsonObject
-                    ?.get("secondaryContents")?.jsonObject
-                    ?.get("sectionListRenderer")?.jsonObject
-                    ?.get("contents")?.jsonArray?.firstOrNull()?.jsonObject
-                    ?.get("musicPlaylistShelfRenderer")?.jsonObject
-            directShelf?.get("contents")?.jsonArray?.forEach { item ->
-                val responsiveItem = item.jsonObject["musicResponsiveListItemRenderer"]?.jsonObject ?: return@forEach
-                parseResponsiveItem(responsiveItem, isAlbumOrPlaylist = true)?.let { tracks.add(it) }
+            // 3. Fallback direct shelf in tab contents
+            tabs?.forEach { tab ->
+                val tabContent = tab.jsonObject["tabRenderer"]?.jsonObject?.get("content")?.jsonObject
+                val directShelf = tabContent?.get("musicPlaylistShelfRenderer")?.jsonObject
+                    ?: tabContent?.get("musicShelfRenderer")?.jsonObject
+                directShelf?.get("contents")?.jsonArray?.forEach { item ->
+                    val responsiveItem = item.jsonObject["musicResponsiveListItemRenderer"]?.jsonObject ?: return@forEach
+                    parseResponsiveItem(responsiveItem, isAlbumOrPlaylist = true)?.let { tracks.add(it) }
+                }
             }
 
             // Velune album extraction: If tracks is empty (or browseId was MPREb_), extract canonical playlistId
@@ -2991,6 +2999,13 @@ class InnerTubeClient @Inject constructor(
 
             val videoId = item["playlistItemData"]?.jsonObject?.get("videoId")?.jsonPrimitive?.content
                 ?: item["navigationEndpoint"]?.jsonObject
+                    ?.get("watchEndpoint")?.jsonObject
+                    ?.get("videoId")?.jsonPrimitive?.content
+                ?: item["overlay"]?.jsonObject
+                    ?.get("musicItemThumbnailOverlayRenderer")?.jsonObject
+                    ?.get("content")?.jsonObject
+                    ?.get("musicPlayButtonRenderer")?.jsonObject
+                    ?.get("playNavigationEndpoint")?.jsonObject
                     ?.get("watchEndpoint")?.jsonObject
                     ?.get("videoId")?.jsonPrimitive?.content
                 ?: return null

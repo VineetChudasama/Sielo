@@ -24,7 +24,12 @@
     import kotlinx.coroutines.async
     import kotlinx.coroutines.coroutineScope
     import kotlinx.coroutines.flow.first
+    import kotlinx.coroutines.withContext
     import com.sielo.music.core.network.metadata.MusicMetadataRepository
+    import com.sielo.music.core.recommendations.autoplay.CandidatePoolBuilder
+    import com.sielo.music.core.recommendations.autoplay.SongClassifier
+    import com.sielo.music.core.recommendations.autoplay.SongLanguage
+    import com.sielo.music.core.recommendations.autoplay.SongVibe
     import kotlinx.coroutines.flow.MutableStateFlow
     import kotlinx.coroutines.flow.SharingStarted
     import kotlinx.coroutines.flow.StateFlow
@@ -205,146 +210,280 @@
                 .replace(Regex("(?i)\\bhe\\b"), "hi")
         }
     
-        private suspend fun executeSearch(query: String, category: String) {
-            val trimmed = query.trim()
-            if (trimmed.isBlank()) {
-                _searchResults.value = emptyList()
-                _artistResults.value = emptyList()
-                _isSearching.value = false
-                return
-            }
-            val normalized = normalizeSearchQuery(trimmed)
-            _isSearching.value = true
-    
+    data class UserTasteSnapshot(
+        val topArtistNames: Set<String> = emptySet(),
+        val topArtistWeights: Map<String, Int> = emptyMap(),
+        val favoriteSongIds: Set<String> = emptySet(),
+        val searchPlayedSongIds: Set<String> = emptySet(),
+        val playedSongCounts: Map<String, Int> = emptyMap(),
+        val topLanguages: Set<SongLanguage> = emptySet(),
+        val topVibes: Set<SongVibe> = emptySet(),
+        val favoriteGenres: Set<String> = emptySet()
+    )
+
+    private var cachedTasteSnapshot: UserTasteSnapshot? = null
+    private var lastTasteSnapshotTime: Long = 0L
+
+    private suspend fun getUserTasteSnapshot(): UserTasteSnapshot {
+        val now = System.currentTimeMillis()
+        val current = cachedTasteSnapshot
+        if (current != null && (now - lastTasteSnapshotTime) < 45_000L) {
+            return current
+        }
+        return withContext(Dispatchers.IO) {
             try {
-                when (category) {
-                    "Artists" -> {
-                        coroutineScope {
-                            val ytArtistsDeferred = async { innerTubeClient.searchArtists(trimmed) }
-                            val mbArtistsDeferred = async {
-                                try {
-                                    musicMetadataRepository.searchArtist(trimmed)
-                                } catch (_: Exception) {
-                                    emptyList()
-                                }
-                            }
-                            val artists = ytArtistsDeferred.await()
-                            val mbArtists = mbArtistsDeferred.await()
-                            val combined = mergeArtists(artists, mbArtists)
-                            if (_searchQuery.value.trim().equals(trimmed, ignoreCase = true)) {
-                                _artistResults.value = rankArtists(combined, trimmed)
-                                _searchResults.value = emptyList()
+                val thirtyDaysAgo = now - 30L * 24L * 60L * 60L * 1000L
+                val topArtists = listeningHistoryDao.getTopArtistsSnapshot(thirtyDaysAgo, limit = 25)
+                val topSongs = listeningHistoryDao.getTopSongsSnapshot(thirtyDaysAgo, limit = 60)
+                val recentEvents = listeningHistoryDao.getRecentUniquePlayedSongs(limit = 25).first()
+                val favorites = favoriteTrackDao.getAllFavoritesList()
+                val searchPlays = searchPlayHistoryDao.getRecentSearchPlays(25).first()
+                val userProfile = userManager.currentUser.value
+
+                val topArtistWeights = mutableMapOf<String, Int>()
+                topArtists.forEach { stat ->
+                    topArtistWeights[stat.artistName.trim().lowercase()] = stat.playCount
+                }
+                userProfile?.favoriteArtists?.forEach { artist ->
+                    val key = artist.trim().lowercase()
+                    topArtistWeights[key] = (topArtistWeights[key] ?: 0) + 10
+                }
+                userProfile?.artistTasteWeights?.forEach { (artist, weight) ->
+                    val key = artist.trim().lowercase()
+                    topArtistWeights[key] = (topArtistWeights[key] ?: 0) + weight
+                }
+
+                val playedSongCounts = mutableMapOf<String, Int>()
+                topSongs.forEach { stat ->
+                    playedSongCounts[stat.songId] = stat.playCount
+                }
+
+                val languageCounts = mutableMapOf<SongLanguage, Int>()
+                val vibeCounts = mutableMapOf<SongVibe, Int>()
+
+                recentEvents.forEach { event ->
+                    val dummyTrack = SieloTrack(id = event.songId, title = event.songTitle, artist = event.artistName)
+                    val lang = SongClassifier.detectLanguage(dummyTrack)
+                    languageCounts[lang] = (languageCounts[lang] ?: 0) + 1
+                    val vibe = SongClassifier.detectVibe(dummyTrack)
+                    vibeCounts[vibe] = (vibeCounts[vibe] ?: 0) + 1
+                }
+
+                val topLangs = languageCounts.entries.sortedByDescending { it.value }.map { it.key }.toSet()
+                val topVibes = vibeCounts.entries.sortedByDescending { it.value }.map { it.key }.toSet()
+                val favGenres = (userProfile?.favoriteGenres ?: emptyList()).map { it.trim().lowercase() }.toSet()
+
+                val snapshot = UserTasteSnapshot(
+                    topArtistNames = topArtistWeights.keys,
+                    topArtistWeights = topArtistWeights,
+                    favoriteSongIds = favorites.map { it.id }.toSet(),
+                    searchPlayedSongIds = searchPlays.map { it.songId }.toSet(),
+                    playedSongCounts = playedSongCounts,
+                    topLanguages = topLangs,
+                    topVibes = topVibes,
+                    favoriteGenres = favGenres
+                )
+                cachedTasteSnapshot = snapshot
+                lastTasteSnapshotTime = now
+                snapshot
+            } catch (_: Exception) {
+                cachedTasteSnapshot ?: UserTasteSnapshot()
+            }
+        }
+    }
+
+    private suspend fun executeSearch(query: String, category: String) {
+        val trimmed = query.trim()
+        if (trimmed.isBlank()) {
+            _searchResults.value = emptyList()
+            _artistResults.value = emptyList()
+            _isSearching.value = false
+            return
+        }
+        val normalized = normalizeSearchQuery(trimmed)
+        _isSearching.value = true
+
+        try {
+            val taste = getUserTasteSnapshot()
+            when (category) {
+                "Artists" -> {
+                    coroutineScope {
+                        val ytArtistsDeferred = async { innerTubeClient.searchArtists(trimmed) }
+                        val mbArtistsDeferred = async {
+                            try {
+                                musicMetadataRepository.searchArtist(trimmed)
+                            } catch (_: Exception) {
+                                emptyList()
                             }
                         }
-                    }
-                    "Songs" -> {
-                        val primaryTracks = innerTubeClient.search(trimmed)
-                        val additionalTracks = if (normalized != trimmed) innerTubeClient.search(normalized) else emptyList()
-                        val allTracks = (primaryTracks + additionalTracks)
-                        val deduplicated = TrackMatchValidator.deduplicateTracks(allTracks).distinctBy { it.id }
+                        val artists = ytArtistsDeferred.await()
+                        val mbArtists = mbArtistsDeferred.await()
+                        val combined = mergeArtists(artists, mbArtists)
                         if (_searchQuery.value.trim().equals(trimmed, ignoreCase = true)) {
-                            _searchResults.value = rankTracks(deduplicated, trimmed)
-                            _artistResults.value = emptyList()
-                        }
-                    }
-                    else -> { // "All" or other
-                        coroutineScope {
-                            val tracksDeferred = async {
-                                val primaryTracks = innerTubeClient.search(trimmed)
-                                val additionalTracks = if (normalized != trimmed) innerTubeClient.search(normalized) else emptyList()
-                                val allTracks = (primaryTracks + additionalTracks)
-                                TrackMatchValidator.deduplicateTracks(allTracks).distinctBy { it.id }
-                            }
-                            val artistsDeferred = async {
-                                innerTubeClient.searchArtists(trimmed)
-                            }
-                            val mbArtistsDeferred = async {
-                                try {
-                                    musicMetadataRepository.searchArtist(trimmed)
-                                } catch (_: Exception) {
-                                    emptyList()
-                                }
-                            }
-
-                            val tracks = tracksDeferred.await()
-                            val artists = artistsDeferred.await()
-                            val mbArtists = mbArtistsDeferred.await()
-                            val combined = mergeArtists(artists, mbArtists)
-
-                            if (_searchQuery.value.trim().equals(trimmed, ignoreCase = true)) {
-                                _searchResults.value = rankTracks(tracks, trimmed)
-                                _artistResults.value = rankArtists(combined, trimmed)
-                            }
+                            _artistResults.value = rankArtists(combined, trimmed, taste)
+                            _searchResults.value = emptyList()
                         }
                     }
                 }
-            } finally {
-                if (_searchQuery.value.trim().equals(trimmed, ignoreCase = true)) {
-                    _isSearching.value = false
-                }
-            }
-        }
-    
-        private fun rankTracks(tracks: List<SieloTrack>, query: String): List<SieloTrack> {
-            val q = query.trim().lowercase()
-            if (q.isBlank()) return tracks
-            val words = q.split(Regex("\\s+")).filter { it.isNotBlank() }
-    
-            val scoredTracks = tracks.map { track ->
-                val title = track.title.trim().lowercase()
-                val artist = track.artist.trim().lowercase()
-                var score = 0
-    
-                // Exact match
-                if (title == q) score += 1000
-                else if (artist == q) score += 800
-                // Starts with exact query string
-                else if (title.startsWith(q)) score += 600
-                else if (artist.startsWith(q)) score += 500
-                // Word boundary match (e.g. "Star" in "A Star Is Born" or "The Starboy")
-                else if (title.contains(" $q") || title.contains("($q") || title.contains("[$q")) score += 400
-                else if (artist.contains(" $q")) score += 350
-                // Substring contains
-                else if (title.contains(q)) score += 200
-                else if (artist.contains(q)) score += 150
-    
-                // Multi-word / token matching
-                var matchingWords = 0
-                for (w in words) {
-                    if (title.startsWith(w)) {
-                        score += 60
-                        matchingWords++
-                    } else if (title.contains(w)) {
-                        score += 30
-                        matchingWords++
-                    }
-                    if (artist.startsWith(w)) {
-                        score += 40
-                        matchingWords++
-                    } else if (artist.contains(w)) {
-                        score += 20
-                        matchingWords++
+                "Songs" -> {
+                    val primaryTracks = innerTubeClient.search(trimmed)
+                    val additionalTracks = if (normalized != trimmed) innerTubeClient.search(normalized) else emptyList()
+                    val allTracks = (primaryTracks + additionalTracks)
+                    val deduplicated = TrackMatchValidator.deduplicateTracks(allTracks).distinctBy { it.id }
+                    if (_searchQuery.value.trim().equals(trimmed, ignoreCase = true)) {
+                        _searchResults.value = rankTracks(deduplicated, trimmed, taste)
+                        _artistResults.value = emptyList()
                     }
                 }
-                track to Pair(score, matchingWords)
-            }
-    
-            // Filter out completely irrelevant / low scoring tracks (e.g. "Yo Ho Ho" matching single word "ho" when query was "Tum he ho")
-            val filtered = if (words.size >= 2) {
-                scoredTracks.filter { (_, meta) ->
-                    val (score, matchingWords) = meta
-                    score >= 80 || matchingWords >= (words.size / 2).coerceAtLeast(1)
+                else -> { // "All" or other
+                    coroutineScope {
+                        val tracksDeferred = async {
+                            val primaryTracks = innerTubeClient.search(trimmed)
+                            val additionalTracks = if (normalized != trimmed) innerTubeClient.search(normalized) else emptyList()
+                            val allTracks = (primaryTracks + additionalTracks)
+                            TrackMatchValidator.deduplicateTracks(allTracks).distinctBy { it.id }
+                        }
+                        val artistsDeferred = async {
+                            innerTubeClient.searchArtists(trimmed)
+                        }
+                        val mbArtistsDeferred = async {
+                            try {
+                                musicMetadataRepository.searchArtist(trimmed)
+                            } catch (_: Exception) {
+                                emptyList()
+                            }
+                        }
+
+                        val tracks = tracksDeferred.await()
+                        val artists = artistsDeferred.await()
+                        val mbArtists = mbArtistsDeferred.await()
+                        val combined = mergeArtists(artists, mbArtists)
+
+                        if (_searchQuery.value.trim().equals(trimmed, ignoreCase = true)) {
+                            _searchResults.value = rankTracks(tracks, trimmed, taste)
+                            _artistResults.value = rankArtists(combined, trimmed, taste)
+                        }
+                    }
                 }
-            } else {
-                scoredTracks.filter { (_, meta) -> meta.first > 0 }
             }
-    
-            val finalSelection = if (filtered.isNotEmpty()) filtered else scoredTracks
-            return finalSelection.sortedWith(
-                compareByDescending<Pair<SieloTrack, Pair<Int, Int>>> { it.first.viewCount }
-                    .thenByDescending { it.second.first }
-            ).map { it.first }
+        } finally {
+            if (_searchQuery.value.trim().equals(trimmed, ignoreCase = true)) {
+                _isSearching.value = false
+            }
         }
+    }
+
+    private fun rankTracks(tracks: List<SieloTrack>, query: String, taste: UserTasteSnapshot): List<SieloTrack> {
+        val q = query.trim().lowercase()
+        if (q.isBlank()) return tracks
+        val words = q.split(Regex("\\s+")).filter { it.isNotBlank() }
+
+        val scoredTracks = tracks.map { track ->
+            val title = track.title.trim().lowercase()
+            val artist = track.artist.trim().lowercase()
+            val cleanArtist = cleanForArtistMatch(artist)
+            var textScore = 0
+
+            // 1. Text Relevance Match
+            if (title == q) textScore += 10000
+            else if (artist == q) textScore += 8000
+            else if (title.startsWith(q)) textScore += 5000
+            else if (artist.startsWith(q)) textScore += 4000
+            else if (title.contains(" $q") || title.contains("($q") || title.contains("[$q")) textScore += 3000
+            else if (artist.contains(" $q")) textScore += 2500
+            else if (title.contains(q)) textScore += 1500
+            else if (artist.contains(q)) textScore += 1000
+
+            // Multi-word / token matching
+            var matchingWords = 0
+            for (w in words) {
+                if (title.startsWith(w)) {
+                    textScore += 300
+                    matchingWords++
+                } else if (title.contains(w)) {
+                    textScore += 150
+                    matchingWords++
+                }
+                if (artist.startsWith(w)) {
+                    textScore += 200
+                    matchingWords++
+                } else if (artist.contains(w)) {
+                    textScore += 100
+                    matchingWords++
+                }
+            }
+
+            // Clean studio bonus & noise penalties
+            if (CandidatePoolBuilder.isCleanStudioTrack(track.title, track.artist)) {
+                textScore += 250
+            }
+            val noiseKeywords = listOf("remix", "karaoke", "instrumental", "cover", "slowed", "reverb", "parody", "mashup")
+            if (noiseKeywords.any { title.contains(it) && !q.contains(it) }) {
+                textScore -= 1500
+            }
+
+            // 2. Plays / Popularity Boost (0 to 1800 pts)
+            var playScore = 0
+            if (track.viewCount > 0) {
+                val logViews = kotlin.math.log10(track.viewCount.toDouble()).coerceIn(0.0, 10.0)
+                playScore += (logViews * 180).toInt()
+            }
+
+            // 3. User Listening History & Plays Personalization Boost
+            val userPlayCount = taste.playedSongCounts[track.id] ?: 0
+            if (userPlayCount > 0) {
+                playScore += 1500 + (userPlayCount * 120).coerceAtMost(1200)
+            }
+            if (track.id in taste.searchPlayedSongIds) {
+                playScore += 1800
+            }
+            if (track.id in taste.favoriteSongIds) {
+                playScore += 2200
+            }
+
+            // User artist affinity (top played / favorite artists)
+            val artistWeight = taste.topArtistWeights.entries.firstOrNull { (name, _) ->
+                artist.contains(name) || name.contains(artist) || cleanForArtistMatch(name) == cleanArtist
+            }?.value ?: 0
+            if (artistWeight > 0) {
+                playScore += (1000 + (artistWeight * 150)).coerceAtMost(3000)
+            }
+
+            // 4. Music Type / Style Affinity (Language & Vibe)
+            val trackLang = SongClassifier.detectLanguage(track)
+            if (trackLang in taste.topLanguages) {
+                val langRank = taste.topLanguages.toList().indexOf(trackLang)
+                playScore += if (langRank == 0) 1200 else 600
+            }
+
+            val trackVibe = SongClassifier.detectVibe(track)
+            if (trackVibe in taste.topVibes) {
+                playScore += 800
+            }
+
+            if (taste.favoriteGenres.isNotEmpty()) {
+                val combined = "$title $artist".lowercase()
+                if (taste.favoriteGenres.any { combined.contains(it) }) {
+                    playScore += 600
+                }
+            }
+
+            val totalScore = textScore + playScore
+            track to Triple(totalScore, textScore, matchingWords)
+        }
+
+        val filtered = if (words.size >= 2) {
+            scoredTracks.filter { (_, meta) ->
+                val (_, textScore, matchingWords) = meta
+                textScore >= 150 || matchingWords >= (words.size / 2).coerceAtLeast(1)
+            }
+        } else {
+            scoredTracks.filter { (_, meta) -> meta.second > 0 }
+        }
+
+        val finalSelection = if (filtered.isNotEmpty()) filtered else scoredTracks
+        return finalSelection.sortedByDescending { it.second.first }.map { it.first }
+    }
     
         fun refreshArtist() {
             val current = _selectedArtist.value ?: return
@@ -396,7 +535,7 @@
             return result
         }
 
-        private fun rankArtists(artists: List<SieloArtist>, query: String): List<SieloArtist> {
+        private fun rankArtists(artists: List<SieloArtist>, query: String, taste: UserTasteSnapshot = UserTasteSnapshot()): List<SieloArtist> {
             val q = query.trim().lowercase()
             if (q.isBlank()) return emptyList()
             val qClean = cleanForArtistMatch(q)
@@ -436,6 +575,14 @@
                         if (name.startsWith(w) || aClean.startsWith(w)) score += 500
                         else if (name.contains(w)) score += 200
                     }
+                }
+
+                // User played artist boost
+                val artistWeight = taste.topArtistWeights.entries.firstOrNull { (tName, _) ->
+                    tName == aClean || name == tName || aClean.contains(cleanForArtistMatch(tName)) || cleanForArtistMatch(tName).contains(aClean)
+                }?.value ?: 0
+                if (artistWeight > 0) {
+                    score += (6000 + (artistWeight * 600)).coerceAtMost(30000)
                 }
 
                 // Severe penalty for spam / noise in artist name

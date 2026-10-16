@@ -165,6 +165,19 @@ interface ListeningHistoryDao {
     """)
     suspend fun getTopArtistsSnapshot(sinceMs: Long, limit: Int = 10): List<ArtistStat>
 
+    @Query("SELECT DISTINCT songId FROM listening_history WHERE timestampMs >= :sinceMs")
+    suspend fun getSongIdsPlayedSince(sinceMs: Long): List<String>
+
+    @Query("""
+        SELECT songId, songTitle, artistName, COUNT(*) as playCount, SUM(durationPlayedMs) as totalDurationMs, MAX(thumbnailUrl) as thumbnailUrl 
+        FROM listening_history 
+        WHERE timestampMs >= :sinceMs AND durationPlayedMs >= 20000
+        GROUP BY songId 
+        ORDER BY playCount DESC 
+        LIMIT :limit
+    """)
+    suspend fun getTopSongsSnapshot(sinceMs: Long, limit: Int = 30): List<SongStat>
+
     @Query("DELETE FROM listening_history")
     suspend fun clearAll()
 }

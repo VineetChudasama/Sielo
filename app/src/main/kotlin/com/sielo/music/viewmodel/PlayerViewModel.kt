@@ -148,4 +148,5 @@ class PlayerViewModel @Inject constructor(
     fun triggerAutoplayIfLow(seedTrack: SieloTrack? = null) = playerManager.triggerAutoplayIfLow(seedTrack)
     fun toggleShuffle() = playerManager.toggleShuffle()
     fun shuffleQueue() = playerManager.shuffleQueue()
+    fun toggleLoop() = playerManager.toggleLoop()
 }

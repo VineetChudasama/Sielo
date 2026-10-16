@@ -14,6 +14,18 @@ object WhatsNewChangelog {
      * Keep this map sorted newest-to-oldest so iteration order is correct.
      */
     val entries: Map<String, List<String>> = linkedMapOf(
+        "11.5.1" to listOf(
+            "🎯 Personalized Search Relevance: Search ranking now prioritizes tracks based on your listening history, most played artists, and favorite music styles and languages alongside overall popularity",
+            "🛡️ Same-Day Duplicate Shield: Fixed an issue where played songs reappeared in autoplay; songs enjoyed today are strictly excluded from being re-recommended in queue on the same day",
+            "🔒 Protected Play Next Queue: Shuffling the queue now strictly keeps all tracks you manually added to 'Play Next' in their exact position and order without scrambling them"
+        ),
+        "11.5.0" to listOf(
+            "🔂 Single-Song Loop Mode: Added a tactile loop button to both the mini player and full player screen — repeats your current favorite track indefinitely until toggled off",
+            "📋 Strict Album & Playlist Queue: Albums and playlists now keep their exact, pure track order without injecting random dynamic recommendations into your queue, with full shuffle support",
+            "🎧 YouTube & YouTube Music Playlist Import: Enhanced playlist importer now seamlessly accepts links from both YouTube and YouTube Music with expanded format handling",
+            "⏱️ Verified 20-Second Play Count: Plays and 'Keep listening' recents only register when a song has been enjoyed for at least 20 seconds",
+            "✨ What's New Notification: Dialog now reliably highlights all latest features and enhancements on first launch after updating"
+        ),
         "11.4.0" to listOf(
             "🎵 Flawless Mixtape & Underground Playback: Full multi-source search fallback for unreleased tracks and underground albums (e.g. Bella's discography)",
             "🎨 Authentic Album Art Architecture: Curated artwork resolution for releases with missing archive art (e.g. 'Home: The Album' & 'One Hit Wonder')",

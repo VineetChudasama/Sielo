@@ -55,12 +55,12 @@ class UserPlaylistsViewModel @Inject constructor(
 
     fun playPlaylist(playlist: UserPlaylist) {
         if (playlist.tracks.isNotEmpty()) {
-            playerManager.playTrack(playlist.tracks.first(), playlist.tracks)
+            playerManager.playAlbum(playlist.tracks.first(), playlist.tracks)
         }
     }
 
     fun playTrack(track: SieloTrack, queue: List<SieloTrack>) {
-        playerManager.playTrack(track, queue)
+        playerManager.playAlbum(track, queue)
     }
 
     fun removeTrack(playlistId: String, trackId: String) {

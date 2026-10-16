@@ -29,7 +29,8 @@ import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.CircularProgressIndicator
@@ -90,12 +91,12 @@ fun MiniPlayerIsland(
     modifier: Modifier = Modifier,
     onSeek: (Long) -> Unit = {},
     onToggleMute: () -> Unit = {},
+    onToggleLoop: () -> Unit = {},
     onShuffle: () -> Unit = {}
 ) {
     val track = playbackState.currentTrack ?: return
 
     val coroutineScope = rememberCoroutineScope()
-    val shuffleAnimState = rememberShuffleAnimationState()
 
     val progress = if (playbackState.durationMs > 0) {
         (playbackState.currentPositionMs.toFloat() / playbackState.durationMs.toFloat()).coerceIn(0f, 1f)
@@ -238,26 +239,20 @@ fun MiniPlayerIsland(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Shuffle Button (Plays custom animated shuffle icon frames on tap)
+                    // Loop Button (Toggles single song looping on/off)
                     Box(
                         modifier = Modifier
                             .size(32.dp)
                             .clip(CircleShape)
-                            .clickable {
-                                onShuffle()
-                                shuffleAnimState.playAnimation(durationMs = 1150)
-                            },
+                            .clickable { onToggleLoop() },
                         contentAlignment = Alignment.Center
                     ) {
-                        val activeColor = androidx.compose.ui.graphics.lerp(
-                            PaletteSlateBlue.copy(alpha = 0.55f),
-                            PaletteSand,
-                            shuffleAnimState.highlight.value
-                        )
-                        AnimatedShuffleIcon(
-                            size = 22.dp,
-                            tint = activeColor,
-                            progress = shuffleAnimState.progress.value
+                        val isLooping = playbackState.isLooping
+                        Icon(
+                            imageVector = if (isLooping) Icons.Default.RepeatOne else Icons.Default.Repeat,
+                            contentDescription = if (isLooping) "Loop enabled" else "Loop disabled",
+                            tint = if (isLooping) PaletteSand else PaletteSlateBlue.copy(alpha = 0.55f),
+                            modifier = Modifier.size(20.dp)
                         )
                     }
 

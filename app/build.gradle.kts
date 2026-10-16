@@ -16,8 +16,8 @@ android {
         applicationId = "com.sielo.music"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1140
-        versionName = "11.4.0"
+        versionCode = 1151
+        versionName = "11.5.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -87,6 +87,7 @@ dependencies {
     implementation(project(":core-lyrics"))
     implementation(project(":core-database"))
     implementation(project(":core-playlist-import"))
+    implementation(project(":core-recommendations"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
