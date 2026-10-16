@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -295,7 +296,7 @@ fun QueueScreen(
 
                     Column {
                         Text(
-                            text = "Up Next Queue",
+                            text = if (playbackState.playNextCount > 0) "Up next" else "Queue",
                             color = TextPrimary,
                             fontFamily = SoraFontFamily,
                             fontSize = 18.sp,
@@ -381,6 +382,34 @@ fun QueueScreen(
 
                 Spacer(modifier = Modifier.height(24.dp))
 
+                if (playbackState.isLooping) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(AccentCoral.copy(alpha = 0.12f))
+                            .border(1.dp, AccentCoral.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Repeat,
+                            contentDescription = "Loop on",
+                            tint = AccentCoral,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = "Loop is on • The current song will play continuously",
+                            color = PaletteCream,
+                            fontFamily = UrbanistFontFamily,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+
                 // 2. UP NEXT / PLAY NEXT SECTION HEADER
                 if (playbackState.playNextCount > 0) {
                     Row(
@@ -390,7 +419,7 @@ fun QueueScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "PLAY NEXT (${playbackState.playNextCount.coerceAtMost(upcomingTracks.size)})",
+                            text = "UP NEXT (${playbackState.playNextCount.coerceAtMost(upcomingTracks.size)})",
                             color = TextSecondary,
                             fontFamily = SoraFontFamily,
                             fontSize = 11.sp,
@@ -407,7 +436,7 @@ fun QueueScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "UP NEXT • TUNED TO YOUR TASTE (${upcomingTracks.size})",
+                            text = "QUEUE • TUNED TO YOUR TASTE (${upcomingTracks.size})",
                             color = TextSecondary,
                             fontFamily = SoraFontFamily,
                             fontSize = 11.sp,
@@ -559,7 +588,7 @@ fun QueueScreen(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = "UP NEXT • TUNED TO YOUR TASTE (${(upcomingTracks.size - playbackState.playNextCount).coerceAtLeast(0)})",
+                                        text = "QUEUE • TUNED TO YOUR TASTE (${(upcomingTracks.size - playbackState.playNextCount).coerceAtLeast(0)})",
                                         color = TextSecondary,
                                         fontFamily = SoraFontFamily,
                                         fontSize = 11.sp,

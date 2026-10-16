@@ -42,6 +42,7 @@ class FakeRecommendationHistoryDao : RecommendationHistoryDao {
 class FakeCandidatePoolBuilder : CandidatePoolBuilder(
     listeningHistoryDao = object : com.sielo.music.core.database.dao.ListeningHistoryDao {
         override suspend fun insertEvent(event: com.sielo.music.core.database.entity.ListeningEventEntity) = 0L
+        override suspend fun insertEvents(events: List<com.sielo.music.core.database.entity.ListeningEventEntity>) {}
         override fun getRecentHistory(limit: Int) = kotlinx.coroutines.flow.emptyFlow<List<com.sielo.music.core.database.entity.ListeningEventEntity>>()
         override fun getTotalListeningTime(sinceMs: Long) = kotlinx.coroutines.flow.emptyFlow<Long?>()
         override fun getTotalUniqueSongs(sinceMs: Long) = kotlinx.coroutines.flow.emptyFlow<Int>()
@@ -64,6 +65,8 @@ class FakeCandidatePoolBuilder : CandidatePoolBuilder(
         override suspend fun getSongsByArtists(artistNames: List<String>) = emptyList<com.sielo.music.core.database.dao.CandidateSongStat>()
         override suspend fun getSongsByPlayCountRange(sinceMs: Long, minPlays: Int, maxPlays: Int) = emptyList<com.sielo.music.core.database.dao.CandidateSongStat>()
         override suspend fun getTopArtistsSnapshot(sinceMs: Long, limit: Int) = emptyList<com.sielo.music.core.database.dao.ArtistStat>()
+        override suspend fun getSongIdsPlayedSince(sinceMs: Long) = emptyList<String>()
+        override suspend fun getTopSongsSnapshot(sinceMs: Long, limit: Int) = emptyList<com.sielo.music.core.database.dao.SongStat>()
         override suspend fun clearAll() {}
     },
     recommendationHistoryDao = FakeRecommendationHistoryDao(),

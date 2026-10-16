@@ -47,7 +47,6 @@ import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Repeat
-import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.CircularProgressIndicator
@@ -509,7 +508,7 @@ private fun NowPlayingPageView(
                 ) {
                     val isLooping = playbackState.isLooping
                     Icon(
-                        imageVector = if (isLooping) Icons.Default.RepeatOne else Icons.Default.Repeat,
+                        imageVector = Icons.Default.Repeat,
                         contentDescription = if (isLooping) "Loop enabled" else "Loop disabled",
                         tint = if (isLooping) AccentCoral else TextSecondary,
                         modifier = Modifier.size(26.dp)
@@ -747,7 +746,21 @@ private fun LyricsPageView(
                 val listState = rememberLazyListState()
 
                 val currentMs = playbackState.currentPositionMs
-                val activeIndex = lines.indexOfLast { (it.timestampMs + lyricOffsetMs) <= currentMs }
+                val rawActiveIndex = lines.indexOfLast { (it.timestampMs + lyricOffsetMs) <= currentMs }
+                val activeIndex = remember(rawActiveIndex, lines) {
+                    if (rawActiveIndex in lines.indices && rawActiveIndex > 0) {
+                        val currLine = lines[rawActiveIndex]
+                        val prevLine = lines[rawActiveIndex - 1]
+                        val timeDiff = kotlin.math.abs(currLine.timestampMs - prevLine.timestampMs)
+                        if (timeDiff <= 2500L && isEnglishTranslationPair(candidateTranslation = currLine.text, candidateOriginal = prevLine.text)) {
+                            rawActiveIndex - 1
+                        } else {
+                            rawActiveIndex
+                        }
+                    } else {
+                        rawActiveIndex
+                    }
+                }
 
                 LaunchedEffect(activeIndex) {
                     if (lines.isNotEmpty()) {
@@ -918,5 +931,65 @@ private fun LyricsPageView(
         }
     }
 }
+
+private val HINGLISH_INDIC_WORDS = setOf(
+    "dil", "ishq", "pyaar", "pyar", "tere", "teri", "tera", "mera", "meri", "mere",
+    "hum", "tum", "tu", "hai", "ho", "hain", "hoon", "hun", "raat", "raatan",
+    "naina", "aankhon", "aankhein", "ankhiyan", "akhiyan", "akhiyaan", "ankhiyaan",
+    "zindagi", "sanam", "jaan", "khuda", "sukoon", "shiddat", "kasam", "duniya",
+    "rooh", "apna", "apne", "apni", "saath", "chal", "chalo", "chale", "chalein",
+    "kabhi", "kuch", "koi", "dard", "yaad", "yaadon", "yaadan", "rang", "soch",
+    "ve", "de", "te", "yeh", "woh", "wo", "ye", "nahin", "nahi", "kyun", "kyon",
+    "bol", "rabba", "khoya", "waqt", "mohabbat", "ehsaas", "mann", "man", "piya",
+    "paas", "kudi", "munda", "yaari", "pind", "jatt", "sohneya", "sohna", "sohni",
+    "wakhra", "gabru", "akh", "yaar", "taare", "vich", "khaali", "khali", "aa",
+    "ke", "ajj", "aaj", "bharde", "haaye", "haye", "kalli", "kalla", "hoyi", "hoya",
+    "gaiyan", "gaiyaan", "saari", "saare", "deed", "kar", "karde", "raahan", "rahan",
+    "langh", "channa", "maahi", "mahi", "dhol", "bhangra", "jind", "jinde", "leja",
+    "aaja", "jaana", "diwana", "deewana", "baatein", "baat", "chup", "reh", "raha",
+    "rahi", "rahe", "hona", "tha", "thi", "the", "gaya", "gayi", "gaye", "karta",
+    "karti", "karte", "karun", "karein", "kaun", "kahan", "yahan", "wahan", "jahan",
+    "sab", "ek", "do", "teen", "chaar", "paanch", "din", "pal", "lamha", "lamhe",
+    "suno", "dekho", "jao", "aao", "mil", "mila", "mile", "milke", "judai",
+    "tujhe", "mujhe", "hamein", "tumhein", "unhein", "inhein", "ka", "ki", "ko",
+    "se", "me", "mein", "par", "pe", "tak", "taaj", "taj", "choo", "lo", "choolo",
+    "musafir", "muskurane", "alvida", "kasoor", "kesariya", "ghungroo", "bekhayali",
+    "dhundhta", "bematlab", "parinda", "intezaar", "junoon", "dastaan", "nazrein",
+    "hawayein", "badal", "saaya", "tamanna", "khushboo", "umeed", "jahan", "shikwa",
+    "ranjha", "sawariya", "dooriyan", "chaand", "chand", "sitare", "khamoshi", "mishri"
+)
+
+private val ENGLISH_GRAMMAR_WORDS = setOf(
+    "the", "a", "an", "is", "are", "was", "were", "of", "to", "in", "for", "on", "with",
+    "at", "by", "from", "that", "this", "these", "those", "my", "your", "his", "her",
+    "our", "their", "have", "has", "had", "will", "would", "shall", "should", "can",
+    "could", "all", "please", "bless", "glimpse", "passed", "paths", "empty", "space",
+    "fill", "today", "yesterday", "tomorrow", "heart", "alone", "become", "started",
+    "loving", "come", "you", "me", "and", "or", "but", "so", "if", "not", "no", "yes",
+    "what", "when", "where", "who", "why", "how", "give", "take", "make", "see", "hear"
+)
+
+private fun isEnglishTranslationPair(candidateTranslation: String, candidateOriginal: String): Boolean {
+    val hasIndicScript = candidateOriginal.any { it in '\u0900'..'\u0D7F' }
+    val origWords = candidateOriginal.lowercase()
+        .replace(Regex("""[^\w\s]"""), " ")
+        .split(Regex("""\s+"""))
+        .filter { it.isNotBlank() }
+    val origHinglishCount = origWords.count { it in HINGLISH_INDIC_WORDS }
+
+    if (!hasIndicScript && origHinglishCount == 0) return false
+
+    val transWords = candidateTranslation.lowercase()
+        .replace(Regex("""[^\w\s]"""), " ")
+        .split(Regex("""\s+"""))
+        .filter { it.isNotBlank() }
+    val transHinglishCount = transWords.count { it in HINGLISH_INDIC_WORDS }
+
+    if (transHinglishCount > origHinglishCount) return false
+
+    val transEnglishCount = transWords.count { it in ENGLISH_GRAMMAR_WORDS }
+    return transEnglishCount >= 1
+}
+
 
 

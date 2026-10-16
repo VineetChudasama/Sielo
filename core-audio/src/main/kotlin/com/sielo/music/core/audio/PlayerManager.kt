@@ -23,6 +23,8 @@ import com.sielo.music.core.network.innertube.JioSaavnSongArtworkResolver
 import com.sielo.music.core.network.models.SieloTrack
 import com.sielo.music.core.recommendations.autoplay.AutoplayQueueEngine
 import com.sielo.music.core.recommendations.autoplay.AutoplaySession
+import com.sielo.music.core.recommendations.autoplay.CuratedArtistClusters
+import com.sielo.music.core.recommendations.autoplay.SongClassifier
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -291,7 +293,30 @@ class PlayerManager @Inject constructor(
     }
 
     private fun setupPlayerListeners() {
+        mediaController?.repeatMode = if (_playbackState.value.isLooping) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
         mediaController?.addListener(object : Player.Listener {
+            override fun onPositionDiscontinuity(
+                oldPosition: Player.PositionInfo,
+                newPosition: Player.PositionInfo,
+                reason: Int
+            ) {
+                if (_playbackState.value.isLooping && (reason == Player.DISCONTINUITY_REASON_AUTO_TRANSITION || newPosition.positionMs < oldPosition.positionMs)) {
+                    if (hasRecordedPlayThreshold) {
+                        flushCurrentListeningDuration()
+                        val cur = _playbackState.value.currentTrack
+                        if (cur != null) {
+                            recordTrackCompleted(cur)
+                        }
+                    }
+                    currentTrackAccumulatedPlayedMs = 0L
+                    hasRecordedPlayThreshold = false
+                    currentEventId = null
+                    lastTrackingTimestamp = System.currentTimeMillis()
+                    lastDbFlushTimestamp = System.currentTimeMillis()
+                    _playbackState.update { it.copy(currentPositionMs = 0L) }
+                }
+            }
+
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 val currentMediaId = mediaController?.currentMediaItem?.mediaId
                 val currentTrackId = _playbackState.value.currentTrack?.id
@@ -365,6 +390,10 @@ class PlayerManager @Inject constructor(
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 if (mediaItem == null) return
+                if (_playbackState.value.isLooping) {
+                    Log.d("SieloPlayer", "onMediaItemTransition ignored because looping is active")
+                    return
+                }
                 val mediaId = mediaItem.mediaId
                 val currentState = _playbackState.value
                 val cur = currentState.currentTrack
@@ -634,6 +663,7 @@ class PlayerManager @Inject constructor(
 
                     if (activeCtrl != null) {
                         activeCtrl.run {
+                            repeatMode = if (_playbackState.value.isLooping) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
                             if (effectiveSeekToMs > 0L) {
                                 setMediaItem(mediaItem, effectiveSeekToMs)
                             } else {
@@ -689,6 +719,7 @@ class PlayerManager @Inject constructor(
 
     private fun preloadNextTrack(currentIndex: Int, queue: List<SieloTrack>) {
         preloadJob?.cancel()
+        if (_playbackState.value.isLooping) return
         if (queue.isEmpty()) return
         val nextIndex = currentIndex + 1
         if (nextIndex !in queue.indices) return
@@ -769,17 +800,47 @@ class PlayerManager @Inject constructor(
                     }
                     val allPlayedToday = (playedTodayFromDb + autoplaySession.getPlayedSongIds() + songsPlayedToday + seedTrack.id).toSet()
 
+                    // Top songs and artists from listening history (past 30 days) to rank queue with similar songs
+                    val thirtyDaysAgoMs = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000L
+                    val topArtistsHistory = try {
+                        listeningHistoryDao.getTopArtistsSnapshot(thirtyDaysAgoMs, limit = 25)
+                    } catch (_: Exception) {
+                        emptyList()
+                    }
+                    val topSongsHistory = try {
+                        listeningHistoryDao.getTopSongsSnapshot(thirtyDaysAgoMs, limit = 60)
+                    } catch (_: Exception) {
+                        emptyList()
+                    }
+                    val historicalPlayedSongIds = topSongsHistory.map { it.songId }.toSet()
+
+                    val artistPlayFrequency = mutableMapOf<String, Int>()
+                    topArtistsHistory.forEach {
+                        val aName = extractPrimaryArtist(it.artistName).lowercase()
+                        artistPlayFrequency[aName] = (artistPlayFrequency[aName] ?: 0) + it.playCount
+                    }
+
+                    val similarToTopArtists = mutableSetOf<String>()
+                    topArtistsHistory.take(10).forEach { topArt ->
+                        val similarList = CuratedArtistClusters.getSimilarArtists(topArt.artistName, seedTrack)
+                        similarList.forEach { sim ->
+                            similarToTopArtists.add(extractPrimaryArtist(sim).lowercase())
+                        }
+                    }
+
+                    val hardExclusions = allPlayedToday + historicalPlayedSongIds
+
                     val batch = if (isReseed) {
                         val reseedContext = autoplaySession.startOrReseedSession(seedTrack)
                         autoplayQueueEngine.generateBatch(
                             seedSong = reseedContext.seedSong,
-                            excludedSongIds = allPlayedToday + reseedContext.excludedSongIds,
+                            excludedSongIds = hardExclusions + reseedContext.excludedSongIds,
                             reentryCandidates = reseedContext.reentryCandidates
                         )
                     } else {
                         autoplayQueueEngine.generateBatch(
                             seedSong = seedTrack,
-                            excludedSongIds = allPlayedToday,
+                            excludedSongIds = hardExclusions,
                             reentryCandidates = emptyList()
                         )
                     }
@@ -799,24 +860,45 @@ class PlayerManager @Inject constructor(
                                     bTrack.id !in existingIds &&
                                     bTrack.id != currentTrack.id &&
                                     bTrack.id !in penalizedSongIds &&
-                                    bTrack.id !in allPlayedToday &&
+                                    bTrack.id !in hardExclusions &&
                                     !(bTrack.title.trim().equals(currentTitle, ignoreCase = true) &&
                                       bTrack.artist.trim().equals(currentArtist, ignoreCase = true)) &&
                                     !isTitleSimilar(bTrack.title, currentTitle) &&
                                     !isTitleSimilar(bTrack.title, seedTitle)
                                 }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
 
-                                // Boost tracks based on user behavior on songs (favored songs, repeated plays, favored artists, and onboarding/evolving taste choices)
+                                // Boost and rank tracks based on similarity to songs/artists the user listens to most frequently
                                 val userTasteSeeds = userTasteSeedsProvider?.invoke()?.map { it.trim().lowercase() } ?: emptyList()
+                                val seedVibe = SongClassifier.detectVibe(seedTrack)
+                                val seedLang = SongClassifier.detectLanguage(seedTrack)
+
                                 val affinitySorted = newTracks.sortedByDescending { bTrack ->
                                     var boost = 0
+                                    val aKey = extractPrimaryArtist(bTrack.artist).lowercase()
+
+                                    // 1. Direct artist frequency from listening history (songs heard frequently)
+                                    val playFreq = artistPlayFrequency[aKey] ?: 0
+                                    boost += (playFreq * 15).coerceAtMost(150)
+
+                                    // 2. Similarity to user's top played artists (cluster match)
+                                    if (aKey in similarToTopArtists) {
+                                        boost += 45
+                                    }
+
+                                    // 3. Behavioral and in-memory repeat listening
                                     if (bTrack.id in favoredSongIds) boost += 30
                                     boost += repeatPlayCount.getOrDefault(bTrack.id, 0) * 20
-                                    val aKey = extractPrimaryArtist(bTrack.artist).lowercase()
                                     boost += favoredArtists.getOrDefault(aKey, 0) * 5
+
+                                    // 4. Taste preferences
                                     if (userTasteSeeds.any { aKey.contains(it) || it.contains(aKey) }) {
                                         boost += 40
                                     }
+
+                                    // 5. Vibe & language affinity with seed
+                                    if (SongClassifier.detectLanguage(bTrack) == seedLang) boost += 20
+                                    if (SongClassifier.detectVibe(bTrack) == seedVibe) boost += 15
+
                                     boost
                                 }
 
@@ -992,6 +1074,17 @@ class PlayerManager @Inject constructor(
         repeatPlayCount[track.id] = count + 1
     }
 
+    private fun getPlayThresholdMs(track: SieloTrack? = currentTrackingTrack ?: _playbackState.value.currentTrack): Long {
+        val mediaDur = mediaController?.duration?.takeIf { it > 0L } ?: _playbackState.value.durationMs.takeIf { it > 0L }
+        val trackDur = track?.durationSeconds?.takeIf { it > 0 }?.toLong()?.times(1000L)
+        val expectedDur = mediaDur ?: trackDur ?: 0L
+        return if (expectedDur > 0L) {
+            (expectedDur * 0.15f).toLong().coerceAtLeast(5_000L)
+        } else {
+            20_000L
+        }
+    }
+
     private fun flushCurrentListeningDuration() {
         if (isPrivateListeningEnabled || !hasRecordedPlayThreshold) return
         val eventId = currentEventId ?: return
@@ -1007,7 +1100,8 @@ class PlayerManager @Inject constructor(
                 }
             }
         }
-        if (durationMs >= 20_000L) {
+        val thresholdMs = getPlayThresholdMs()
+        if (durationMs >= thresholdMs) {
             scope.launch(Dispatchers.IO) {
                 try {
                     listeningHistoryDao.updateDurationPlayed(eventId, durationMs)
@@ -1425,7 +1519,22 @@ class PlayerManager @Inject constructor(
     }
 
     fun toggleLoop() {
-        _playbackState.update { it.copy(isLooping = !it.isLooping) }
+        val newLooping = !_playbackState.value.isLooping
+        _playbackState.update { it.copy(isLooping = newLooping) }
+        mediaController?.let { ctrl ->
+            ctrl.repeatMode = if (newLooping) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+            if (newLooping) {
+                preloadJob?.cancel()
+                val currentIdx = ctrl.currentMediaItemIndex
+                if (ctrl.mediaItemCount > currentIdx + 1) {
+                    try {
+                        ctrl.removeMediaItems(currentIdx + 1, ctrl.mediaItemCount)
+                    } catch (_: Exception) {}
+                }
+            } else {
+                preloadNextTrack(_playbackState.value.queueIndex, _playbackState.value.queue)
+            }
+        }
     }
 
     private fun startProgressTracking() {
@@ -1444,8 +1553,9 @@ class PlayerManager @Inject constructor(
                     currentTrackAccumulatedPlayedMs += delta
                     lastTrackingTimestamp = now
 
-                    // Count as 1 play only when 20 seconds (20,000ms) on the song is played
-                    if (!hasRecordedPlayThreshold && currentTrackAccumulatedPlayedMs >= 20_000L) {
+                    // Count as 1 play only when 15% of the song has been played
+                    val thresholdMs = getPlayThresholdMs()
+                    if (!hasRecordedPlayThreshold && currentTrackAccumulatedPlayedMs >= thresholdMs) {
                         hasRecordedPlayThreshold = true
                         val trackToRecord = currentTrackingTrack ?: _playbackState.value.currentTrack
                         if (trackToRecord != null) {

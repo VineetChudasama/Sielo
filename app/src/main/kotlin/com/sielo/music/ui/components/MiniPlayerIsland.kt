@@ -30,7 +30,6 @@ import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Repeat
-import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.CircularProgressIndicator
@@ -249,7 +248,7 @@ fun MiniPlayerIsland(
                     ) {
                         val isLooping = playbackState.isLooping
                         Icon(
-                            imageVector = if (isLooping) Icons.Default.RepeatOne else Icons.Default.Repeat,
+                            imageVector = Icons.Default.Repeat,
                             contentDescription = if (isLooping) "Loop enabled" else "Loop disabled",
                             tint = if (isLooping) PaletteSand else PaletteSlateBlue.copy(alpha = 0.55f),
                             modifier = Modifier.size(20.dp)

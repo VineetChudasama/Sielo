@@ -14,6 +14,13 @@ object WhatsNewChangelog {
      * Keep this map sorted newest-to-oldest so iteration order is correct.
      */
     val entries: Map<String, List<String>> = linkedMapOf(
+        "11.5.2" to listOf(
+            "🔁 Seamless Continuous Loop: Fixed loop mode to repeat the current track indefinitely without advancing, with an active loop notice in the queue",
+            "🎤 Hinglish Lyrics Focus: Dual-language synced lyrics now accurately highlight the romanized/Hinglish sung lines instead of literal English translations",
+            "⏱️ 15% Song Play Threshold: Play counts and listening history now record precisely after listening to 15% of any song",
+            "📊 Smart History-Based Queue Ranking: Dynamic queues prioritize tracks similar to your most frequently played artists and clusters while strictly preventing song repeats",
+            "📋 Dynamic Queue & Up Next Titles: Clear naming distinguishes user-added 'Up next' tracks from the dynamically tuned 'Queue'"
+        ),
         "11.5.1" to listOf(
             "🎯 Personalized Search Relevance: Search ranking now prioritizes tracks based on your listening history, most played artists, and favorite music styles and languages alongside overall popularity",
             "🛡️ Same-Day Duplicate Shield: Fixed an issue where played songs reappeared in autoplay; songs enjoyed today are strictly excluded from being re-recommended in queue on the same day",
