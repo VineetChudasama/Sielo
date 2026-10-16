@@ -12,7 +12,7 @@
   <a href="https://developer.android.com/jetpack/compose"><img src="https://img.shields.io/badge/UI-Jetpack%20Compose-4285F4.svg?logo=jetpackcompose&logoColor=white" alt="Jetpack Compose" /></a>
   <a href="https://developer.android.com/media/media3"><img src="https://img.shields.io/badge/Audio-Media3%20ExoPlayer-FF6F00.svg" alt="Media3" /></a>
   <a href="https://github.com/VineetChudasama/Sielo/releases"><img src="https://img.shields.io/badge/Version-v11.5.1-E63946.svg" alt="Version 11.5.1" /></a>
-  <a href="https://sielo-music.vercel.app"><img src="https://img.shields.io/badge/Website-sielo--music.vercel.app-0D1B2A.svg?logo=vercel&logoColor=white" alt="Website" /></a>
+  <a href="https://www.sielo.site"><img src="https://img.shields.io/badge/Website-sielo--music.vercel.app-0D1B2A.svg?logo=vercel&logoColor=white" alt="Website" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License" /></a>
 </p>
 
