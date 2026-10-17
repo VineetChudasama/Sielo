@@ -7,12 +7,16 @@
 </p>
 
 <p align="center">
+  🌐 <strong>Official Website</strong>: <a href="https://www.sielo.site"><strong>www.sielo.site</strong></a>
+</p>
+
+<p align="center">
   <a href="https://kotlinlang.org"><img src="https://img.shields.io/badge/Kotlin-2.0-7F52FF.svg?logo=kotlin&logoColor=white" alt="Kotlin" /></a>
   <a href="https://developer.android.com"><img src="https://img.shields.io/badge/Platform-Android-3DDC84.svg?logo=android&logoColor=white" alt="Android" /></a>
   <a href="https://developer.android.com/jetpack/compose"><img src="https://img.shields.io/badge/UI-Jetpack%20Compose-4285F4.svg?logo=jetpackcompose&logoColor=white" alt="Jetpack Compose" /></a>
   <a href="https://developer.android.com/media/media3"><img src="https://img.shields.io/badge/Audio-Media3%20ExoPlayer-FF6F00.svg" alt="Media3" /></a>
-  <a href="https://github.com/VineetChudasama/Sielo/releases"><img src="https://img.shields.io/badge/Version-v11.5.1-E63946.svg" alt="Version 11.5.1" /></a>
-  <a href="https://www.sielo.site"><img src="https://img.shields.io/badge/Website-sielo--music.vercel.app-0D1B2A.svg?logo=vercel&logoColor=white" alt="Website" /></a>
+  <a href="https://github.com/VineetChudasama/Sielo/releases"><img src="https://img.shields.io/badge/Version-v11.5.2-E63946.svg" alt="Version 11.5.2" /></a>
+  <a href="https://www.sielo.site"><img src="https://img.shields.io/badge/Website-www.sielo.site-0D1B2A.svg?logo=googlechrome&logoColor=white" alt="Website" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License" /></a>
 </p>
 
@@ -57,7 +61,7 @@ What sets **Sielo** apart from typical streaming clients:
 - **Hybrid Streaming Architecture**: Seamless orchestration between **YouTube Music InnerTube** and **JioSaavn** (lossless 320kbps CD-quality AAC).
 - **Smart Stream Recovery**: Multi-client fallback (Android Mobile, VR, and Saavn CDN) that recovers degraded streams on the fly without interruption.
 - **Intelligent Offline Chunk Cache**: Bounded, encrypted LRU cache system caching songs to prevent redundant network consumption.
-- **Verified 20-Second Play Count**: Listening history and analytics only register a play after 20 seconds of continuous playback, preventing accidental skips from distorting recommendations.
+- **Verified 15% Song Play Threshold**: Listening history and analytics only register a play after 15% of track duration has elapsed, preventing accidental skips from distorting recommendations.
 
 ### 8. 🎙️ Millisecond-Accurate Lyrics
 - **Precision Word & Line Timestamps**: Integration with LRCLIB offering exact 1:1 millisecond timestamp synchronization.
