@@ -1,6 +1,9 @@
 package com.sielo.music.core.auth
 
 import android.content.Context
+import android.util.Log
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.GoogleAuthProvider
 import com.sielo.music.core.auth.model.AuthProvider
 import com.sielo.music.core.auth.model.UserProfile
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -10,6 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.util.UUID
@@ -22,6 +26,7 @@ class UserManager @Inject constructor(
     private val databaseCleaner: com.sielo.music.core.database.DatabaseCleaner,
     private val playerManager: com.sielo.music.core.audio.PlayerManager,
     private val cloudSyncManager: com.sielo.music.core.sync.CloudSyncManager,
+    private val userPlaylistsRepository: com.sielo.music.core.playlist.UserPlaylistsRepository,
     private val listeningEventDispatcher: com.sielo.music.core.recommendations.events.ListeningEventDispatcher
 ) {
 
@@ -48,6 +53,12 @@ class UserManager @Inject constructor(
         listeningEventDispatcher.currentUserIdProvider = {
             _currentUser.value?.id ?: "guest"
         }
+        cloudSyncManager.currentUserProvider = {
+            _currentUser.value
+        }
+        scope.launch {
+            cloudSyncManager.ensureAuthenticated()
+        }
         restoreSession()
     }
 
@@ -59,11 +70,35 @@ class UserManager @Inject constructor(
                 if (profile.createdAt <= 0L) {
                     val storedCreated = prefs.getLong("account_created_timestamp", System.currentTimeMillis())
                     profile = profile.copy(createdAt = storedCreated)
-                    persistUser(profile)
+                    persistUser(profile, backupToCloud = false)
                 }
                 _currentUser.value = profile
                 if (!profile.hasCompletedOnboarding) {
                     _isOnboardingOpen.value = true
+                }
+                // Background refresh from cloud on launch to keep multi-device data synchronized
+                val cleanEmail = profile.email.trim().lowercase()
+                if (cleanEmail.isNotBlank() && !cleanEmail.endsWith("@sielo.local")) {
+                    scope.launch {
+                        cloudSyncManager.ensureAuthenticated()
+                        val restored = cloudSyncManager.restoreUserData(cleanEmail)
+                        if (restored != null) {
+                            val merged = (_currentUser.value ?: profile).copy(
+                                id = restored.id.takeIf { it.isNotBlank() } ?: profile.id,
+                                name = restored.name.takeIf { it.isNotBlank() } ?: profile.name,
+                                username = restored.username ?: profile.username,
+                                bio = restored.bio ?: profile.bio,
+                                photoUrl = restored.photoUrl ?: profile.photoUrl,
+                                favoriteArtists = if (restored.favoriteArtists.isNotEmpty()) restored.favoriteArtists else profile.favoriteArtists,
+                                favoriteGenres = if (restored.favoriteGenres.isNotEmpty()) restored.favoriteGenres else profile.favoriteGenres,
+                                artistTasteWeights = if (restored.artistTasteWeights.isNotEmpty()) restored.artistTasteWeights else profile.artistTasteWeights,
+                                genreTasteWeights = if (restored.genreTasteWeights.isNotEmpty()) restored.genreTasteWeights else profile.genreTasteWeights,
+                                hasCompletedOnboarding = true,
+                                createdAt = if (restored.createdAt > 0L) restored.createdAt else profile.createdAt
+                            )
+                            persistUser(merged, backupToCloud = false)
+                        }
+                    }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -76,7 +111,7 @@ class UserManager @Inject constructor(
         }
     }
 
-    private fun persistUser(profile: UserProfile) {
+    fun persistUser(profile: UserProfile, backupToCloud: Boolean = true) {
         _currentUser.value = profile
         try {
             val userJson = json.encodeToString(profile)
@@ -87,7 +122,9 @@ class UserManager @Inject constructor(
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        cloudSyncManager.backupUserData(profile)
+        if (backupToCloud) {
+            cloudSyncManager.backupUserData(profile)
+        }
     }
 
     fun openAuthDialog() {
@@ -106,8 +143,14 @@ class UserManager @Inject constructor(
         _isOnboardingOpen.value = false
     }
 
-    fun signInWithGoogle(name: String, email: String, photoUrl: String?) {
+    fun signInWithGoogle(name: String, email: String, photoUrl: String?, idToken: String? = null) {
         val cleanEmail = email.trim().lowercase()
+        _isAuthDialogOpen.value = false
+
+        // Detect if user is switching accounts
+        val currentEmail = _currentUser.value?.email?.trim()?.lowercase()
+        val isAccountSwitch = !currentEmail.isNullOrBlank() && currentEmail != cleanEmail
+
         val existingJson = prefs.getString("$KEY_ALL_USERS_PREFIX$cleanEmail", null)
         val localProfile = if (!existingJson.isNullOrBlank()) {
             try {
@@ -125,35 +168,69 @@ class UserManager @Inject constructor(
             }
         } else null
 
-        val profile = localProfile ?: createNewUserProfile(name, cleanEmail, photoUrl, AuthProvider.GOOGLE)
-        persistUser(profile)
-        _isAuthDialogOpen.value = false
-
-        // Returning users who already completed onboarding should NEVER see onboarding again
-        if (localProfile != null || profile.hasCompletedOnboarding) {
-            _isOnboardingOpen.value = false
+        if (localProfile != null) {
+            persistUser(localProfile, backupToCloud = false)
+            _isOnboardingOpen.value = !localProfile.hasCompletedOnboarding
         } else {
-            _isOnboardingOpen.value = true
+            // Tentative initial profile while restoring; keep onboarding closed until cloud lookup completes
+            val tentative = createNewUserProfile(name, cleanEmail, photoUrl, AuthProvider.GOOGLE)
+            persistUser(tentative, backupToCloud = false)
+            _isOnboardingOpen.value = false
         }
 
-        // Trigger cloud restore in background
+        // Trigger Firebase Auth credential bridge & cloud restore in background
         scope.launch {
-            val restored = cloudSyncManager.restoreUserData(cleanEmail)
-            if (restored != null) {
-                val merged = (currentUser.value ?: profile).copy(
-                    name = restored.name.takeIf { it.isNotBlank() } ?: profile.name,
-                    username = restored.username ?: profile.username,
-                    bio = restored.bio ?: profile.bio,
-                    photoUrl = restored.photoUrl ?: profile.photoUrl,
-                    favoriteArtists = if (restored.favoriteArtists.isNotEmpty()) restored.favoriteArtists else profile.favoriteArtists,
-                    favoriteGenres = if (restored.favoriteGenres.isNotEmpty()) restored.favoriteGenres else profile.favoriteGenres,
-                    artistTasteWeights = if (restored.artistTasteWeights.isNotEmpty()) restored.artistTasteWeights else profile.artistTasteWeights,
-                    genreTasteWeights = if (restored.genreTasteWeights.isNotEmpty()) restored.genreTasteWeights else profile.genreTasteWeights,
-                    hasCompletedOnboarding = true,
-                    createdAt = if (restored.createdAt > 0L) restored.createdAt else profile.createdAt
-                )
-                persistUser(merged)
-                _isOnboardingOpen.value = false
+            if (isAccountSwitch) {
+                try {
+                    databaseCleaner.clearAll()
+                    userPlaylistsRepository.resetToDefault()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+            if (!idToken.isNullOrBlank()) {
+                try {
+                    val credential = GoogleAuthProvider.getCredential(idToken, null)
+                    FirebaseAuth.getInstance().signInWithCredential(credential).await()
+                    Log.d("UserManager", "FirebaseAuth signed in with Google Credential for $cleanEmail")
+                } catch (e: Exception) {
+                    Log.w("UserManager", "FirebaseAuth Google sign-in failed: ${e.message}")
+                    cloudSyncManager.ensureAuthenticated()
+                }
+            } else {
+                cloudSyncManager.ensureAuthenticated()
+            }
+
+            try {
+                val restored = cloudSyncManager.restoreUserData(cleanEmail)
+                val current = _currentUser.value ?: localProfile ?: createNewUserProfile(name, cleanEmail, photoUrl, AuthProvider.GOOGLE)
+                if (restored != null) {
+                    val merged = current.copy(
+                        id = restored.id.takeIf { it.isNotBlank() } ?: current.id,
+                        name = restored.name.takeIf { it.isNotBlank() } ?: current.name,
+                        username = restored.username ?: current.username,
+                        bio = restored.bio ?: current.bio,
+                        photoUrl = restored.photoUrl ?: current.photoUrl,
+                        favoriteArtists = if (restored.favoriteArtists.isNotEmpty()) restored.favoriteArtists else current.favoriteArtists,
+                        favoriteGenres = if (restored.favoriteGenres.isNotEmpty()) restored.favoriteGenres else current.favoriteGenres,
+                        artistTasteWeights = if (restored.artistTasteWeights.isNotEmpty()) restored.artistTasteWeights else current.artistTasteWeights,
+                        genreTasteWeights = if (restored.genreTasteWeights.isNotEmpty()) restored.genreTasteWeights else current.genreTasteWeights,
+                        hasCompletedOnboarding = true,
+                        createdAt = if (restored.createdAt > 0L) restored.createdAt else current.createdAt
+                    )
+                    persistUser(merged, backupToCloud = true)
+                    _isOnboardingOpen.value = false
+                } else {
+                    if (localProfile == null) {
+                        _isOnboardingOpen.value = true
+                    }
+                    persistUser(_currentUser.value ?: current, backupToCloud = true)
+                }
+            } catch (e: Exception) {
+                Log.e("UserManager", "Error during cloud restore in signInWithGoogle: ${e.message}", e)
+                if (localProfile == null) {
+                    _isOnboardingOpen.value = true
+                }
             }
         }
     }
@@ -167,6 +244,10 @@ class UserManager @Inject constructor(
             return Result.failure(IllegalArgumentException("Password must be at least 4 characters."))
         }
 
+        // Detect if user is switching accounts
+        val currentEmail = _currentUser.value?.email?.trim()?.lowercase()
+        val isAccountSwitch = !currentEmail.isNullOrBlank() && currentEmail != cleanEmail
+
         val existingJson = prefs.getString("$KEY_ALL_USERS_PREFIX$cleanEmail", null)
         val localProfile = if (!existingJson.isNullOrBlank()) {
             try {
@@ -179,34 +260,56 @@ class UserManager @Inject constructor(
         val derivedName = cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() }
         val profile = localProfile ?: createNewUserProfile(derivedName, cleanEmail, null, AuthProvider.EMAIL_PASSWORD)
 
-        persistUser(profile)
+        persistUser(profile, backupToCloud = false)
         _isAuthDialogOpen.value = false
 
-        // Returning users do not see onboarding
-        if (localProfile != null || profile.hasCompletedOnboarding) {
-            _isOnboardingOpen.value = false
+        if (localProfile != null) {
+            _isOnboardingOpen.value = !localProfile.hasCompletedOnboarding
         } else {
-            _isOnboardingOpen.value = true
+            _isOnboardingOpen.value = false
         }
 
         // Trigger cloud restore in background
         scope.launch {
-            val restored = cloudSyncManager.restoreUserData(cleanEmail)
-            if (restored != null) {
-                val merged = (currentUser.value ?: profile).copy(
-                    name = restored.name.takeIf { it.isNotBlank() } ?: profile.name,
-                    username = restored.username ?: profile.username,
-                    bio = restored.bio ?: profile.bio,
-                    photoUrl = restored.photoUrl ?: profile.photoUrl,
-                    favoriteArtists = if (restored.favoriteArtists.isNotEmpty()) restored.favoriteArtists else profile.favoriteArtists,
-                    favoriteGenres = if (restored.favoriteGenres.isNotEmpty()) restored.favoriteGenres else profile.favoriteGenres,
-                    artistTasteWeights = if (restored.artistTasteWeights.isNotEmpty()) restored.artistTasteWeights else profile.artistTasteWeights,
-                    genreTasteWeights = if (restored.genreTasteWeights.isNotEmpty()) restored.genreTasteWeights else profile.genreTasteWeights,
-                    hasCompletedOnboarding = true,
-                    createdAt = if (restored.createdAt > 0L) restored.createdAt else profile.createdAt
-                )
-                persistUser(merged)
-                _isOnboardingOpen.value = false
+            if (isAccountSwitch) {
+                try {
+                    databaseCleaner.clearAll()
+                    userPlaylistsRepository.resetToDefault()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+            cloudSyncManager.ensureAuthenticated()
+            try {
+                val restored = cloudSyncManager.restoreUserData(cleanEmail)
+                val current = _currentUser.value ?: profile
+                if (restored != null) {
+                    val merged = current.copy(
+                        id = restored.id.takeIf { it.isNotBlank() } ?: current.id,
+                        name = restored.name.takeIf { it.isNotBlank() } ?: current.name,
+                        username = restored.username ?: current.username,
+                        bio = restored.bio ?: current.bio,
+                        photoUrl = restored.photoUrl ?: current.photoUrl,
+                        favoriteArtists = if (restored.favoriteArtists.isNotEmpty()) restored.favoriteArtists else current.favoriteArtists,
+                        favoriteGenres = if (restored.favoriteGenres.isNotEmpty()) restored.favoriteGenres else current.favoriteGenres,
+                        artistTasteWeights = if (restored.artistTasteWeights.isNotEmpty()) restored.artistTasteWeights else current.artistTasteWeights,
+                        genreTasteWeights = if (restored.genreTasteWeights.isNotEmpty()) restored.genreTasteWeights else current.genreTasteWeights,
+                        hasCompletedOnboarding = true,
+                        createdAt = if (restored.createdAt > 0L) restored.createdAt else current.createdAt
+                    )
+                    persistUser(merged, backupToCloud = true)
+                    _isOnboardingOpen.value = false
+                } else {
+                    if (localProfile == null) {
+                        _isOnboardingOpen.value = true
+                    }
+                    persistUser(_currentUser.value ?: current, backupToCloud = true)
+                }
+            } catch (e: Exception) {
+                Log.e("UserManager", "Error restoring user data on email sign in: ${e.message}", e)
+                if (localProfile == null) {
+                    _isOnboardingOpen.value = true
+                }
             }
         }
 
@@ -226,7 +329,10 @@ class UserManager @Inject constructor(
             return Result.failure(IllegalArgumentException("Password must be at least 4 characters."))
         }
 
-        // If an account already exists locally, reuse it instead of wiping!
+        // Detect if user is switching accounts
+        val currentEmail = _currentUser.value?.email?.trim()?.lowercase()
+        val isAccountSwitch = !currentEmail.isNullOrBlank() && currentEmail != cleanEmail
+
         val existingJson = prefs.getString("$KEY_ALL_USERS_PREFIX$cleanEmail", null)
         val profile = if (!existingJson.isNullOrBlank()) {
             try {
@@ -238,13 +344,47 @@ class UserManager @Inject constructor(
             createNewUserProfile(cleanName, cleanEmail, null, AuthProvider.EMAIL_PASSWORD)
         }
 
-        persistUser(profile)
+        persistUser(profile, backupToCloud = false)
         _isAuthDialogOpen.value = false
-        if (!profile.hasCompletedOnboarding) {
-            _isOnboardingOpen.value = true
-        } else {
-            _isOnboardingOpen.value = false
+
+        scope.launch {
+            if (isAccountSwitch) {
+                try {
+                    databaseCleaner.clearAll()
+                    userPlaylistsRepository.resetToDefault()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+            cloudSyncManager.ensureAuthenticated()
+            try {
+                val restored = cloudSyncManager.restoreUserData(cleanEmail)
+                val current = _currentUser.value ?: profile
+                if (restored != null) {
+                    val merged = current.copy(
+                        id = restored.id.takeIf { it.isNotBlank() } ?: current.id,
+                        name = cleanName.ifBlank { restored.name },
+                        username = restored.username ?: current.username,
+                        bio = restored.bio ?: current.bio,
+                        photoUrl = restored.photoUrl ?: current.photoUrl,
+                        favoriteArtists = if (restored.favoriteArtists.isNotEmpty()) restored.favoriteArtists else current.favoriteArtists,
+                        favoriteGenres = if (restored.favoriteGenres.isNotEmpty()) restored.favoriteGenres else current.favoriteGenres,
+                        artistTasteWeights = if (restored.artistTasteWeights.isNotEmpty()) restored.artistTasteWeights else current.artistTasteWeights,
+                        genreTasteWeights = if (restored.genreTasteWeights.isNotEmpty()) restored.genreTasteWeights else current.genreTasteWeights,
+                        hasCompletedOnboarding = true,
+                        createdAt = if (restored.createdAt > 0L) restored.createdAt else current.createdAt
+                    )
+                    persistUser(merged, backupToCloud = true)
+                    _isOnboardingOpen.value = false
+                } else {
+                    _isOnboardingOpen.value = !profile.hasCompletedOnboarding
+                    persistUser(_currentUser.value ?: profile, backupToCloud = true)
+                }
+            } catch (e: Exception) {
+                _isOnboardingOpen.value = !profile.hasCompletedOnboarding
+            }
         }
+
         return Result.success(profile)
     }
 
@@ -404,7 +544,15 @@ class UserManager @Inject constructor(
             photoUrl = null,
             provider = AuthProvider.GUEST
         )
-        persistUser(profile)
+        scope.launch(Dispatchers.IO) {
+            try {
+                databaseCleaner.clearAll()
+                userPlaylistsRepository.resetToDefault()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        persistUser(profile, backupToCloud = false)
         _isAuthDialogOpen.value = false
         _isOnboardingOpen.value = true
         return profile
@@ -412,16 +560,35 @@ class UserManager @Inject constructor(
 
     fun signOut() {
         val userToBackup = _currentUser.value
-        if (userToBackup != null) {
-            cloudSyncManager.backupUserData(userToBackup)
-        }
         _currentUser.value = null
         prefs.edit().remove(KEY_CURRENT_USER).apply()
         _isAuthDialogOpen.value = true
         _isOnboardingOpen.value = false
         scope.launch(Dispatchers.IO) {
             try {
+                if (userToBackup != null) {
+                    cloudSyncManager.backupUserDataBlocking(userToBackup)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            try {
+                FirebaseAuth.getInstance().signOut()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            try {
                 playerManager.resetPlayer()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            try {
+                databaseCleaner.clearAll()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            try {
+                userPlaylistsRepository.resetToDefault()
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -453,7 +620,7 @@ class UserManager @Inject constructor(
         _isOnboardingOpen.value = false
         _isAuthDialogOpen.value = true
 
-        // 4. Background purge of database tables, feature cache, audio player, and disk cache
+        // 4. Background purge of database tables, feature cache, audio player, playlists, and disk cache
         scope.launch(Dispatchers.IO) {
             try {
                 playerManager.resetPlayer()
@@ -462,6 +629,11 @@ class UserManager @Inject constructor(
             }
             try {
                 databaseCleaner.clearAll()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            try {
+                userPlaylistsRepository.resetToDefault()
             } catch (e: Exception) {
                 e.printStackTrace()
             }

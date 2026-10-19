@@ -199,7 +199,7 @@ fun AuthDialog(
                 val name = account.displayName ?: "Google User"
                 val email = account.email ?: "user@gmail.com"
                 val photoUrl = account.photoUrl?.toString()
-                userManager.signInWithGoogle(name, email, photoUrl)
+                userManager.signInWithGoogle(name, email, photoUrl, account.idToken)
                 onDismiss()
             }
         } catch (e: Exception) {
@@ -214,7 +214,7 @@ fun AuthDialog(
                     val name = lastAccount.displayName ?: "Google User"
                     val email = lastAccount.email ?: "user@gmail.com"
                     val photoUrl = lastAccount.photoUrl?.toString()
-                    userManager.signInWithGoogle(name, email, photoUrl)
+                    userManager.signInWithGoogle(name, email, photoUrl, lastAccount.idToken)
                     onDismiss()
                 } else {
                     val msg = if (e is ApiException) "Google Sign-In failed (${e.statusCode})" else "Google Sign-In failed"

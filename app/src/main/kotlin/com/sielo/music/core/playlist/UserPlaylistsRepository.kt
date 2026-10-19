@@ -51,13 +51,23 @@ class UserPlaylistsRepository @Inject constructor(
 
     fun restorePlaylists(playlists: List<UserPlaylist>) {
         if (playlists.isEmpty()) return
-        val current = _playlists.value
+        val hasCustom = playlists.any { !it.id.startsWith("sielo_starter_") }
+        val current = if (hasCustom) {
+            _playlists.value.filterNot { it.id.startsWith("sielo_starter_") }
+        } else {
+            _playlists.value
+        }
         val mergedMap = current.associateBy { it.id }.toMutableMap()
         for (pl in playlists) {
             mergedMap[pl.id] = pl
         }
         val mergedList = mergedMap.values.toList()
         savePlaylistsInternal(mergedList)
+    }
+
+    fun resetToDefault() {
+        val defaultList = defaultPlaylists()
+        savePlaylistsInternal(defaultList)
     }
 
     fun getAllPlaylists(): List<UserPlaylist> {
