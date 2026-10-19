@@ -2,11 +2,16 @@ package com.sielo.music.core.playlist
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.sielo.music.core.audio.OfflineCacheManager
 import com.sielo.music.core.network.models.SieloTrack
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -29,17 +34,57 @@ data class UserPlaylist(
 class UserPlaylistsRepository @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
+    companion object {
+        const val PLAYLIST_DOWNLOADED_CACHE_ID = "sielo_downloaded_cache"
+    }
+
     private val prefs: SharedPreferences = context.getSharedPreferences("sielo_user_playlists", Context.MODE_PRIVATE)
     private val json = Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true }
+    private val scope = CoroutineScope(Dispatchers.IO)
 
-    private val _playlists = MutableStateFlow<List<UserPlaylist>>(loadPlaylists())
-    val playlists: StateFlow<List<UserPlaylist>> = _playlists.asStateFlow()
+    private val _rawPlaylists = MutableStateFlow<List<UserPlaylist>>(loadPlaylists())
+
+    val playlists: StateFlow<List<UserPlaylist>> = combine(_rawPlaylists, OfflineCacheManager.cacheUpdated) { raw, _ ->
+        val cachedTracks = OfflineCacheManager.getCachedTracks(context)
+        val dynamicCachedPlaylist = UserPlaylist(
+            id = PLAYLIST_DOWNLOADED_CACHE_ID,
+            title = "Downloaded Cache",
+            description = if (cachedTracks.isEmpty()) {
+                "Offline Vault • Songs you play are cached here for offline replay"
+            } else {
+                "Offline Vault • ${cachedTracks.size} songs ready for offline replay"
+            },
+            coverUrl = cachedTracks.firstOrNull()?.thumbnailUrl
+                ?: "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600&auto=format&fit=crop&q=80",
+            createdAt = Long.MAX_VALUE,
+            tracks = cachedTracks
+        )
+        listOf(dynamicCachedPlaylist) + raw.filter { it.id != PLAYLIST_DOWNLOADED_CACHE_ID }
+    }.stateIn(scope, SharingStarted.Eagerly, listOf(getDynamicDownloadedPlaylist()))
+
+    private fun getDynamicDownloadedPlaylist(): UserPlaylist {
+        val cachedTracks = OfflineCacheManager.getCachedTracks(context)
+        return UserPlaylist(
+            id = PLAYLIST_DOWNLOADED_CACHE_ID,
+            title = "Downloaded Cache",
+            description = if (cachedTracks.isEmpty()) {
+                "Offline Vault • Songs you play are cached here for offline replay"
+            } else {
+                "Offline Vault • ${cachedTracks.size} songs ready for offline replay"
+            },
+            coverUrl = cachedTracks.firstOrNull()?.thumbnailUrl
+                ?: "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600&auto=format&fit=crop&q=80",
+            createdAt = Long.MAX_VALUE,
+            tracks = cachedTracks
+        )
+    }
 
     private fun loadPlaylists(): List<UserPlaylist> {
         val saved = prefs.getString("user_playlists_json", null)
         if (!saved.isNullOrBlank()) {
             try {
-                return json.decodeFromString<List<UserPlaylist>>(saved)
+                val list = json.decodeFromString<List<UserPlaylist>>(saved)
+                return list.filter { it.id != PLAYLIST_DOWNLOADED_CACHE_ID }
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -51,14 +96,15 @@ class UserPlaylistsRepository @Inject constructor(
 
     fun restorePlaylists(playlists: List<UserPlaylist>) {
         if (playlists.isEmpty()) return
-        val hasCustom = playlists.any { !it.id.startsWith("sielo_starter_") }
+        val sanitized = playlists.filter { it.id != PLAYLIST_DOWNLOADED_CACHE_ID }
+        val hasCustom = sanitized.any { !it.id.startsWith("sielo_starter_") }
         val current = if (hasCustom) {
-            _playlists.value.filterNot { it.id.startsWith("sielo_starter_") }
+            _rawPlaylists.value.filterNot { it.id.startsWith("sielo_starter_") || it.id == PLAYLIST_DOWNLOADED_CACHE_ID }
         } else {
-            _playlists.value
+            _rawPlaylists.value
         }
         val mergedMap = current.associateBy { it.id }.toMutableMap()
-        for (pl in playlists) {
+        for (pl in sanitized) {
             mergedMap[pl.id] = pl
         }
         val mergedList = mergedMap.values.toList()
@@ -66,34 +112,35 @@ class UserPlaylistsRepository @Inject constructor(
     }
 
     fun resetToDefault() {
-        val defaultList = defaultPlaylists()
+        val defaultList = defaultPlaylists().filter { it.id != PLAYLIST_DOWNLOADED_CACHE_ID }
         savePlaylistsInternal(defaultList)
     }
 
     fun getAllPlaylists(): List<UserPlaylist> {
-        return _playlists.value
+        return playlists.value
     }
 
     private fun savePlaylistsInternal(list: List<UserPlaylist>) {
         try {
-            val encoded = json.encodeToString(list)
+            val persistable = list.filter { it.id != PLAYLIST_DOWNLOADED_CACHE_ID }
+            val encoded = json.encodeToString(persistable)
             prefs.edit().putString("user_playlists_json", encoded).apply()
-            _playlists.value = list
+            _rawPlaylists.value = persistable
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
 
-    fun createPlaylistWithTracks(title: String, tracks: List<com.sielo.music.core.network.models.SieloTrack>): UserPlaylist {
+    fun createPlaylistWithTracks(title: String, tracks: List<SieloTrack>): UserPlaylist {
         val newPlaylist = UserPlaylist(
-            id = java.util.UUID.randomUUID().toString(),
+            id = UUID.randomUUID().toString(),
             title = title.trim(),
             description = "",
             coverUrl = tracks.firstOrNull()?.thumbnailUrl,
             createdAt = System.currentTimeMillis(),
             tracks = tracks
         )
-        val updated = listOf(newPlaylist) + _playlists.value
+        val updated = listOf(newPlaylist) + _rawPlaylists.value.filter { it.id != PLAYLIST_DOWNLOADED_CACHE_ID }
         savePlaylistsInternal(updated)
         return newPlaylist
     }
@@ -107,27 +154,33 @@ class UserPlaylistsRepository @Inject constructor(
             createdAt = System.currentTimeMillis(),
             tracks = emptyList()
         )
-        val updated = listOf(newPlaylist) + _playlists.value
+        val updated = listOf(newPlaylist) + _rawPlaylists.value.filter { it.id != PLAYLIST_DOWNLOADED_CACHE_ID }
         savePlaylistsInternal(updated)
         return newPlaylist
     }
 
     fun deletePlaylist(playlistId: String) {
-        val updated = _playlists.value.filter { it.id != playlistId }
+        if (playlistId == PLAYLIST_DOWNLOADED_CACHE_ID) {
+            OfflineCacheManager.clearCache(context)
+            return
+        }
+        val updated = _rawPlaylists.value.filter { it.id != playlistId && it.id != PLAYLIST_DOWNLOADED_CACHE_ID }
         savePlaylistsInternal(updated)
     }
 
     fun updatePlaylistName(playlistId: String, newName: String) {
+        if (playlistId == PLAYLIST_DOWNLOADED_CACHE_ID) return
         val cleanName = newName.trim()
         if (cleanName.isBlank()) return
-        val updated = _playlists.value.map { pl ->
+        val updated = _rawPlaylists.value.map { pl ->
             if (pl.id == playlistId) pl.copy(title = cleanName) else pl
         }
         savePlaylistsInternal(updated)
     }
 
     fun addTrackToPlaylist(playlistId: String, track: SieloTrack) {
-        val updated = _playlists.value.map { pl ->
+        if (playlistId == PLAYLIST_DOWNLOADED_CACHE_ID) return
+        val updated = _rawPlaylists.value.map { pl ->
             if (pl.id == playlistId) {
                 if (pl.tracks.any { it.id == track.id }) pl
                 else pl.copy(
@@ -140,7 +193,11 @@ class UserPlaylistsRepository @Inject constructor(
     }
 
     fun removeTrackFromPlaylist(playlistId: String, trackId: String) {
-        val updated = _playlists.value.map { pl ->
+        if (playlistId == PLAYLIST_DOWNLOADED_CACHE_ID) {
+            OfflineCacheManager.removeTrack(context, trackId)
+            return
+        }
+        val updated = _rawPlaylists.value.map { pl ->
             if (pl.id == playlistId) {
                 pl.copy(tracks = pl.tracks.filter { it.id != trackId })
             } else pl
@@ -187,4 +244,3 @@ class UserPlaylistsRepository @Inject constructor(
         )
     }
 }
-

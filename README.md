@@ -15,7 +15,7 @@
   <a href="https://developer.android.com"><img src="https://img.shields.io/badge/Platform-Android-3DDC84.svg?logo=android&logoColor=white" alt="Android" /></a>
   <a href="https://developer.android.com/jetpack/compose"><img src="https://img.shields.io/badge/UI-Jetpack%20Compose-4285F4.svg?logo=jetpackcompose&logoColor=white" alt="Jetpack Compose" /></a>
   <a href="https://developer.android.com/media/media3"><img src="https://img.shields.io/badge/Audio-Media3%20ExoPlayer-FF6F00.svg" alt="Media3" /></a>
-  <a href="https://github.com/VineetChudasama/Sielo/releases"><img src="https://img.shields.io/badge/Version-v11.5.3-E63946.svg" alt="Version 11.5.3" /></a>
+  <a href="https://github.com/VineetChudasama/Sielo/releases"><img src="https://img.shields.io/badge/Version-v11.5.4-E63946.svg" alt="Version 11.5.4" /></a>
   <a href="https://www.sielo.site"><img src="https://img.shields.io/badge/Website-www.sielo.site-0D1B2A.svg?logo=googlechrome&logoColor=white" alt="Website" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License" /></a>
 </p>

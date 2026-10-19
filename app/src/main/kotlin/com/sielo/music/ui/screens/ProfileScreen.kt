@@ -53,6 +53,7 @@ import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.ColorLens
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.GraphicEq
@@ -71,6 +72,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -2126,7 +2128,8 @@ private fun HistoryBottomSheet(
 private fun OfflineBottomSheet(cacheSize: String, onDismiss: () -> Unit, onPlayTrack: (com.sielo.music.core.network.models.SieloTrack, List<com.sielo.music.core.network.models.SieloTrack>) -> Unit) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val context = androidx.compose.ui.platform.LocalContext.current
-    val cachedTracks by remember { mutableStateOf(com.sielo.music.core.audio.OfflineCacheManager.getCachedTracks(context)) }
+    val cacheVersion by com.sielo.music.core.audio.OfflineCacheManager.cacheUpdated.collectAsState()
+    val cachedTracks = remember(cacheVersion) { com.sielo.music.core.audio.OfflineCacheManager.getCachedTracks(context) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -2169,33 +2172,65 @@ private fun OfflineBottomSheet(cacheSize: String, onDismiss: () -> Unit, onPlayT
             Spacer(modifier = Modifier.height(6.dp))
 
             Text(
-                text = "Songs you've listened to are fully cached here for instant gapless offline replay.\nCurrent Cache: $cacheSize",
+                text = "Songs you've listened to are fully cached here for instant gapless offline replay.\nCurrent Cache: ${cachedTracks.size} songs ($cacheSize)",
                 color = TextSecondary,
                 fontFamily = UrbanistFontFamily,
                 fontSize = 13.sp,
                 textAlign = TextAlign.Center
             )
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             if (cachedTracks.isEmpty()) {
                 Text(
-                    text = "No offline songs available.",
+                    text = "No offline songs available. Play songs while connected to automatically cache them.",
                     color = PaletteCream.copy(alpha = 0.6f),
-                    fontFamily = UrbanistFontFamily
+                    fontFamily = UrbanistFontFamily,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(vertical = 24.dp)
                 )
             } else {
+                androidx.compose.material3.Button(
+                    onClick = {
+                        onPlayTrack(cachedTracks.first(), cachedTracks)
+                        onDismiss()
+                    },
+                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = PaletteSand),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = null,
+                        tint = PaletteOxfordBlue,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Play All Offline (${cachedTracks.size} songs)",
+                        color = PaletteOxfordBlue,
+                        fontFamily = SoraFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp
+                    )
+                }
+
                 LazyColumn(
-                    modifier = Modifier.fillMaxWidth().height(400.dp),
+                    modifier = Modifier.fillMaxWidth().height(380.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(cachedTracks) { track ->
+                    items(cachedTracks, key = { it.id }) { track ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(PaletteDarkNavy.copy(alpha = 0.5f))
-                                .clickable { onPlayTrack(track, cachedTracks) }
+                                .clickable {
+                                    onPlayTrack(track, cachedTracks)
+                                    onDismiss()
+                                }
                                 .padding(10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -2223,6 +2258,19 @@ private fun OfflineBottomSheet(cacheSize: String, onDismiss: () -> Unit, onPlayT
                                     fontSize = 12.sp,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    com.sielo.music.core.audio.OfflineCacheManager.removeTrack(context, track.id)
+                                },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.DeleteOutline,
+                                    contentDescription = "Remove from offline cache",
+                                    tint = TextSecondary,
+                                    modifier = Modifier.size(18.dp)
                                 )
                             }
                         }

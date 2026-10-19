@@ -631,8 +631,19 @@ class PlayerManager @Inject constructor(
 
             Log.d("SieloPlayer", "Stream resolution started: trackId=${track.id}, title='${track.title}', generation=$generation")
 
-            // Always resolve a fresh authorized stream URL
-            val remoteUrl = innerTubeClient.getStreamUrl(track.id, track.title, track.artist)
+            // Check offline cache first for instant, network-free playback
+            val localOfflineUri = OfflineCacheManager.getLocalTrackUri(context, track.id)
+            val remoteUrl = if (localOfflineUri != null) {
+                Log.d("SieloPlayer", "Using offline cached audio for trackId=${track.id}: $localOfflineUri")
+                localOfflineUri
+            } else {
+                try {
+                    innerTubeClient.getStreamUrl(track.id, track.title, track.artist)
+                } catch (e: Exception) {
+                    Log.w("SieloPlayer", "Failed stream resolution (device may be offline): ${e.message}")
+                    null
+                }
+            }
 
             if (generation != playbackGeneration) {
                 Log.d("SieloPlayer", "Stream resolution for generation $generation completed but superseded by $playbackGeneration. Aborting.")
@@ -640,6 +651,9 @@ class PlayerManager @Inject constructor(
             }
 
             if (!remoteUrl.isNullOrBlank()) {
+                if (!remoteUrl.startsWith("file:")) {
+                    OfflineCacheManager.autoCacheTrack(context, track, remoteUrl)
+                }
                 val schemeHost = try {
                     val uri = URI(remoteUrl)
                     "${uri.scheme}://${uri.host}"
@@ -736,8 +750,15 @@ class PlayerManager @Inject constructor(
             delay(1000L) // Wait briefly for current track to start cleanly
             if (!isActive) return@launch
             try {
-                val streamUrl = innerTubeClient.getStreamUrl(nextTrack.id, nextTrack.title, nextTrack.artist)
+                val localOfflineUri = OfflineCacheManager.getLocalTrackUri(context, nextTrack.id)
+                val streamUrl = localOfflineUri ?: try {
+                    innerTubeClient.getStreamUrl(nextTrack.id, nextTrack.title, nextTrack.artist)
+                } catch (_: Exception) { null }
+
                 if (!streamUrl.isNullOrBlank() && isActive) {
+                    if (!streamUrl.startsWith("file:")) {
+                        OfflineCacheManager.autoCacheTrack(context, nextTrack, streamUrl)
+                    }
                     withContext(Dispatchers.Main) {
                         val ctrl = mediaController ?: return@withContext
                         // Ensure player has not moved to another track

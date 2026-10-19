@@ -788,27 +788,30 @@ private fun PlaylistRowCard(
                     modifier = Modifier.size(18.dp)
                 )
             }
+            val isDownloadedCache = playlist.id == com.sielo.music.core.playlist.UserPlaylistsRepository.PLAYLIST_DOWNLOADED_CACHE_ID
             DropdownMenu(
                 expanded = menuExpanded,
                 onDismissRequest = { menuExpanded = false },
                 modifier = Modifier.background(PaletteOxfordBlue)
             ) {
+                if (!isDownloadedCache) {
+                    DropdownMenuItem(
+                        text = { Text("Edit Name", color = PaletteCream) },
+                        onClick = {
+                            menuExpanded = false
+                            onRename()
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Edit,
+                                contentDescription = null,
+                                tint = PaletteSand
+                            )
+                        }
+                    )
+                }
                 DropdownMenuItem(
-                    text = { Text("Edit Name", color = PaletteCream) },
-                    onClick = {
-                        menuExpanded = false
-                        onRename()
-                    },
-                    leadingIcon = {
-                        Icon(
-                            imageVector = Icons.Default.Edit,
-                            contentDescription = null,
-                            tint = PaletteSand
-                        )
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("Delete Playlist", color = Color(0xFFE63946)) },
+                    text = { Text(if (isDownloadedCache) "Clear Offline Cache" else "Delete Playlist", color = Color(0xFFE63946)) },
                     onClick = {
                         menuExpanded = false
                         onDelete()
@@ -842,6 +845,7 @@ private fun UserPlaylistDetailView(
     var showRenameDialog by remember { mutableStateOf(false) }
     var selectedSongActionsTrack by remember { mutableStateOf<SieloTrack?>(null) }
     val songActionsVm: SongActionsViewModel = hiltViewModel()
+    val isDownloadedCache = playlist.id == com.sielo.music.core.playlist.UserPlaylistsRepository.PLAYLIST_DOWNLOADED_CACHE_ID
 
     Box(
         modifier = modifier
@@ -919,19 +923,21 @@ private fun UserPlaylistDetailView(
                         }
 
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            IconButton(
-                                onClick = { showRenameDialog = true },
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .clip(CircleShape)
-                                    .background(PaletteDarkNavy.copy(alpha = 0.6f))
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Edit,
-                                    contentDescription = "Edit Name",
-                                    tint = PaletteSand,
-                                    modifier = Modifier.size(18.dp)
-                                )
+                            if (!isDownloadedCache) {
+                                IconButton(
+                                    onClick = { showRenameDialog = true },
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .clip(CircleShape)
+                                        .background(PaletteDarkNavy.copy(alpha = 0.6f))
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Edit,
+                                        contentDescription = "Edit Name",
+                                        tint = PaletteSand,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
                             }
 
                             IconButton(
@@ -943,7 +949,7 @@ private fun UserPlaylistDetailView(
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.DeleteOutline,
-                                    contentDescription = "Delete",
+                                    contentDescription = if (isDownloadedCache) "Clear Cache" else "Delete",
                                     tint = Color(0xFFE63946),
                                     modifier = Modifier.size(20.dp)
                                 )
@@ -969,16 +975,18 @@ private fun UserPlaylistDetailView(
                                 fontSize = 24.sp,
                                 modifier = Modifier.weight(1f, fill = false)
                             )
-                            IconButton(
-                                onClick = { showRenameDialog = true },
-                                modifier = Modifier.size(28.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Edit,
-                                    contentDescription = "Edit Name",
-                                    tint = PaletteSand,
-                                    modifier = Modifier.size(16.dp)
-                                )
+                            if (!isDownloadedCache) {
+                                IconButton(
+                                    onClick = { showRenameDialog = true },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Edit,
+                                        contentDescription = "Edit Name",
+                                        tint = PaletteSand,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
                             }
                         }
                         if (playlist.description.isNotBlank()) {
@@ -1143,7 +1151,7 @@ private fun UserPlaylistDetailView(
                 onDismissRequest = { showDeleteConfirm = false },
                 title = {
                     Text(
-                        text = "Delete Playlist?",
+                        text = if (isDownloadedCache) "Clear Offline Cache?" else "Delete Playlist?",
                         color = PaletteCream,
                         fontFamily = SoraFontFamily,
                         fontWeight = FontWeight.Bold,
@@ -1152,7 +1160,11 @@ private fun UserPlaylistDetailView(
                 },
                 text = {
                     Text(
-                        text = "Are you sure you want to delete '${playlist.title}'? This action cannot be undone.",
+                        text = if (isDownloadedCache) {
+                            "Are you sure you want to clear all offline cached tracks? Your created playlists and account data will remain untouched."
+                        } else {
+                            "Are you sure you want to delete '${playlist.title}'? This action cannot be undone."
+                        },
                         color = TextSecondary,
                         fontFamily = UrbanistFontFamily,
                         fontSize = 13.5.sp
@@ -1169,7 +1181,7 @@ private fun UserPlaylistDetailView(
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE63946))
                     ) {
-                        Text("Delete", color = Color.White, fontWeight = FontWeight.Bold)
+                        Text(if (isDownloadedCache) "Clear Cache" else "Delete", color = Color.White, fontWeight = FontWeight.Bold)
                     }
                 },
                 dismissButton = {

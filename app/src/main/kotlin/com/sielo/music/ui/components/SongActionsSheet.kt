@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Album
+import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
@@ -94,6 +95,7 @@ fun SongActionsSheet(
 
     var showPlaylistPicker by remember { mutableStateOf(false) }
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
+    val isCached = remember(track.id) { viewModel.isOfflineCached(track.id) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -255,6 +257,18 @@ fun SongActionsSheet(
                         subtitle = "Save to your custom playlists",
                         onClick = {
                             showPlaylistPicker = true
+                        }
+                    )
+                }
+                item {
+                    SongActionRow(
+                        icon = if (isCached) Icons.Default.CloudDone else Icons.Default.Download,
+                        iconTint = if (isCached) PaletteSand else PaletteCream,
+                        title = if (isCached) "Downloaded (Offline Ready)" else "Download for Offline Play",
+                        subtitle = if (isCached) "Cached locally • Tap to remove" else "Cache track for seamless offline listening",
+                        onClick = {
+                            viewModel.toggleOfflineCache(track)
+                            onDismiss()
                         }
                     )
                 }

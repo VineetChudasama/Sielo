@@ -106,7 +106,9 @@ class CloudSyncManager @Inject constructor(
                     val user = currentUserProvider?.invoke() ?: return@collectLatest
                     val email = user.email.trim().lowercase()
                     if (email.isBlank() || email.endsWith("@sielo.local")) return@collectLatest
-                    val customPlaylists = playlists.filterNot { it.id.startsWith("sielo_starter_") }
+                    val customPlaylists = playlists.filterNot {
+                        it.id.startsWith("sielo_starter_") || it.id == com.sielo.music.core.playlist.UserPlaylistsRepository.PLAYLIST_DOWNLOADED_CACHE_ID
+                    }
                     if (customPlaylists.isEmpty()) return@collectLatest
 
                     delay(2000L) // debounce rapid edits
@@ -196,6 +198,26 @@ class CloudSyncManager @Inject constructor(
                     }
                 }
         }
+
+        // Periodic background interval sync loop (every 3 minutes) to guarantee stats & history are continuously synced even without DB events
+        scope.launch {
+            while (true) {
+                delay(180_000L) // 3 minutes interval
+                try {
+                    if (!isRestoring) {
+                        val user = currentUserProvider?.invoke()
+                        val email = user?.email?.trim()?.lowercase()
+                        if (!email.isNullOrBlank() && !email.endsWith("@sielo.local")) {
+                            ensureAuthenticated()
+                            syncListeningHistoryToCloud(email, limit = 1500)
+                            Log.d(TAG, "Periodic stats & history sync completed for $email")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Periodic stats & history sync error: ${e.message}")
+                }
+            }
+        }
     }
 
     /**
@@ -271,9 +293,9 @@ class CloudSyncManager @Inject constructor(
                     .await()
             }
 
-            // 3. Custom Playlists document (filter out starter playlists)
+            // 3. Custom Playlists document (filter out starter and dynamic downloaded playlists)
             val currentPlaylists = userPlaylistsRepository.getAllPlaylists()
-                .filterNot { it.id.startsWith("sielo_starter_") }
+                .filterNot { it.id.startsWith("sielo_starter_") || it.id == com.sielo.music.core.playlist.UserPlaylistsRepository.PLAYLIST_DOWNLOADED_CACHE_ID }
             if (currentPlaylists.isNotEmpty()) {
                 val playlistsData = currentPlaylists.map { pl ->
                     mapOf(

@@ -14,6 +14,14 @@ object WhatsNewChangelog {
      * Keep this map sorted newest-to-oldest so iteration order is correct.
      */
     val entries: Map<String, List<String>> = linkedMapOf(
+        "11.5.4" to listOf(
+            "💾 Dynamic Offline Cache Playlist: Dynamically generates and syncs the 'Downloaded Cache' playlist directly from your local vault, complete with live track counts and instant gapless replay",
+            "⚡ Seamless Offline Playback: Songs you listen to are automatically cached in the background; the audio engine checks your local vault first for instant, zero-network, zero-data playback",
+            "📥 Manual Offline Vault Control: Download any song for offline replay directly from the track action menu or remove individual cached items anytime",
+            "🔄 Continuous Cloud Stats Sync: Added background interval sync (every 3 minutes) so your listening history, stream counts, and lifetime stats are continuously preserved without risk of data loss",
+            "🛡️ Multi-Device & Account Switch Persistence: Bidirectional cloud synchronization guarantees stats and listening history never reset or get overwritten when logging in, out, or across devices",
+            "🔥 Trending-Aware Search Ranking: Multi-tiered ranking integrating official YouTube Data API (India region prioritized), Last.fm API, and community listening stats to surface viral tracks at the top of search"
+        ),
         "11.5.3" to listOf(
             "⚡ High-Speed Search Caching: Added instant in-memory search caching with 60s freshness to make repeat and backspace queries instantaneous",
             "🔍 Smart Fuzzy Search: Resilient spelling mistake tolerance for song titles and artists without returning fabricated results",

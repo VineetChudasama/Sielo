@@ -12,6 +12,8 @@ import com.sielo.music.core.network.models.SieloAlbum
 import com.sielo.music.core.network.models.SieloTrack
 import com.sielo.music.core.playlist.UserPlaylist
 import com.sielo.music.core.playlist.UserPlaylistsRepository
+import com.sielo.music.core.audio.OfflineCacheManager
+import com.sielo.music.core.network.innertube.InnerTubeClient
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -27,11 +29,49 @@ class SongActionsViewModel @Inject constructor(
     private val favoriteTrackDao: FavoriteTrackDao,
     private val playlistsRepository: UserPlaylistsRepository,
     private val listeningEventDispatcher: com.sielo.music.core.recommendations.events.ListeningEventDispatcher,
+    private val innerTubeClient: InnerTubeClient,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
 
     val playlists: StateFlow<List<UserPlaylist>> = playlistsRepository.playlists
     val favorites: Flow<List<FavoriteTrackEntity>> = favoriteTrackDao.getAllFavorites()
+
+    fun isOfflineCached(trackId: String): Boolean {
+        return OfflineCacheManager.isCached(context, trackId)
+    }
+
+    fun toggleOfflineCache(track: SieloTrack) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val cached = OfflineCacheManager.isCached(context, track.id)
+            if (cached) {
+                OfflineCacheManager.removeTrack(context, track.id)
+                launch(Dispatchers.Main) {
+                    Toast.makeText(context, "Removed from offline cache", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                launch(Dispatchers.Main) {
+                    Toast.makeText(context, "Downloading for offline play...", Toast.LENGTH_SHORT).show()
+                }
+                try {
+                    val url = innerTubeClient.getStreamUrl(track.id, track.title, track.artist)
+                    if (!url.isNullOrBlank()) {
+                        OfflineCacheManager.downloadFully(context, track, url)
+                        launch(Dispatchers.Main) {
+                            Toast.makeText(context, "Downloaded for offline replay", Toast.LENGTH_SHORT).show()
+                        }
+                    } else {
+                        launch(Dispatchers.Main) {
+                            Toast.makeText(context, "Could not resolve stream to download", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                } catch (e: Exception) {
+                    launch(Dispatchers.Main) {
+                        Toast.makeText(context, "Download failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
+    }
 
     fun isFavorite(trackId: String): Flow<Boolean> = favoriteTrackDao.isFavorite(trackId)
 
