@@ -461,14 +461,19 @@ class MainActivity : ComponentActivity() {
                             }
                         )
                     }
-                    // App update available popup (throttled once every 24hr, with Remind Me Later and Update Now)
+                    // App update available popup (with in-app downloading, live progress, and restart app)
                     availableUpdateVersion?.let { newVer ->
                         if (!showLaunchReveal && !isAuthDialogOpen && !isOnboardingOpen) {
                             val context = androidx.compose.ui.platform.LocalContext.current
+                            val updateDownloadState by appUpdateManager.downloadState.collectAsState()
                             com.sielo.music.ui.components.AppUpdateDialog(
                                 newVersion = newVer,
+                                downloadState = updateDownloadState,
+                                onStartDownload = { appUpdateManager.startDownload(newVer) },
+                                onCancelDownload = { appUpdateManager.cancelDownload() },
+                                onInstallAndRestart = { appUpdateManager.installAndRestart(context) },
                                 onRemindLater = { appUpdateManager.remindMeLater() },
-                                onUpdateNow = { appUpdateManager.updateNow(context) }
+                                onOpenWebsite = { appUpdateManager.openWebsite(context) }
                             )
                         }
                     }
