@@ -21,7 +21,8 @@ class UserManager @Inject constructor(
     @ApplicationContext private val context: Context,
     private val databaseCleaner: com.sielo.music.core.database.DatabaseCleaner,
     private val playerManager: com.sielo.music.core.audio.PlayerManager,
-    private val cloudSyncManager: com.sielo.music.core.sync.CloudSyncManager
+    private val cloudSyncManager: com.sielo.music.core.sync.CloudSyncManager,
+    private val listeningEventDispatcher: com.sielo.music.core.recommendations.events.ListeningEventDispatcher
 ) {
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true }
@@ -44,6 +45,9 @@ class UserManager @Inject constructor(
     }
 
     init {
+        listeningEventDispatcher.currentUserIdProvider = {
+            _currentUser.value?.id ?: "guest"
+        }
         restoreSession()
     }
 

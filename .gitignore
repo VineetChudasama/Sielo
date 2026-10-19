@@ -1,4 +1,4 @@
-﻿*.iml
+*.iml
 .gradle
 /local.properties
 /.idea
@@ -8,8 +8,8 @@
 .kotlin
 hs_err_*.log
 replay_pid*.log
-*.py
 captures/
+/*.py
 .externalNativeBuild
 .cxx
 *.apk

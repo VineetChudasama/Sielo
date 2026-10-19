@@ -63,7 +63,8 @@ class PlayerManager @Inject constructor(
     private val favoriteTrackDao: FavoriteTrackDao,
     private val recommendationHistoryDao: RecommendationHistoryDao,
     private val autoplayQueueEngine: AutoplayQueueEngine,
-    private val autoplaySession: AutoplaySession
+    private val autoplaySession: AutoplaySession,
+    private val listeningEventDispatcher: com.sielo.music.core.recommendations.events.ListeningEventDispatcher
 ) {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true }
     private val _playbackState = MutableStateFlow(PlaybackState())
@@ -113,6 +114,10 @@ class PlayerManager @Inject constructor(
     private val repeatPlayCount = mutableMapOf<String, Int>()
 
     var isPrivateListeningEnabled: Boolean = false
+        set(value) {
+            field = value
+            listeningEventDispatcher.isPrivateListeningEnabled = value
+        }
     var isAutoplayEnabled: Boolean = true
 
     var onTrackPlayedTasteListener: ((artist: String, albumOrGenre: String?) -> Unit)? = null
@@ -428,6 +433,7 @@ class PlayerManager @Inject constructor(
                     lastDbFlushTimestamp = System.currentTimeMillis()
 
                     val expectedDurationMs = if (nextTrack.durationSeconds > 0) nextTrack.durationSeconds * 1000L else 0L
+                    listeningEventDispatcher.recordPlayStarted(nextTrack, currentQueueScope.name.lowercase())
                     _playbackState.update {
                         it.copy(
                             currentTrack = nextTrack,
@@ -687,6 +693,7 @@ class PlayerManager @Inject constructor(
 
                         if (autoPlay) {
                             activeCtrl.play()
+                            listeningEventDispatcher.recordPlayStarted(track, currentQueueScope.name.lowercase())
                         } else {
                             activeCtrl.pause()
                         }
@@ -1038,6 +1045,11 @@ class PlayerManager @Inject constructor(
             currentEventId = null
             return
         }
+        listeningEventDispatcher.recordProgressCheckpoint(
+            track = track,
+            positionMs = currentTrackAccumulatedPlayedMs,
+            source = currentQueueScope.name.lowercase()
+        )
         scope.launch(Dispatchers.IO) {
             try {
                 recommendationHistoryDao.markRecommended(listOf(track.id), today)
@@ -1072,6 +1084,11 @@ class PlayerManager @Inject constructor(
         }
         val count = repeatPlayCount.getOrDefault(track.id, 0)
         repeatPlayCount[track.id] = count + 1
+        listeningEventDispatcher.recordPlayCompleted(
+            track = track,
+            durationMs = currentTrackAccumulatedPlayedMs,
+            source = currentQueueScope.name.lowercase()
+        )
     }
 
     private fun getPlayThresholdMs(track: SieloTrack? = currentTrackingTrack ?: _playbackState.value.currentTrack): Long {
@@ -1189,6 +1206,14 @@ class PlayerManager @Inject constructor(
             mediaController?.pause()
         } catch (_: Exception) {}
 
+        if (current != null) {
+            listeningEventDispatcher.recordSkipped(
+                track = current,
+                positionMs = playedMs,
+                source = currentQueueScope.name.lowercase()
+            )
+        }
+
         // Behavioral analysis on the song: Did user quickly skip this song?
         if (current != null && playedMs < 25_000L) {
             // Track skipped in less than 25 seconds -> penalize this specific song only (never the artist)
@@ -1283,6 +1308,15 @@ class PlayerManager @Inject constructor(
             seekTo(0L)
             play()
             return
+        }
+
+        val cur = currentState.currentTrack
+        if (cur != null) {
+            listeningEventDispatcher.recordSkipped(
+                track = cur,
+                positionMs = currentPosition,
+                source = currentQueueScope.name.lowercase()
+            )
         }
 
         val prevIndex = currentState.queueIndex - 1

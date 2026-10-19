@@ -26,6 +26,7 @@ class SongActionsViewModel @Inject constructor(
     private val playerManager: PlayerManager,
     private val favoriteTrackDao: FavoriteTrackDao,
     private val playlistsRepository: UserPlaylistsRepository,
+    private val listeningEventDispatcher: com.sielo.music.core.recommendations.events.ListeningEventDispatcher,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
 
@@ -54,6 +55,7 @@ class SongActionsViewModel @Inject constructor(
                 val isFav = favoriteTrackDao.isFavorite(track.id).first()
                 if (isFav) {
                     favoriteTrackDao.deleteById(track.id)
+                    listeningEventDispatcher.recordUnliked(track)
                     launch(Dispatchers.Main) {
                         Toast.makeText(context, "Removed from Liked Songs", Toast.LENGTH_SHORT).show()
                     }
@@ -66,6 +68,7 @@ class SongActionsViewModel @Inject constructor(
                             thumbnailUrl = track.thumbnailUrl
                         )
                     )
+                    listeningEventDispatcher.recordLiked(track)
                     launch(Dispatchers.Main) {
                         Toast.makeText(context, "Added to Liked Songs", Toast.LENGTH_SHORT).show()
                     }
@@ -78,6 +81,7 @@ class SongActionsViewModel @Inject constructor(
 
     fun addToPlaylist(playlistId: String, track: SieloTrack, playlistTitle: String = "") {
         playlistsRepository.addTrackToPlaylist(playlistId, track)
+        listeningEventDispatcher.recordPlaylistAdded(track, playlistId)
         val msg = if (playlistTitle.isNotBlank()) "Added to $playlistTitle" else "Added to playlist"
         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
     }
@@ -89,6 +93,7 @@ class SongActionsViewModel @Inject constructor(
             coverUrl = track.thumbnailUrl
         )
         playlistsRepository.addTrackToPlaylist(newPlaylist.id, track)
+        listeningEventDispatcher.recordPlaylistAdded(track, newPlaylist.id)
         Toast.makeText(context, "Created & added to ${newPlaylist.title}", Toast.LENGTH_SHORT).show()
         return newPlaylist
     }

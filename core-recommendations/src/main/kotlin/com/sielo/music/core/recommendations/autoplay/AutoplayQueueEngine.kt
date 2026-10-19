@@ -18,7 +18,8 @@ import kotlin.math.roundToInt
 class AutoplayQueueEngine @Inject constructor(
     private val candidatePoolBuilder: CandidatePoolBuilder,
     private val recommendationHistoryDao: RecommendationHistoryDao,
-    private val similarArtistsRepository: SimilarArtistsRepository
+    private val similarArtistsRepository: SimilarArtistsRepository,
+    private val recommendationRepository: com.sielo.music.core.recommendations.repository.RecommendationRepository? = null
 ) {
 
     companion object {
@@ -42,12 +43,13 @@ class AutoplayQueueEngine @Inject constructor(
         batchSize: Int = DEFAULT_BATCH_SIZE
     ): List<SieloTrack> = withContext(Dispatchers.IO) {
         val today = LocalDate.now(ZoneId.systemDefault()).toString()
+        val hardExcluded = excludedSongIds + seedSong.id
 
-        // 1. Build all 3 candidate pools via CandidatePoolBuilder using the new seed
-        val candidatePools = candidatePoolBuilder.buildCandidatePools(seedSong, today)
+        // 1. Build candidate pools via RecommendationRepository (Hybrid Backend + Local Fallback)
+        val candidatePools = recommendationRepository?.getHybridCandidates(seedSong, today, hardExcluded, batchSize)
+            ?: candidatePoolBuilder.buildCandidatePools(seedSong, today)
 
         // 2. Remove any song in excludedSongIds from all pools (hard exclusion)
-        val hardExcluded = excludedSongIds + seedSong.id
         val poolA = candidatePools.poolA.filter { it.id !in hardExcluded }.distinctBy { it.id }
         var poolB = candidatePools.poolB.filter { it.id !in hardExcluded }.distinctBy { it.id }
         val poolC = candidatePools.poolC.filter { it.id !in hardExcluded }.distinctBy { it.id }
