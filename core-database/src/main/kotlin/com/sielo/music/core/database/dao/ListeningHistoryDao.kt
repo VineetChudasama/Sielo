@@ -179,7 +179,7 @@ interface ListeningHistoryDao {
     suspend fun getTopSongsSnapshot(sinceMs: Long, limit: Int = 30): List<SongStat>
 
     @Query("SELECT * FROM listening_history ORDER BY timestampMs DESC LIMIT :limit")
-    suspend fun getAllHistoryList(limit: Int = 300): List<ListeningEventEntity>
+    suspend fun getAllHistoryList(limit: Int = 1500): List<ListeningEventEntity>
 
     @Query("SELECT timestampMs FROM listening_history")
     suspend fun getAllTimestamps(): List<Long>

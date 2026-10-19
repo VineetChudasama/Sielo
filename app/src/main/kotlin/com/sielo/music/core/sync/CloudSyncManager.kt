@@ -55,6 +55,7 @@ class CloudSyncManager @Inject constructor(
         private const val DOC_PLAYLISTS = "playlists"
         private const val DOC_HISTORY = "history"
         private const val DOC_SEARCH_HISTORY = "search_history"
+        private const val DOC_STATS = "stats"
     }
 
     init {
@@ -146,9 +147,9 @@ class CloudSyncManager @Inject constructor(
                 }
         }
 
-        // Automatically sync listening history to cloud when songs are played / history changes
+        // Automatically sync listening history and stats to cloud when songs are played / history changes
         scope.launch {
-            listeningHistoryDao.getRecentHistory(limit = 100)
+            listeningHistoryDao.getRecentHistory(limit = 1500)
                 .collectLatest { history ->
                     if (isRestoring) return@collectLatest
                     val user = currentUserProvider?.invoke() ?: return@collectLatest
@@ -157,39 +158,7 @@ class CloudSyncManager @Inject constructor(
                     if (history.isEmpty()) return@collectLatest
 
                     delay(4000L) // debounce track progress / completion updates
-                    try {
-                        ensureAuthenticated()
-                        val eventsData = history.take(200).map { ev ->
-                            mapOf(
-                                "songId" to ev.songId,
-                                "songTitle" to ev.songTitle,
-                                "artistName" to ev.artistName,
-                                "albumName" to (ev.albumName ?: ""),
-                                "thumbnailUrl" to (ev.thumbnailUrl ?: ""),
-                                "timestampMs" to ev.timestampMs,
-                                "durationPlayedMs" to ev.durationPlayedMs,
-                                "songDurationMs" to ev.songDurationMs,
-                                "hourOfDay" to ev.hourOfDay,
-                                "dayOfWeek" to ev.dayOfWeek,
-                                "month" to ev.month,
-                                "year" to ev.year,
-                                "completed" to ev.completed
-                            )
-                        }
-                        val userRef = firestore.collection(COLLECTION_USERS).document(email)
-                        userRef.collection("data").document(DOC_HISTORY)
-                            .set(
-                                mapOf(
-                                    "events" to eventsData,
-                                    "updatedAt" to System.currentTimeMillis()
-                                ),
-                                SetOptions.merge()
-                            )
-                            .await()
-                        Log.d(TAG, "Auto-synced ${eventsData.size} listening events for $email")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Live listening history auto-sync error: ${e.message}")
-                    }
+                    syncListeningHistoryToCloud(email, limit = 1500)
                 }
         }
 
@@ -335,57 +304,8 @@ class CloudSyncManager @Inject constructor(
                     .await()
             }
 
-            // 4. Listening History document (merge local and existing cloud events to guarantee 0 loss)
-            val currentHistory = listeningHistoryDao.getAllHistoryList(limit = 300)
-            if (currentHistory.isNotEmpty()) {
-                val existingCloudEvents: List<Map<String, Any>> = try {
-                    val doc = userRef.collection("data").document(DOC_HISTORY).get().await()
-                    if (doc.exists()) {
-                        @Suppress("UNCHECKED_CAST")
-                        (doc.get("events") as? List<Map<String, Any>>) ?: emptyList()
-                    } else emptyList()
-                } catch (_: Exception) {
-                    emptyList()
-                }
-
-                val localEventsData = currentHistory.map { ev ->
-                    mapOf(
-                        "songId" to ev.songId,
-                        "songTitle" to ev.songTitle,
-                        "artistName" to ev.artistName,
-                        "albumName" to (ev.albumName ?: ""),
-                        "thumbnailUrl" to (ev.thumbnailUrl ?: ""),
-                        "timestampMs" to ev.timestampMs,
-                        "durationPlayedMs" to ev.durationPlayedMs,
-                        "songDurationMs" to ev.songDurationMs,
-                        "hourOfDay" to ev.hourOfDay,
-                        "dayOfWeek" to ev.dayOfWeek,
-                        "month" to ev.month,
-                        "year" to ev.year,
-                        "completed" to ev.completed
-                    )
-                }
-
-                val mergedEvents = (localEventsData + existingCloudEvents)
-                    .distinctBy {
-                        val sId = it["songId"] as? String ?: ""
-                        val tMs = (it["timestampMs"] as? Number)?.toLong() ?: 0L
-                        "${sId}_${tMs}"
-                    }
-                    .sortedByDescending { (it["timestampMs"] as? Number)?.toLong() ?: 0L }
-                    .take(300)
-
-                userRef.collection("data").document(DOC_HISTORY)
-                    .set(
-                        mapOf(
-                            "events" to mergedEvents,
-                            "updatedAt" to System.currentTimeMillis()
-                        ),
-                        SetOptions.merge()
-                    )
-                    .await()
-                Log.i(TAG, "Successfully backed up ${mergedEvents.size} listening events for $cleanEmail")
-            }
+            // 4. Listening History document & account stats (merge local and existing cloud events to guarantee 0 loss)
+            syncListeningHistoryToCloud(cleanEmail, limit = 1500)
 
             // 5. Search History document
             val searchHistory = searchHistoryDao.getAllSearchQueries()
@@ -559,57 +479,8 @@ class CloudSyncManager @Inject constructor(
                 Log.w(TAG, "Error restoring playlists: ${plErr.message}")
             }
 
-            // 4. Fetch Listening History document & restore into local database
-            try {
-                val historyDoc = userRef.collection("data").document(DOC_HISTORY).get().await()
-                if (historyDoc.exists()) {
-                    @Suppress("UNCHECKED_CAST")
-                    val eventsListRaw = historyDoc.get("events") as? List<Map<String, Any>>
-                    if (!eventsListRaw.isNullOrEmpty()) {
-                        val existingTimestamps = listeningHistoryDao.getAllTimestamps().toSet()
-                        val entities = eventsListRaw.mapNotNull { item ->
-                            val songId = item["songId"] as? String ?: return@mapNotNull null
-                            val songTitle = item["songTitle"] as? String ?: ""
-                            val artistName = item["artistName"] as? String ?: ""
-                            val albumName = (item["albumName"] as? String)?.takeIf { it.isNotBlank() }
-                            val thumbnailUrl = (item["thumbnailUrl"] as? String)?.takeIf { it.isNotBlank() }
-                            val timestampMs = (item["timestampMs"] as? Number)?.toLong() ?: return@mapNotNull null
-                            val durationPlayedMs = (item["durationPlayedMs"] as? Number)?.toLong() ?: 0L
-                            val songDurationMs = (item["songDurationMs"] as? Number)?.toLong() ?: 0L
-                            val hourOfDay = (item["hourOfDay"] as? Number)?.toInt() ?: 0
-                            val dayOfWeek = (item["dayOfWeek"] as? Number)?.toInt() ?: 1
-                            val month = (item["month"] as? Number)?.toInt() ?: 0
-                            val year = (item["year"] as? Number)?.toInt() ?: 2026
-                            val completed = item["completed"] as? Boolean ?: false
-
-                            ListeningEventEntity(
-                                eventId = 0,
-                                songId = songId,
-                                songTitle = songTitle,
-                                artistName = artistName,
-                                albumName = albumName,
-                                thumbnailUrl = thumbnailUrl,
-                                timestampMs = timestampMs,
-                                durationPlayedMs = durationPlayedMs,
-                                songDurationMs = songDurationMs,
-                                hourOfDay = hourOfDay,
-                                dayOfWeek = dayOfWeek,
-                                month = month,
-                                year = year,
-                                completed = completed
-                            )
-                        }.filterNot { it.timestampMs in existingTimestamps }
-                         .distinctBy { "${it.songId}_${it.timestampMs}" }
-
-                        if (entities.isNotEmpty()) {
-                            listeningHistoryDao.insertEvents(entities)
-                            Log.i(TAG, "Restored ${entities.size} listening events for $cleanEmail into local database")
-                        }
-                    }
-                }
-            } catch (histErr: Exception) {
-                Log.w(TAG, "Error restoring listening history: ${histErr.message}")
-            }
+            // 4. Fetch Listening History document & account stats, restoring into local DB & cloud
+            syncListeningHistoryToCloud(cleanEmail, limit = 1500)
 
             // 5. Fetch Search History document & restore into local database
             try {
@@ -642,6 +513,145 @@ class CloudSyncManager @Inject constructor(
             null
         } finally {
             isRestoring = false
+        }
+    }
+
+    /**
+     * Synchronizes listening history and lifetime statistics between local SQLite Room database and Firestore cloud.
+     * Guarantees 0-loss bi-directional sync:
+     * - Restores any cloud events played on another device into local Room DB.
+     * - Merges local events with cloud events, deduplicating and sorting.
+     * - Pushes the full merged list to Firestore DOC_HISTORY.
+     * - Computes and updates account-level lifetime statistics in Firestore DOC_STATS.
+     */
+    suspend fun syncListeningHistoryToCloud(email: String, limit: Int = 1500) {
+        val cleanEmail = email.trim().lowercase()
+        if (cleanEmail.isBlank() || cleanEmail.endsWith("@sielo.local")) return
+
+        try {
+            ensureAuthenticated()
+            val userRef = firestore.collection(COLLECTION_USERS).document(cleanEmail)
+
+            // 1. Fetch existing cloud events
+            val existingCloudEvents: List<Map<String, Any>> = try {
+                val doc = userRef.collection("data").document(DOC_HISTORY).get().await()
+                if (doc.exists()) {
+                    @Suppress("UNCHECKED_CAST")
+                    (doc.get("events") as? List<Map<String, Any>>) ?: emptyList()
+                } else emptyList()
+            } catch (_: Exception) {
+                emptyList()
+            }
+
+            // 2. Fetch local events
+            val currentHistory = listeningHistoryDao.getAllHistoryList(limit = limit)
+
+            // If both local and cloud are empty, nothing to sync
+            if (currentHistory.isEmpty() && existingCloudEvents.isEmpty()) return
+
+            val localEventsData = currentHistory.map { ev ->
+                mapOf(
+                    "songId" to ev.songId,
+                    "songTitle" to ev.songTitle,
+                    "artistName" to ev.artistName,
+                    "albumName" to (ev.albumName ?: ""),
+                    "thumbnailUrl" to (ev.thumbnailUrl ?: ""),
+                    "timestampMs" to ev.timestampMs,
+                    "durationPlayedMs" to ev.durationPlayedMs,
+                    "songDurationMs" to ev.songDurationMs,
+                    "hourOfDay" to ev.hourOfDay,
+                    "dayOfWeek" to ev.dayOfWeek,
+                    "month" to ev.month,
+                    "year" to ev.year,
+                    "completed" to ev.completed
+                )
+            }
+
+            // 3. Two-way sync: If cloud has events missing locally, restore them into local DB
+            if (existingCloudEvents.isNotEmpty()) {
+                val existingTimestamps = listeningHistoryDao.getAllTimestamps().toSet()
+                val missingFromLocal = existingCloudEvents.mapNotNull { item ->
+                    val songId = item["songId"] as? String ?: return@mapNotNull null
+                    val songTitle = item["songTitle"] as? String ?: ""
+                    val artistName = item["artistName"] as? String ?: ""
+                    val albumName = (item["albumName"] as? String)?.takeIf { it.isNotBlank() }
+                    val thumbnailUrl = (item["thumbnailUrl"] as? String)?.takeIf { it.isNotBlank() }
+                    val timestampMs = (item["timestampMs"] as? Number)?.toLong() ?: return@mapNotNull null
+                    val durationPlayedMs = (item["durationPlayedMs"] as? Number)?.toLong() ?: 0L
+                    val songDurationMs = (item["songDurationMs"] as? Number)?.toLong() ?: 0L
+                    val hourOfDay = (item["hourOfDay"] as? Number)?.toInt() ?: 0
+                    val dayOfWeek = (item["dayOfWeek"] as? Number)?.toInt() ?: 1
+                    val month = (item["month"] as? Number)?.toInt() ?: 0
+                    val year = (item["year"] as? Number)?.toInt() ?: 2026
+                    val completed = item["completed"] as? Boolean ?: false
+
+                    ListeningEventEntity(
+                        eventId = 0,
+                        songId = songId,
+                        songTitle = songTitle,
+                        artistName = artistName,
+                        albumName = albumName,
+                        thumbnailUrl = thumbnailUrl,
+                        timestampMs = timestampMs,
+                        durationPlayedMs = durationPlayedMs,
+                        songDurationMs = songDurationMs,
+                        hourOfDay = hourOfDay,
+                        dayOfWeek = dayOfWeek,
+                        month = month,
+                        year = year,
+                        completed = completed
+                    )
+                }.filterNot { it.timestampMs in existingTimestamps }
+                 .distinctBy { "${it.songId}_${it.timestampMs}" }
+
+                if (missingFromLocal.isNotEmpty()) {
+                    listeningHistoryDao.insertEvents(missingFromLocal)
+                    Log.i(TAG, "Bi-directional sync inserted ${missingFromLocal.size} cloud events into local DB for $cleanEmail")
+                }
+            }
+
+            // 4. Merge local + cloud events for cloud snapshot
+            val mergedEvents = (localEventsData + existingCloudEvents)
+                .distinctBy {
+                    val sId = it["songId"] as? String ?: ""
+                    val tMs = (it["timestampMs"] as? Number)?.toLong() ?: 0L
+                    "${sId}_${tMs}"
+                }
+                .sortedByDescending { (it["timestampMs"] as? Number)?.toLong() ?: 0L }
+                .take(limit)
+
+            userRef.collection("data").document(DOC_HISTORY)
+                .set(
+                    mapOf(
+                        "events" to mergedEvents,
+                        "updatedAt" to System.currentTimeMillis()
+                    ),
+                    SetOptions.merge()
+                )
+                .await()
+
+            // 5. Update DOC_STATS document with account-level lifetime statistics
+            val totalDurationMs = mergedEvents.sumOf { (it["durationPlayedMs"] as? Number)?.toLong() ?: 0L }
+            val totalStreams = mergedEvents.size
+            val uniqueSongs = mergedEvents.mapNotNull { it["songId"] as? String }.distinct().size
+            val uniqueArtists = mergedEvents.mapNotNull { it["artistName"] as? String }.distinct().size
+
+            userRef.collection("data").document(DOC_STATS)
+                .set(
+                    mapOf(
+                        "totalListeningTimeMs" to totalDurationMs,
+                        "totalStreams" to totalStreams,
+                        "uniqueSongsCount" to uniqueSongs,
+                        "uniqueArtistsCount" to uniqueArtists,
+                        "lastSyncedAt" to System.currentTimeMillis()
+                    ),
+                    SetOptions.merge()
+                )
+                .await()
+
+            Log.i(TAG, "Successfully synced ${mergedEvents.size} events and stats for $cleanEmail")
+        } catch (e: Exception) {
+            Log.w(TAG, "Error syncing listening history and stats for $cleanEmail: ${e.message}")
         }
     }
 }

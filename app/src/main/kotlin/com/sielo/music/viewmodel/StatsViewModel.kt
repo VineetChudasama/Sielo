@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 enum class StatsTimeframe(val label: String, val days: Int) {
@@ -29,11 +30,34 @@ enum class StatsTimeframe(val label: String, val days: Int) {
 @HiltViewModel
 class StatsViewModel @Inject constructor(
     private val listeningHistoryDao: ListeningHistoryDao,
-    private val playerManager: PlayerManager
+    private val playerManager: PlayerManager,
+    private val cloudSyncManager: com.sielo.music.core.sync.CloudSyncManager,
+    private val userManager: com.sielo.music.core.auth.UserManager
 ) : ViewModel() {
 
     private val _selectedTimeframe = MutableStateFlow(StatsTimeframe.MONTH_1)
     val selectedTimeframe: StateFlow<StatsTimeframe> = _selectedTimeframe.asStateFlow()
+
+    init {
+        // Automatically sync account listening history & lifetime stats on screen entry
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val email = userManager.currentUser.value?.email?.trim()?.lowercase()
+            if (!email.isNullOrBlank() && !email.endsWith("@sielo.local")) {
+                cloudSyncManager.ensureAuthenticated()
+                cloudSyncManager.restoreUserData(email)
+            }
+        }
+    }
+
+    fun refreshStats() {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val email = userManager.currentUser.value?.email?.trim()?.lowercase()
+            if (!email.isNullOrBlank() && !email.endsWith("@sielo.local")) {
+                cloudSyncManager.ensureAuthenticated()
+                cloudSyncManager.restoreUserData(email)
+            }
+        }
+    }
 
     fun selectTimeframe(timeframe: StatsTimeframe) {
         _selectedTimeframe.value = timeframe

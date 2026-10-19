@@ -43,7 +43,8 @@ class ProfileViewModel @Inject constructor(
     val userManager: com.sielo.music.core.auth.UserManager,
     private val playerManager: PlayerManager,
     private val innerTubeClient: InnerTubeClient,
-    private val musicMetadataRepository: com.sielo.music.core.network.metadata.MusicMetadataRepository
+    private val musicMetadataRepository: com.sielo.music.core.network.metadata.MusicMetadataRepository,
+    private val cloudSyncManager: com.sielo.music.core.sync.CloudSyncManager
 ) : ViewModel() {
 
     val currentUser = userManager.currentUser
@@ -98,6 +99,13 @@ class ProfileViewModel @Inject constructor(
     val favoriteArtists: StateFlow<List<SieloArtist>> = _favoriteArtists.asStateFlow()
 
     init {
+        viewModelScope.launch(Dispatchers.IO) {
+            val email = userManager.currentUser.value?.email?.trim()?.lowercase()
+            if (!email.isNullOrBlank() && !email.endsWith("@sielo.local")) {
+                cloudSyncManager.ensureAuthenticated()
+                cloudSyncManager.restoreUserData(email)
+            }
+        }
         viewModelScope.launch {
             currentUser.collect { user ->
                 val followed = user?.favoriteArtists ?: emptyList()
