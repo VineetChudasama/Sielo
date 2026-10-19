@@ -15,6 +15,8 @@ object WhatsNewChangelog {
      */
     val entries: Map<String, List<String>> = linkedMapOf(
         "11.5.4" to listOf(
+            "🚀 In-App Seamless Updates: Download new app versions directly within Sielo with live progress and one-tap install & restart, plus quick access via the official website",
+            "🔔 Home Screen Update Badge: A dedicated update indicator appears right beside search on your Home page whenever a newer version is ready",
             "💾 Dynamic Offline Cache Playlist: Dynamically generates and syncs the 'Downloaded Cache' playlist directly from your local vault, complete with live track counts and instant gapless replay",
             "⚡ Seamless Offline Playback: Songs you listen to are automatically cached in the background; the audio engine checks your local vault first for instant, zero-network, zero-data playback",
             "📥 Manual Offline Vault Control: Download any song for offline replay directly from the track action menu or remove individual cached items anytime",

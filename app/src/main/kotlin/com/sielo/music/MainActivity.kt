@@ -125,6 +125,8 @@ class MainActivity : ComponentActivity() {
                 val activeRoomState by listenTogetherViewModel.roomState.collectAsState()
                 val pendingRejoinSession by listenTogetherViewModel.pendingRejoinSession.collectAsState()
                 val availableUpdateVersion by appUpdateManager.availableUpdateVersion.collectAsState()
+                val showAutoPrompt by appUpdateManager.showAutoPrompt.collectAsState()
+                var userOpenedUpdateDialog by remember { mutableStateOf(false) }
                 val isInsideRoomScreen = currentRoute == Screen.ListenTogether.route && activeRoomState != null
                 var isPlayerExpanded by remember { mutableStateOf(false) }
                 var showLaunchReveal by remember { mutableStateOf(true) }
@@ -318,6 +320,8 @@ class MainActivity : ComponentActivity() {
                             HomeScreen(
                                 viewModel = homeViewModel,
                                 importViewModel = playlistImportViewModel,
+                                availableUpdateVersion = availableUpdateVersion,
+                                onOpenUpdateDialog = { userOpenedUpdateDialog = true },
                                 onNavigateToSearch = { navController.navigate(Screen.Search.route) },
                                 modifier = Modifier.fillMaxSize()
                             )
@@ -462,24 +466,33 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     // App update available popup (with in-app downloading, live progress, and restart app)
-                    availableUpdateVersion?.let { newVer ->
-                        if (!showLaunchReveal && !isAuthDialogOpen && !isOnboardingOpen) {
-                            val context = androidx.compose.ui.platform.LocalContext.current
-                            val updateDownloadState by appUpdateManager.downloadState.collectAsState()
-                            com.sielo.music.ui.components.AppUpdateDialog(
-                                newVersion = newVer,
-                                downloadState = updateDownloadState,
-                                onStartDownload = { appUpdateManager.startDownload(newVer) },
-                                onCancelDownload = { appUpdateManager.cancelDownload() },
-                                onInstallAndRestart = { appUpdateManager.installAndRestart(context) },
-                                onRemindLater = { appUpdateManager.remindMeLater() },
-                                onOpenWebsite = { appUpdateManager.openWebsite(context) }
-                            )
-                        }
+                    val isUpdateDialogOpen = (showAutoPrompt || userOpenedUpdateDialog) && availableUpdateVersion != null
+                    if (isUpdateDialogOpen && !showLaunchReveal && !isAuthDialogOpen && !isOnboardingOpen) {
+                        val newVer = availableUpdateVersion!!
+                        val context = androidx.compose.ui.platform.LocalContext.current
+                        val updateDownloadState by appUpdateManager.downloadState.collectAsState()
+                        com.sielo.music.ui.components.AppUpdateDialog(
+                            newVersion = newVer,
+                            downloadState = updateDownloadState,
+                            onStartDownload = { appUpdateManager.startDownload(newVer) },
+                            onCancelDownload = { appUpdateManager.cancelDownload() },
+                            onInstallAndRestart = {
+                                userOpenedUpdateDialog = false
+                                appUpdateManager.installAndRestart(context)
+                            },
+                            onRemindLater = {
+                                userOpenedUpdateDialog = false
+                                appUpdateManager.remindMeLater()
+                            },
+                            onOpenWebsite = {
+                                userOpenedUpdateDialog = false
+                                appUpdateManager.openWebsite(context)
+                            }
+                        )
                     }
 
                     // What's New popup (shown once per version update, after all other blocking dialogs)
-                    if (showWhatsNewDialog && !showLaunchReveal && !isAuthDialogOpen && !isOnboardingOpen && availableUpdateVersion == null) {
+                    if (showWhatsNewDialog && !showLaunchReveal && !isAuthDialogOpen && !isOnboardingOpen && !isUpdateDialogOpen) {
                         com.sielo.music.ui.components.WhatsNewDialog(
                             version = com.sielo.music.BuildConfig.VERSION_NAME,
                             changes = whatsNewChanges,
@@ -491,7 +504,7 @@ class MainActivity : ComponentActivity() {
                     }
 
                     // Feedback popup
-                    if (showFeedbackPopup && !showLaunchReveal && !isAuthDialogOpen && !isOnboardingOpen && pendingRejoinSession == null && availableUpdateVersion == null && !showWhatsNewDialog) {
+                    if (showFeedbackPopup && !showLaunchReveal && !isAuthDialogOpen && !isOnboardingOpen && pendingRejoinSession == null && !isUpdateDialogOpen && !showWhatsNewDialog) {
                         val context = androidx.compose.ui.platform.LocalContext.current
                         com.sielo.music.ui.screens.FeedbackPopupDialog(
                             onDismiss = { neverShowAgain ->

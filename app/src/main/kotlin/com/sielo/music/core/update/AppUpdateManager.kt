@@ -59,9 +59,13 @@ class AppUpdateManager @Inject constructor(
         .followSslRedirects(true)
         .build()
 
-    // Holds the new version string if an update popup should be displayed, else null
+    // Holds the new version string if an update is available, else null
     private val _availableUpdateVersion = MutableStateFlow<String?>(null)
     val availableUpdateVersion: StateFlow<String?> = _availableUpdateVersion.asStateFlow()
+
+    // Controls whether the update popup should automatically display on launch
+    private val _showAutoPrompt = MutableStateFlow(false)
+    val showAutoPrompt: StateFlow<Boolean> = _showAutoPrompt.asStateFlow()
 
     // In-app download state
     private val _downloadState = MutableStateFlow<UpdateDownloadState>(UpdateDownloadState.Idle)
@@ -79,15 +83,6 @@ class AppUpdateManager @Inject constructor(
     fun checkForUpdates() {
         scope.launch {
             try {
-                val now = System.currentTimeMillis()
-                val lastPromptTime = prefs.getLong(KEY_LAST_UPDATE_PROMPT_TIME, 0L)
-                val hasElapsed24Hours = (now - lastPromptTime) >= REMIND_DELAY_MS
-
-                if (!hasElapsed24Hours) {
-                    Log.d(TAG, "Update check skipped: 24hr throttle active. Next prompt after ${((REMIND_DELAY_MS - (now - lastPromptTime)) / 3600000)}h")
-                    return@launch
-                }
-
                 val remoteVersion = fetchLatestVersionFromWebsite() ?: return@launch
                 val currentVersion = BuildConfig.VERSION_NAME
 
@@ -104,6 +99,14 @@ class AppUpdateManager @Inject constructor(
                         _downloadState.value = UpdateDownloadState.Idle
                     }
                     _availableUpdateVersion.value = remoteVersion
+
+                    val now = System.currentTimeMillis()
+                    val lastPromptTime = prefs.getLong(KEY_LAST_UPDATE_PROMPT_TIME, 0L)
+                    val hasElapsed24Hours = (now - lastPromptTime) >= REMIND_DELAY_MS
+
+                    if (hasElapsed24Hours) {
+                        _showAutoPrompt.value = true
+                    }
                 } else {
                     Log.d(TAG, "App is up to date ($currentVersion >= $remoteVersion)")
                 }
@@ -111,6 +114,10 @@ class AppUpdateManager @Inject constructor(
                 Log.w(TAG, "Failed to check for app updates: ${e.message}")
             }
         }
+    }
+
+    fun dismissAutoPrompt() {
+        _showAutoPrompt.value = false
     }
 
     private suspend fun fetchLatestVersionFromWebsite(): String? = withContext(Dispatchers.IO) {
@@ -399,7 +406,7 @@ class AppUpdateManager @Inject constructor(
      */
     fun remindMeLater() {
         prefs.edit().putLong(KEY_LAST_UPDATE_PROMPT_TIME, System.currentTimeMillis()).apply()
-        _availableUpdateVersion.value = null
+        _showAutoPrompt.value = false
         cancelDownload()
     }
 
@@ -408,7 +415,7 @@ class AppUpdateManager @Inject constructor(
      */
     fun openWebsite(activityContext: Context) {
         prefs.edit().putLong(KEY_LAST_UPDATE_PROMPT_TIME, System.currentTimeMillis()).apply()
-        _availableUpdateVersion.value = null
+        _showAutoPrompt.value = false
         try {
             val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(UPDATE_WEBSITE_URL)).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

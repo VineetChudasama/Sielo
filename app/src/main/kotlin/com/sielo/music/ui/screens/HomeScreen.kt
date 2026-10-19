@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -97,6 +98,8 @@ import com.sielo.music.viewmodel.PlaylistImportViewModel
 fun HomeScreen(
     viewModel: HomeViewModel,
     importViewModel: PlaylistImportViewModel? = null,
+    availableUpdateVersion: String? = null,
+    onOpenUpdateDialog: () -> Unit = {},
     onNavigateToSearch: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -371,13 +374,37 @@ fun HomeScreen(
                             letterSpacing = 1.sp
                         )
 
-                        IconButton(onClick = onNavigateToSearch) {
-                            Icon(
-                                imageVector = Icons.Default.Search,
-                                contentDescription = "Search",
-                                tint = PaletteCream,
-                                modifier = Modifier.size(26.dp)
-                            )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            if (!availableUpdateVersion.isNullOrBlank()) {
+                                IconButton(onClick = onOpenUpdateDialog) {
+                                    Box(contentAlignment = Alignment.TopEnd) {
+                                        Icon(
+                                            imageVector = Icons.Default.SystemUpdate,
+                                            contentDescription = "New Version Available",
+                                            tint = PaletteSand,
+                                            modifier = Modifier.size(24.dp)
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .size(8.dp)
+                                                .clip(CircleShape)
+                                                .background(PaletteSageGreen)
+                                        )
+                                    }
+                                }
+                            }
+
+                            IconButton(onClick = onNavigateToSearch) {
+                                Icon(
+                                    imageVector = Icons.Default.Search,
+                                    contentDescription = "Search",
+                                    tint = PaletteCream,
+                                    modifier = Modifier.size(26.dp)
+                                )
+                            }
                         }
                     }
                     Spacer(modifier = Modifier.height(10.dp))

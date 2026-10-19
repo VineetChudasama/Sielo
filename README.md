@@ -73,9 +73,24 @@ What sets **Sielo** apart from typical streaming clients:
 - **Circadian Flow Waveform**: Visual breakdown of your listening activity curves across morning, afternoon, evening, and night.
 - **Taste Persona Radar**: Aesthetic dimensional breakdown measuring your musical habits across *Mood*, *Energy*, *Genre Diversity*, and *Consistency*.
 
-### 10. ☁️ Account Sync & "What's New" Dialog
-- **Cross-Device Cloud Backup**: Secure login with Firebase Auth (Google Sign-In, Email/Password) and automatic cloud backup for your library, favorites, and playlists.
-- **What's New Changelog**: Highlights latest features and enhancements on first launch after each version update.
+### 10. 🚀 In-App Seamless Updates & Direct Website Access
+- **In-App APK Downloader**: Download new app releases directly inside Sielo with real-time transfer progress, cancellation support, and a single-tap "Install & Restart App" workflow.
+- **Home Screen Update Indicator**: A subtle, non-intrusive update badge appears directly beside the search icon in the top-right header whenever a new version is available.
+- **Direct Official Website Access**: Direct link to [www.sielo.site](https://www.sielo.site) embedded right inside the update dialog so users can download or explore anytime.
+
+### 11. 💾 Dynamic Offline Cache Playlist & Local Audio Vault
+- **Dynamic Downloaded Cache Playlist**: Automatically aggregates all cached songs in your local storage into a dynamic "Downloaded Cache" playlist with instant gapless replay.
+- **Zero-Network Engine Prioritization**: Audio engine checks the local vault first before making network calls, enabling seamless instant playback with zero data usage.
+- **Manual Vault Management**: Cache any song on demand via track action sheets or remove individual items anytime.
+
+### 12. ☁️ Account-Level Cloud Synchronization & Continuous Stats Protection
+- **Cross-Device Cloud Sync**: Seamlessly syncs user profiles, playlists, liked tracks, listening history, lifetime stream stats, and taste profiles with Cloud Firestore.
+- **Multi-Device & Account Switch Persistence**: Switching accounts or logging in from a different device never resets or overwrites your stats or listening history.
+- **Continuous 3-Minute Interval Sync**: Automatic background worker continuously synchronizes listening metrics and stats to ensure zero data loss.
+
+### 13. 🔥 Trending-Aware Search Ranking
+- **Multi-Provider Priority Architecture**: Blends textual search relevance with trending popularity signals.
+- **Provider Chain**: Primary YouTube Data API (India region prioritized) ➔ Fallback 1: Last.fm API ➔ Fallback 2: Firestore community listening statistics ➔ Fallback 3: Last-known-good snapshot.
 
 ---
 
