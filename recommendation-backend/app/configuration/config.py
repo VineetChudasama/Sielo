@@ -39,6 +39,15 @@ class Settings(BaseSettings):
     ADMIN_API_KEY: str = "sielo-dev-admin-secret-change-in-prod"
     RATE_LIMIT_PER_MINUTE: int = 120
 
+    # Trending Provider Architecture
+    YOUTUBE_API_KEY: str = ""
+    LASTFM_API_KEY: str = ""
+    DEFAULT_TRENDING_MARKET: str = "IN"
+    TRENDING_CACHE_TTL_MINUTES: int = 60
+    TRENDING_REFRESH_INTERVAL_HOURS: int = 3
+    MIN_COMMUNITY_TRENDING_PLAYS: int = 3
+    MIN_COMMUNITY_TRENDING_LISTENERS: int = 2
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

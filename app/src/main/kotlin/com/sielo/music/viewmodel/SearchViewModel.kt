@@ -49,7 +49,8 @@
         private val searchHistoryDao: SearchHistoryDao,
         private val searchPlayHistoryDao: SearchPlayHistoryDao,
         private val listeningHistoryDao: ListeningHistoryDao,
-        private val userManager: com.sielo.music.core.auth.UserManager
+        private val userManager: com.sielo.music.core.auth.UserManager,
+        private val recommendationApiClient: com.sielo.music.core.network.recommendations.RecommendationApiClient
     ) : ViewModel() {
     
         private val _searchQuery = MutableStateFlow("")
@@ -354,6 +355,65 @@
         }
     }
 
+    data class TrendingTrackInfo(
+        val title: String,
+        val artist: String,
+        val trendScore: Float,
+        val momentumScore: Float = 0f,
+        val rank: Int = 1,
+        val confidence: Float = 1.0f
+    )
+
+    data class TrendingSnapshot(
+        val tracksByCanonicalKey: Map<String, TrendingTrackInfo> = emptyMap(),
+        val batchConfidence: Float = 1.0f,
+        val isStale: Boolean = false,
+        val timestampMs: Long = 0L
+    )
+
+    private var cachedTrendingSnapshot: TrendingSnapshot? = null
+    private var lastTrendingFetchTimeMs: Long = 0L
+
+    private suspend fun getTrendingSnapshot(): TrendingSnapshot {
+        val now = System.currentTimeMillis()
+        val current = cachedTrendingSnapshot
+        if (current != null && (now - lastTrendingFetchTimeMs) < 30 * 60 * 1000L) {
+            return current
+        }
+        return withContext(Dispatchers.IO) {
+            try {
+                val batch = recommendationApiClient.getTrending("IN")
+                if (batch != null && batch.tracks.isNotEmpty()) {
+                    val map = mutableMapOf<String, TrendingTrackInfo>()
+                    for (t in batch.tracks) {
+                        val key = canonicalTrackKey(t.title, t.artist)
+                        map[key] = TrendingTrackInfo(
+                            title = t.title,
+                            artist = t.artist,
+                            trendScore = t.trendScore,
+                            momentumScore = t.momentumScore,
+                            rank = t.rank,
+                            confidence = t.confidence
+                        )
+                    }
+                    val snapshot = TrendingSnapshot(
+                        tracksByCanonicalKey = map,
+                        batchConfidence = batch.confidence,
+                        isStale = batch.isStale,
+                        timestampMs = now
+                    )
+                    cachedTrendingSnapshot = snapshot
+                    lastTrendingFetchTimeMs = now
+                    snapshot
+                } else {
+                    cachedTrendingSnapshot ?: TrendingSnapshot()
+                }
+            } catch (_: Exception) {
+                cachedTrendingSnapshot ?: TrendingSnapshot()
+            }
+        }
+    }
+
     internal fun levenshteinDistance(s1: String, s2: String, maxDistance: Int = 2): Int =
         Companion.levenshteinDistance(s1, s2, maxDistance)
 
@@ -386,6 +446,7 @@
 
         try {
             val taste = getUserTasteSnapshot()
+            val trending = getTrendingSnapshot()
             when (category) {
                 "Artists" -> {
                     val artists = coroutineScope {
@@ -452,7 +513,7 @@
                         normalizeSearchQuery(_searchQuery.value) == normalized &&
                         _filterCategory.value == category
                     ) {
-                        val ranked = rankTracks(tracks, trimmed, taste)
+                        val ranked = rankTracks(tracks, trimmed, taste, trending)
                         _searchResults.value = ranked
                         _artistResults.value = emptyList()
                         if (ranked.isNotEmpty()) {
@@ -501,7 +562,7 @@
                         normalizeSearchQuery(_searchQuery.value) == normalized &&
                         _filterCategory.value == category
                     ) {
-                        val rankedTracks = rankTracks(tracks, trimmed, taste)
+                        val rankedTracks = rankTracks(tracks, trimmed, taste, trending)
                         val rankedArtists = rankArtists(artists, trimmed, taste)
                         _searchResults.value = rankedTracks
                         _artistResults.value = rankedArtists
@@ -525,8 +586,12 @@
         }
     }
 
-    internal fun rankTracks(tracks: List<SieloTrack>, query: String, taste: UserTasteSnapshot = UserTasteSnapshot()): List<SieloTrack> =
-        Companion.rankTracks(tracks, query, taste)
+    internal fun rankTracks(
+        tracks: List<SieloTrack>,
+        query: String,
+        taste: UserTasteSnapshot = UserTasteSnapshot(),
+        trending: TrendingSnapshot = TrendingSnapshot()
+    ): List<SieloTrack> = Companion.rankTracks(tracks, query, taste, trending)
 
     fun refreshArtist() {
         val current = _selectedArtist.value ?: return
@@ -812,7 +877,18 @@
                 return prev[l2]
             }
 
-            internal fun rankTracks(tracks: List<SieloTrack>, query: String, taste: UserTasteSnapshot = UserTasteSnapshot()): List<SieloTrack> {
+            fun canonicalTrackKey(title: String, artist: String): String {
+                val cleanTitle = cleanForArtistMatch(title)
+                val cleanArtist = cleanForArtistMatch(artist)
+                return "$cleanTitle:::$cleanArtist"
+            }
+
+            internal fun rankTracks(
+                tracks: List<SieloTrack>,
+                query: String,
+                taste: UserTasteSnapshot = UserTasteSnapshot(),
+                trending: TrendingSnapshot = TrendingSnapshot()
+            ): List<SieloTrack> {
                 val q = normalizeSearchQuery(query)
                 if (q.isBlank()) return tracks
                 val qClean = cleanForArtistMatch(q)
@@ -824,7 +900,7 @@
                     val cleanArtist = cleanForArtistMatch(artist)
                     var textScore = 0
 
-                    // 1. Text Relevance Match
+                    // 1. Text Relevance Match (Stage A)
                     // A. Exact song title match
                     if (title == q) {
                         textScore += 100_000
@@ -923,12 +999,31 @@
                         textScore -= 3000
                     }
 
-                    // 2. Plays / Popularity Boost (0 to 800 pts)
-                    var popScore = 0
-                    if (track.viewCount > 0) {
-                        val logViews = kotlin.math.log10(track.viewCount.toDouble()).coerceIn(0.0, 10.0)
-                        popScore += (logViews * 80).toInt()
+                    // 2. STAGE B: Trending Popularity & Momentum
+                    val cKey = canonicalTrackKey(track.title, track.artist)
+                    val normTrackTitle = cleanForArtistMatch(track.title)
+                    val normTrackArtist = cleanForArtistMatch(track.artist)
+                    val trendingInfo = trending.tracksByCanonicalKey[cKey]
+                        ?: trending.tracksByCanonicalKey.entries.firstOrNull { (k, _) ->
+                            val kTitle = k.substringBefore(":::")
+                            val kArtist = k.substringAfter(":::")
+                            kTitle == normTrackTitle && (normTrackArtist.contains(kArtist) || kArtist.contains(normTrackArtist))
+                        }?.value
+
+                    val trendScore = trendingInfo?.trendScore?.toDouble() ?: 0.0
+                    val momentumScore = trendingInfo?.momentumScore?.toDouble() ?: 0.0
+                    val trendConfidence = ((trendingInfo?.confidence ?: 0f) * trending.batchConfidence).toDouble().coerceIn(0.0, 1.0)
+
+                    val viewPop = if (track.viewCount > 0) {
+                        (kotlin.math.log10(track.viewCount.toDouble()).coerceIn(0.0, 10.0) / 10.0)
+                    } else 0.0
+
+                    val effectivePop = if (trendConfidence > 0.0) {
+                        trendScore * trendConfidence
+                    } else {
+                        viewPop * 0.4
                     }
+                    val effectiveMom = momentumScore * trendConfidence
 
                     // 3. User Listening History & Personalization (Strictly capped at max 3,500 pts!)
                     var personalScore = 0
@@ -961,7 +1056,19 @@
                     }
 
                     val normalizedPersonalScore = minOf(personalScore, 3500)
-                    val totalScore = textScore + popScore + normalizedPersonalScore
+
+                    // 4. COMBINATION & SAFEGUARDS (60% Query Relevance, 25% Popularity, 10% Momentum, 5% Personal)
+                    val normalizedQueryRelevance = (textScore.toDouble() / 100_000.0).coerceIn(0.0, 1.2)
+
+                    // Relevance Floor Safeguard:
+                    // If candidate has very weak textual relevance (< 0.20), trending boost is disabled completely!
+                    val gatedPop = if (normalizedQueryRelevance >= 0.20) effectivePop else 0.0
+                    val gatedMom = if (normalizedQueryRelevance >= 0.20) effectiveMom else 0.0
+
+                    val popPoints = (gatedPop * 8_000).toInt()
+                    val momPoints = (gatedMom * 3_000).toInt()
+
+                    val totalScore = textScore + popPoints + momPoints + normalizedPersonalScore
                     track to Triple(totalScore, textScore, matchingWords)
                 }
 

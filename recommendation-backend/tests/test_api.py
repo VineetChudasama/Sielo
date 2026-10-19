@@ -64,3 +64,28 @@ def test_model_status_endpoint():
     assert response.status_code == 200
     data = response.json()
     assert "activeModelVersion" in data
+
+def test_trending_endpoints():
+    # 1. /v1/trending
+    resp = client.get("/v1/trending?market=IN")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "market" in data
+    assert "source" in data
+    assert "tracks" in data
+    assert data["market"] == "IN"
+
+    # 2. /api/trending alias
+    resp_alias = client.get("/api/v1/trending?market=IN")
+    assert resp_alias.status_code == 200
+
+    # 3. /v1/trending/status
+    status_resp = client.get("/v1/trending/status?market=IN")
+    assert status_resp.status_code == 200
+    status_data = status_resp.json()
+    assert "activeSource" in status_data
+    assert "providers" in status_data
+    assert "youtube" in status_data["providers"]
+    assert "lastfm" in status_data["providers"]
+    assert "community" in status_data["providers"]
+    assert "snapshot" in status_data["providers"]

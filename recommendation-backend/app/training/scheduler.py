@@ -22,6 +22,19 @@ def check_and_retrain():
     else:
         logger.info(f"Scheduled retrain skipped: only {new_events} new events (threshold: {settings.MIN_NEW_EVENTS_TO_RETRAIN}).")
 
+def refresh_trending_job():
+    import asyncio
+    from app.trending.orchestrator import trending_orchestrator
+    logger.info(f"Executing scheduled trending refresh job for market={settings.DEFAULT_TRENDING_MARKET}...")
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(trending_orchestrator.get_trending(settings.DEFAULT_TRENDING_MARKET, force_refresh=True))
+        loop.close()
+        logger.info("Scheduled trending refresh job completed successfully.")
+    except Exception as e:
+        logger.error(f"Error in scheduled trending refresh job: {e}")
+
 def start_scheduler():
     global _scheduler
     if _scheduler is not None and _scheduler.running:
@@ -35,8 +48,15 @@ def start_scheduler():
         id="model_retraining_job",
         replace_existing=True
     )
+    _scheduler.add_job(
+        refresh_trending_job,
+        'interval',
+        hours=settings.TRENDING_REFRESH_INTERVAL_HOURS,
+        id="trending_refresh_job",
+        replace_existing=True
+    )
     _scheduler.start()
-    logger.info(f"Recommendation retraining scheduler started (interval: {settings.RETRAIN_INTERVAL_HOURS} hours).")
+    logger.info(f"Recommendation retraining scheduler started (retrain: {settings.RETRAIN_INTERVAL_HOURS}h, trending: {settings.TRENDING_REFRESH_INTERVAL_HOURS}h).")
 
 def stop_scheduler():
     global _scheduler

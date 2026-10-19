@@ -292,4 +292,92 @@ class SearchViewModelTest {
         assertTrue("Remix version must not be stripped by deduplication", deduplicatedIds.contains("id_remix"))
         assertTrue("Live recording must not be stripped by deduplication", deduplicatedIds.contains("id_live"))
     }
+
+    // 15. Trending boost elevates popular canonical track ("Gone, Gone, Gone" by Phillip Phillips)
+    @Test
+    fun testTrendingBoostElevatesPopularCandidate() {
+        val coverTrack = createTrack("id_cover", "Gone, Gone, Gone", "Indie Cover Band")
+        val officialTrack = createTrack("id_phillip", "Gone, Gone, Gone", "Phillip Phillips")
+
+        val canonicalKey = SearchViewModel.canonicalTrackKey("Gone, Gone, Gone", "Phillip Phillips")
+        val trendingSnapshot = SearchViewModel.TrendingSnapshot(
+            tracksByCanonicalKey = mapOf(
+                canonicalKey to SearchViewModel.TrendingTrackInfo(
+                    title = "Gone, Gone, Gone",
+                    artist = "Phillip Phillips",
+                    trendScore = 0.95f,
+                    momentumScore = 0.50f,
+                    rank = 1,
+                    confidence = 1.0f
+                )
+            ),
+            batchConfidence = 1.0f
+        )
+
+        val ranked = SearchViewModel.rankTracks(
+            tracks = listOf(coverTrack, officialTrack),
+            query = "Gone Gone Gone",
+            taste = SearchViewModel.UserTasteSnapshot(),
+            trending = trendingSnapshot
+        )
+
+        assertEquals("Official popular track by Phillip Phillips must rank #1 due to trending signal",
+            "id_phillip",
+            ranked.first().id
+        )
+    }
+
+    // 16. Safeguard: Unrelated #1 trending track CANNOT overtake an exact query match
+    @Test
+    fun testRelevanceFloorPreventsUnrelatedTrendingOvertake() {
+        val targetTrack = createTrack("id_kesariya", "Kesariya", "Arijit Singh")
+        val viralTrack = createTrack("id_viral", "Shape of You", "Ed Sheeran")
+
+        val canonicalKey = SearchViewModel.canonicalTrackKey("Shape of You", "Ed Sheeran")
+        val trendingSnapshot = SearchViewModel.TrendingSnapshot(
+            tracksByCanonicalKey = mapOf(
+                canonicalKey to SearchViewModel.TrendingTrackInfo(
+                    title = "Shape of You",
+                    artist = "Ed Sheeran",
+                    trendScore = 1.0f,
+                    momentumScore = 1.0f,
+                    rank = 1,
+                    confidence = 1.0f
+                )
+            ),
+            batchConfidence = 1.0f
+        )
+
+        val ranked = SearchViewModel.rankTracks(
+            tracks = listOf(viralTrack, targetTrack),
+            query = "Kesariya",
+            taste = SearchViewModel.UserTasteSnapshot(),
+            trending = trendingSnapshot
+        )
+
+        assertEquals("Relevant match 'Kesariya' must rank above unrelated viral track 'Shape of You'",
+            "id_kesariya",
+            ranked.first().id
+        )
+    }
+
+    // 17. Obscure exact match is preserved without trending penalty
+    @Test
+    fun testObscureExactMatchPreservedWithoutTrending() {
+        val obscureTrack = createTrack("id_obscure", "The Silent Tree", "Ancient Folk Band")
+        val partialTrack = createTrack("id_partial", "Silent Tree Live", "Rock Band")
+
+        val ranked = SearchViewModel.rankTracks(
+            tracks = listOf(partialTrack, obscureTrack),
+            query = "The Silent Tree",
+            taste = SearchViewModel.UserTasteSnapshot(),
+            trending = SearchViewModel.TrendingSnapshot() // empty trending
+        )
+
+        assertEquals("Exact match must rank first even with no trending data",
+            "id_obscure",
+            ranked.first().id
+        )
+    }
 }
+

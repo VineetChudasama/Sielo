@@ -62,3 +62,30 @@ data class RecommendationResponseDto(
     val recommendations: List<RecommendationItemDto> = emptyList(),
     val metadata: Map<String, String> = emptyMap()
 )
+
+@Serializable
+data class TrendingTrackDto(
+    val trackId: String? = null,
+    val title: String,
+    val artist: String,
+    val normalizedTitle: String = "",
+    val normalizedArtist: String = "",
+    val trendScore: Float,
+    val momentumScore: Float = 0f,
+    val source: String = "youtube",
+    val rank: Int = 1,
+    val confidence: Float = 1.0f,
+    val updatedAt: String = "",
+    val thumbnailUrl: String? = null
+)
+
+@Serializable
+data class TrendingBatchDto(
+    val market: String,
+    val source: String,
+    val generatedAt: String,
+    val isStale: Boolean = false,
+    val confidence: Float = 1.0f,
+    val tracks: List<TrendingTrackDto> = emptyList()
+)
+

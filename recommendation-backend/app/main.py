@@ -6,6 +6,7 @@ from app.configuration.config import settings
 from app.api.routes_recommendations import router as rec_router
 from app.api.routes_events import router as events_router
 from app.api.routes_admin import router as admin_router
+from app.api.routes_trending import router as trending_router
 from app.training.scheduler import start_scheduler, stop_scheduler
 
 logging.basicConfig(
@@ -16,10 +17,10 @@ logger = logging.getLogger("sielo.main")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Initializing Sielo Recommendation Engine...")
+    logger.info("Initializing Sielo Recommendation Engine & Trending System...")
     start_scheduler()
     yield
-    logger.info("Shutting down Sielo Recommendation Engine...")
+    logger.info("Shutting down Sielo Recommendation Engine & Trending System...")
     stop_scheduler()
 
 app = FastAPI(
@@ -42,6 +43,9 @@ app.add_middleware(
 app.include_router(rec_router)
 app.include_router(events_router)
 app.include_router(admin_router)
+app.include_router(trending_router)
+# Include alias for /api/trending compatibility
+app.include_router(trending_router, prefix="/api", tags=["Trending Alias"])
 
 @app.get("/health", tags=["Health"])
 async def health_check():

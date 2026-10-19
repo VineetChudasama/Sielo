@@ -85,4 +85,25 @@ open class RecommendationApiClient @Inject constructor() {
             false
         }
     }
+
+    open suspend fun getTrending(market: String = "IN"): TrendingBatchDto? = withContext(Dispatchers.IO) {
+        try {
+            val url = "$baseUrl/v1/trending?market=$market"
+            val reqBuilder = Request.Builder()
+                .url(url)
+                .get()
+
+            client.newCall(reqBuilder.build()).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.w("RecommendationApi", "Trending request returned HTTP ${response.code}")
+                    return@withContext null
+                }
+                val responseBody = response.body?.string() ?: return@withContext null
+                json.decodeFromString<TrendingBatchDto>(responseBody)
+            }
+        } catch (e: Exception) {
+            Log.d("RecommendationApi", "Trending API unavailable, using local fallback: ${e.message}")
+            null
+        }
+    }
 }
