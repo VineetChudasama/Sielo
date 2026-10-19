@@ -9,8 +9,10 @@ import com.sielo.music.core.auth.model.AuthProvider
 import com.sielo.music.core.auth.model.UserProfile
 import com.sielo.music.core.database.dao.FavoriteTrackDao
 import com.sielo.music.core.database.dao.ListeningHistoryDao
+import com.sielo.music.core.database.dao.SearchHistoryDao
 import com.sielo.music.core.database.entity.FavoriteTrackEntity
 import com.sielo.music.core.database.entity.ListeningEventEntity
+import com.sielo.music.core.database.entity.SearchHistoryEntity
 import com.sielo.music.core.network.models.SieloTrack
 import com.sielo.music.core.playlist.UserPlaylist
 import com.sielo.music.core.playlist.UserPlaylistsRepository
@@ -32,6 +34,7 @@ class CloudSyncManager @Inject constructor(
     @ApplicationContext private val context: Context,
     private val favoriteTrackDao: FavoriteTrackDao,
     private val listeningHistoryDao: ListeningHistoryDao,
+    private val searchHistoryDao: SearchHistoryDao,
     private val userPlaylistsRepository: UserPlaylistsRepository
 ) {
     private val scope = CoroutineScope(Dispatchers.IO)
@@ -50,6 +53,8 @@ class CloudSyncManager @Inject constructor(
         private const val DOC_PROFILE = "profile"
         private const val DOC_LIBRARY = "library"
         private const val DOC_PLAYLISTS = "playlists"
+        private const val DOC_HISTORY = "history"
+        private const val DOC_SEARCH_HISTORY = "search_history"
     }
 
     init {
@@ -137,6 +142,88 @@ class CloudSyncManager @Inject constructor(
                         Log.d(TAG, "Auto-synced ${customPlaylists.size} playlists for $email")
                     } catch (e: Exception) {
                         Log.w(TAG, "Live playlists auto-sync error: ${e.message}")
+                    }
+                }
+        }
+
+        // Automatically sync listening history to cloud when songs are played / history changes
+        scope.launch {
+            listeningHistoryDao.getRecentHistory(limit = 100)
+                .collectLatest { history ->
+                    if (isRestoring) return@collectLatest
+                    val user = currentUserProvider?.invoke() ?: return@collectLatest
+                    val email = user.email.trim().lowercase()
+                    if (email.isBlank() || email.endsWith("@sielo.local")) return@collectLatest
+                    if (history.isEmpty()) return@collectLatest
+
+                    delay(4000L) // debounce track progress / completion updates
+                    try {
+                        ensureAuthenticated()
+                        val eventsData = history.take(200).map { ev ->
+                            mapOf(
+                                "songId" to ev.songId,
+                                "songTitle" to ev.songTitle,
+                                "artistName" to ev.artistName,
+                                "albumName" to (ev.albumName ?: ""),
+                                "thumbnailUrl" to (ev.thumbnailUrl ?: ""),
+                                "timestampMs" to ev.timestampMs,
+                                "durationPlayedMs" to ev.durationPlayedMs,
+                                "songDurationMs" to ev.songDurationMs,
+                                "hourOfDay" to ev.hourOfDay,
+                                "dayOfWeek" to ev.dayOfWeek,
+                                "month" to ev.month,
+                                "year" to ev.year,
+                                "completed" to ev.completed
+                            )
+                        }
+                        val userRef = firestore.collection(COLLECTION_USERS).document(email)
+                        userRef.collection("data").document(DOC_HISTORY)
+                            .set(
+                                mapOf(
+                                    "events" to eventsData,
+                                    "updatedAt" to System.currentTimeMillis()
+                                ),
+                                SetOptions.merge()
+                            )
+                            .await()
+                        Log.d(TAG, "Auto-synced ${eventsData.size} listening events for $email")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Live listening history auto-sync error: ${e.message}")
+                    }
+                }
+        }
+
+        // Automatically sync search history to cloud
+        scope.launch {
+            searchHistoryDao.getRecentSearchQueries(limit = 30)
+                .collectLatest { searchHistory ->
+                    if (isRestoring) return@collectLatest
+                    val user = currentUserProvider?.invoke() ?: return@collectLatest
+                    val email = user.email.trim().lowercase()
+                    if (email.isBlank() || email.endsWith("@sielo.local")) return@collectLatest
+                    if (searchHistory.isEmpty()) return@collectLatest
+
+                    delay(5000L)
+                    try {
+                        ensureAuthenticated()
+                        val searchData = searchHistory.map { item ->
+                            mapOf(
+                                "query" to item.query,
+                                "timestampMs" to item.timestampMs
+                            )
+                        }
+                        val userRef = firestore.collection(COLLECTION_USERS).document(email)
+                        userRef.collection("data").document(DOC_SEARCH_HISTORY)
+                            .set(
+                                mapOf(
+                                    "queries" to searchData,
+                                    "updatedAt" to System.currentTimeMillis()
+                                ),
+                                SetOptions.merge()
+                            )
+                            .await()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Live search history auto-sync error: ${e.message}")
                     }
                 }
         }
@@ -247,6 +334,80 @@ class CloudSyncManager @Inject constructor(
                     )
                     .await()
             }
+
+            // 4. Listening History document (merge local and existing cloud events to guarantee 0 loss)
+            val currentHistory = listeningHistoryDao.getAllHistoryList(limit = 300)
+            if (currentHistory.isNotEmpty()) {
+                val existingCloudEvents: List<Map<String, Any>> = try {
+                    val doc = userRef.collection("data").document(DOC_HISTORY).get().await()
+                    if (doc.exists()) {
+                        @Suppress("UNCHECKED_CAST")
+                        (doc.get("events") as? List<Map<String, Any>>) ?: emptyList()
+                    } else emptyList()
+                } catch (_: Exception) {
+                    emptyList()
+                }
+
+                val localEventsData = currentHistory.map { ev ->
+                    mapOf(
+                        "songId" to ev.songId,
+                        "songTitle" to ev.songTitle,
+                        "artistName" to ev.artistName,
+                        "albumName" to (ev.albumName ?: ""),
+                        "thumbnailUrl" to (ev.thumbnailUrl ?: ""),
+                        "timestampMs" to ev.timestampMs,
+                        "durationPlayedMs" to ev.durationPlayedMs,
+                        "songDurationMs" to ev.songDurationMs,
+                        "hourOfDay" to ev.hourOfDay,
+                        "dayOfWeek" to ev.dayOfWeek,
+                        "month" to ev.month,
+                        "year" to ev.year,
+                        "completed" to ev.completed
+                    )
+                }
+
+                val mergedEvents = (localEventsData + existingCloudEvents)
+                    .distinctBy {
+                        val sId = it["songId"] as? String ?: ""
+                        val tMs = (it["timestampMs"] as? Number)?.toLong() ?: 0L
+                        "${sId}_${tMs}"
+                    }
+                    .sortedByDescending { (it["timestampMs"] as? Number)?.toLong() ?: 0L }
+                    .take(300)
+
+                userRef.collection("data").document(DOC_HISTORY)
+                    .set(
+                        mapOf(
+                            "events" to mergedEvents,
+                            "updatedAt" to System.currentTimeMillis()
+                        ),
+                        SetOptions.merge()
+                    )
+                    .await()
+                Log.i(TAG, "Successfully backed up ${mergedEvents.size} listening events for $cleanEmail")
+            }
+
+            // 5. Search History document
+            val searchHistory = searchHistoryDao.getAllSearchQueries()
+            if (searchHistory.isNotEmpty()) {
+                val searchData = searchHistory.map { item ->
+                    mapOf(
+                        "query" to item.query,
+                        "timestampMs" to item.timestampMs
+                    )
+                }
+                userRef.collection("data").document(DOC_SEARCH_HISTORY)
+                    .set(
+                        mapOf(
+                            "queries" to searchData,
+                            "updatedAt" to System.currentTimeMillis()
+                        ),
+                        SetOptions.merge()
+                    )
+                    .await()
+                Log.i(TAG, "Successfully backed up ${searchData.size} search queries for $cleanEmail")
+            }
+
             Log.i(TAG, "Successfully backed up data for $cleanEmail")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to backup data for $cleanEmail: ${e.message}", e)
@@ -396,6 +557,83 @@ class CloudSyncManager @Inject constructor(
                 }
             } catch (plErr: Exception) {
                 Log.w(TAG, "Error restoring playlists: ${plErr.message}")
+            }
+
+            // 4. Fetch Listening History document & restore into local database
+            try {
+                val historyDoc = userRef.collection("data").document(DOC_HISTORY).get().await()
+                if (historyDoc.exists()) {
+                    @Suppress("UNCHECKED_CAST")
+                    val eventsListRaw = historyDoc.get("events") as? List<Map<String, Any>>
+                    if (!eventsListRaw.isNullOrEmpty()) {
+                        val existingTimestamps = listeningHistoryDao.getAllTimestamps().toSet()
+                        val entities = eventsListRaw.mapNotNull { item ->
+                            val songId = item["songId"] as? String ?: return@mapNotNull null
+                            val songTitle = item["songTitle"] as? String ?: ""
+                            val artistName = item["artistName"] as? String ?: ""
+                            val albumName = (item["albumName"] as? String)?.takeIf { it.isNotBlank() }
+                            val thumbnailUrl = (item["thumbnailUrl"] as? String)?.takeIf { it.isNotBlank() }
+                            val timestampMs = (item["timestampMs"] as? Number)?.toLong() ?: return@mapNotNull null
+                            val durationPlayedMs = (item["durationPlayedMs"] as? Number)?.toLong() ?: 0L
+                            val songDurationMs = (item["songDurationMs"] as? Number)?.toLong() ?: 0L
+                            val hourOfDay = (item["hourOfDay"] as? Number)?.toInt() ?: 0
+                            val dayOfWeek = (item["dayOfWeek"] as? Number)?.toInt() ?: 1
+                            val month = (item["month"] as? Number)?.toInt() ?: 0
+                            val year = (item["year"] as? Number)?.toInt() ?: 2026
+                            val completed = item["completed"] as? Boolean ?: false
+
+                            ListeningEventEntity(
+                                eventId = 0,
+                                songId = songId,
+                                songTitle = songTitle,
+                                artistName = artistName,
+                                albumName = albumName,
+                                thumbnailUrl = thumbnailUrl,
+                                timestampMs = timestampMs,
+                                durationPlayedMs = durationPlayedMs,
+                                songDurationMs = songDurationMs,
+                                hourOfDay = hourOfDay,
+                                dayOfWeek = dayOfWeek,
+                                month = month,
+                                year = year,
+                                completed = completed
+                            )
+                        }.filterNot { it.timestampMs in existingTimestamps }
+                         .distinctBy { "${it.songId}_${it.timestampMs}" }
+
+                        if (entities.isNotEmpty()) {
+                            listeningHistoryDao.insertEvents(entities)
+                            Log.i(TAG, "Restored ${entities.size} listening events for $cleanEmail into local database")
+                        }
+                    }
+                }
+            } catch (histErr: Exception) {
+                Log.w(TAG, "Error restoring listening history: ${histErr.message}")
+            }
+
+            // 5. Fetch Search History document & restore into local database
+            try {
+                val searchDoc = userRef.collection("data").document(DOC_SEARCH_HISTORY).get().await()
+                if (searchDoc.exists()) {
+                    @Suppress("UNCHECKED_CAST")
+                    val searchListRaw = searchDoc.get("queries") as? List<Map<String, Any>>
+                    if (!searchListRaw.isNullOrEmpty()) {
+                        val existingQueries = searchHistoryDao.getAllSearchQueries().map { it.query.lowercase() }.toSet()
+                        val searchEntities = searchListRaw.mapNotNull { item ->
+                            val query = item["query"] as? String ?: return@mapNotNull null
+                            val timestampMs = (item["timestampMs"] as? Number)?.toLong() ?: System.currentTimeMillis()
+                            SearchHistoryEntity(query = query, timestampMs = timestampMs)
+                        }.filterNot { it.query.lowercase() in existingQueries }
+                         .distinctBy { it.query.lowercase() }
+
+                        if (searchEntities.isNotEmpty()) {
+                            searchHistoryDao.insertSearchQueries(searchEntities)
+                            Log.i(TAG, "Restored ${searchEntities.size} search queries for $cleanEmail")
+                        }
+                    }
+                }
+            } catch (searchErr: Exception) {
+                Log.w(TAG, "Error restoring search history: ${searchErr.message}")
             }
 
             cloudProfile

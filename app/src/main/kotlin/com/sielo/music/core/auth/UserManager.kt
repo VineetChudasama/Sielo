@@ -150,6 +150,7 @@ class UserManager @Inject constructor(
         // Detect if user is switching accounts
         val currentEmail = _currentUser.value?.email?.trim()?.lowercase()
         val isAccountSwitch = !currentEmail.isNullOrBlank() && currentEmail != cleanEmail
+        val oldUserToBackup = if (isAccountSwitch) _currentUser.value else null
 
         val existingJson = prefs.getString("$KEY_ALL_USERS_PREFIX$cleanEmail", null)
         val localProfile = if (!existingJson.isNullOrBlank()) {
@@ -182,6 +183,9 @@ class UserManager @Inject constructor(
         scope.launch {
             if (isAccountSwitch) {
                 try {
+                    if (oldUserToBackup != null) {
+                        cloudSyncManager.backupUserDataBlocking(oldUserToBackup)
+                    }
                     databaseCleaner.clearAll()
                     userPlaylistsRepository.resetToDefault()
                 } catch (e: Exception) {
@@ -247,6 +251,7 @@ class UserManager @Inject constructor(
         // Detect if user is switching accounts
         val currentEmail = _currentUser.value?.email?.trim()?.lowercase()
         val isAccountSwitch = !currentEmail.isNullOrBlank() && currentEmail != cleanEmail
+        val oldUserToBackup = if (isAccountSwitch) _currentUser.value else null
 
         val existingJson = prefs.getString("$KEY_ALL_USERS_PREFIX$cleanEmail", null)
         val localProfile = if (!existingJson.isNullOrBlank()) {
@@ -273,6 +278,9 @@ class UserManager @Inject constructor(
         scope.launch {
             if (isAccountSwitch) {
                 try {
+                    if (oldUserToBackup != null) {
+                        cloudSyncManager.backupUserDataBlocking(oldUserToBackup)
+                    }
                     databaseCleaner.clearAll()
                     userPlaylistsRepository.resetToDefault()
                 } catch (e: Exception) {
@@ -332,6 +340,7 @@ class UserManager @Inject constructor(
         // Detect if user is switching accounts
         val currentEmail = _currentUser.value?.email?.trim()?.lowercase()
         val isAccountSwitch = !currentEmail.isNullOrBlank() && currentEmail != cleanEmail
+        val oldUserToBackup = if (isAccountSwitch) _currentUser.value else null
 
         val existingJson = prefs.getString("$KEY_ALL_USERS_PREFIX$cleanEmail", null)
         val profile = if (!existingJson.isNullOrBlank()) {
@@ -350,6 +359,9 @@ class UserManager @Inject constructor(
         scope.launch {
             if (isAccountSwitch) {
                 try {
+                    if (oldUserToBackup != null) {
+                        cloudSyncManager.backupUserDataBlocking(oldUserToBackup)
+                    }
                     databaseCleaner.clearAll()
                     userPlaylistsRepository.resetToDefault()
                 } catch (e: Exception) {
