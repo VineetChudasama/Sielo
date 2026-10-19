@@ -18,8 +18,8 @@ open class RecommendationApiClient @Inject constructor() {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true }
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
-    // Configurable endpoint (local dev, Render, or Cloud Run)
-    var baseUrl: String = "https://sielo-rec-backend-placeholder.onrender.com"
+    // Configurable endpoint (live Render deployment)
+    var baseUrl: String = "https://sielo.onrender.com"
     var tokenProvider: (suspend () -> String?)? = null
 
     private val client = OkHttpClient.Builder()
