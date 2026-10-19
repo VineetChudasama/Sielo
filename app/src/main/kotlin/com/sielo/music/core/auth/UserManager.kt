@@ -56,6 +56,12 @@ class UserManager @Inject constructor(
         cloudSyncManager.currentUserProvider = {
             _currentUser.value
         }
+        cloudSyncManager.playbackSnapshotProvider = {
+            playerManager.getPlaybackSnapshot()
+        }
+        cloudSyncManager.playbackSnapshotRestorer = {
+            playerManager.restoreFromCloudSnapshot(it)
+        }
         scope.launch {
             cloudSyncManager.ensureAuthenticated()
         }
@@ -585,6 +591,11 @@ class UserManager @Inject constructor(
                 e.printStackTrace()
             }
             try {
+                cloudSyncManager.stopAllSync()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            try {
                 FirebaseAuth.getInstance().signOut()
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -634,6 +645,11 @@ class UserManager @Inject constructor(
 
         // 4. Background purge of database tables, feature cache, audio player, playlists, and disk cache
         scope.launch(Dispatchers.IO) {
+            try {
+                cloudSyncManager.stopAllSync()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
             try {
                 playerManager.resetPlayer()
             } catch (e: Exception) {

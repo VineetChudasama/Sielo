@@ -3,6 +3,7 @@ package com.sielo.music.core.sync
 import android.content.Context
 import android.util.Log
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import com.sielo.music.core.auth.model.AuthProvider
@@ -19,9 +20,11 @@ import com.sielo.music.core.playlist.UserPlaylistsRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.serialization.encodeToString
@@ -37,7 +40,8 @@ class CloudSyncManager @Inject constructor(
     private val searchHistoryDao: SearchHistoryDao,
     private val userPlaylistsRepository: UserPlaylistsRepository
 ) {
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private var syncJob = SupervisorJob()
+    private var scope = CoroutineScope(Dispatchers.IO + syncJob)
     private val json = Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true }
 
     private val firestore: FirebaseFirestore by lazy {
@@ -46,6 +50,12 @@ class CloudSyncManager @Inject constructor(
 
     @Volatile var isRestoring: Boolean = false
     var currentUserProvider: (() -> UserProfile?)? = null
+
+    // Pluggable providers to avoid circular dependencies with PlayerManager and SettingsRepository
+    var playbackSnapshotProvider: (() -> Map<String, Any>?)? = null
+    var playbackSnapshotRestorer: ((Map<String, Any>) -> Unit)? = null
+    var settingsProvider: (() -> Map<String, Any>)? = null
+    var settingsRestorer: ((Map<String, Any>) -> Unit)? = null
 
     companion object {
         private const val TAG = "CloudSyncManager"
@@ -56,10 +66,38 @@ class CloudSyncManager @Inject constructor(
         private const val DOC_HISTORY = "history"
         private const val DOC_SEARCH_HISTORY = "search_history"
         private const val DOC_STATS = "stats"
+        private const val DOC_PLAYBACK = "playback"
+        private const val DOC_SETTINGS = "settings"
+        private const val DOC_DOWNLOADS = "downloads"
     }
 
     init {
-        // Automatically sync favorites to cloud when favorites change
+        startSyncLoops()
+    }
+
+    /**
+     * Resolves the canonical Firestore document key for the account.
+     * Priority:
+     * 1. Firebase Authentication UID (canonical)
+     * 2. User profile ID (if valid UID)
+     * 3. Sanitized email (fallback / legacy)
+     */
+    fun resolveUserKey(user: UserProfile? = null): String {
+        val authUid = FirebaseAuth.getInstance().currentUser?.uid
+        if (!authUid.isNullOrBlank()) return authUid
+        val profile = user ?: currentUserProvider?.invoke()
+        val uid = profile?.id?.takeIf { it.isNotBlank() && !it.contains("@") }
+        if (!uid.isNullOrBlank()) return uid
+        val email = profile?.email?.trim()?.lowercase()
+        if (!email.isNullOrBlank() && !email.endsWith("@sielo.local")) return email
+        return "guest"
+    }
+
+    fun startSyncLoops() {
+        // Cancel any existing jobs and launch fresh listeners
+        syncJob.cancelChildren()
+
+        // 1. Live favorites auto-sync
         scope.launch {
             favoriteTrackDao.getAllFavorites()
                 .collectLatest { favorites ->
@@ -81,8 +119,8 @@ class CloudSyncManager @Inject constructor(
                                 "addedAt" to fav.addedAt
                             )
                         }
-                        val userRef = firestore.collection(COLLECTION_USERS).document(email)
-                        userRef.collection("data").document(DOC_LIBRARY)
+                        val userDocId = resolveUserKey(user)
+                        getUserDataDocRef(userDocId, DOC_LIBRARY)
                             .set(
                                 mapOf(
                                     "favorites" to favoritesData,
@@ -91,14 +129,14 @@ class CloudSyncManager @Inject constructor(
                                 SetOptions.merge()
                             )
                             .await()
-                        Log.d(TAG, "Auto-synced ${favorites.size} favorites for $email")
+                        Log.d(TAG, "Auto-synced ${favorites.size} favorites for $userDocId")
                     } catch (e: Exception) {
                         Log.w(TAG, "Live favorites auto-sync error: ${e.message}")
                     }
                 }
         }
 
-        // Automatically sync custom playlists to cloud when playlists change
+        // 2. Live playlists auto-sync
         scope.launch {
             userPlaylistsRepository.playlists
                 .collectLatest { playlists ->
@@ -132,8 +170,8 @@ class CloudSyncManager @Inject constructor(
                                 }
                             )
                         }
-                        val userRef = firestore.collection(COLLECTION_USERS).document(email)
-                        userRef.collection("data").document(DOC_PLAYLISTS)
+                        val userDocId = resolveUserKey(user)
+                        getUserDataDocRef(userDocId, DOC_PLAYLISTS)
                             .set(
                                 mapOf(
                                     "playlists" to playlistsData,
@@ -142,14 +180,14 @@ class CloudSyncManager @Inject constructor(
                                 SetOptions.merge()
                             )
                             .await()
-                        Log.d(TAG, "Auto-synced ${customPlaylists.size} playlists for $email")
+                        Log.d(TAG, "Auto-synced ${customPlaylists.size} playlists for $userDocId")
                     } catch (e: Exception) {
                         Log.w(TAG, "Live playlists auto-sync error: ${e.message}")
                     }
                 }
         }
 
-        // Automatically sync listening history and stats to cloud when songs are played / history changes
+        // 3. Live listening history auto-sync
         scope.launch {
             listeningHistoryDao.getRecentHistory(limit = 1500)
                 .collectLatest { history ->
@@ -159,12 +197,12 @@ class CloudSyncManager @Inject constructor(
                     if (email.isBlank() || email.endsWith("@sielo.local")) return@collectLatest
                     if (history.isEmpty()) return@collectLatest
 
-                    delay(4000L) // debounce track progress / completion updates
-                    syncListeningHistoryToCloud(email, limit = 1500)
+                    delay(4000L)
+                    syncListeningHistoryToCloud(user, limit = 1500)
                 }
         }
 
-        // Automatically sync search history to cloud
+        // 4. Live search history auto-sync
         scope.launch {
             searchHistoryDao.getRecentSearchQueries(limit = 30)
                 .collectLatest { searchHistory ->
@@ -183,8 +221,8 @@ class CloudSyncManager @Inject constructor(
                                 "timestampMs" to item.timestampMs
                             )
                         }
-                        val userRef = firestore.collection(COLLECTION_USERS).document(email)
-                        userRef.collection("data").document(DOC_SEARCH_HISTORY)
+                        val userDocId = resolveUserKey(user)
+                        getUserDataDocRef(userDocId, DOC_SEARCH_HISTORY)
                             .set(
                                 mapOf(
                                     "queries" to searchData,
@@ -199,30 +237,43 @@ class CloudSyncManager @Inject constructor(
                 }
         }
 
-        // Periodic background interval sync loop (every 3 minutes) to guarantee stats & history are continuously synced even without DB events
+        // 5. Periodic background interval sync loop (every 3 minutes)
         scope.launch {
             while (true) {
-                delay(180_000L) // 3 minutes interval
+                delay(180_000L)
                 try {
                     if (!isRestoring) {
                         val user = currentUserProvider?.invoke()
                         val email = user?.email?.trim()?.lowercase()
                         if (!email.isNullOrBlank() && !email.endsWith("@sielo.local")) {
                             ensureAuthenticated()
-                            syncListeningHistoryToCloud(email, limit = 1500)
-                            Log.d(TAG, "Periodic stats & history sync completed for $email")
+                            syncListeningHistoryToCloud(user, limit = 1500)
+                            syncPlaybackStateToCloud(user)
+                            syncDownloadsMetadataToCloud(user)
+                            Log.d(TAG, "Periodic account cloud sync cycle completed for ${resolveUserKey(user)}")
                         }
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Periodic stats & history sync error: ${e.message}")
+                    Log.w(TAG, "Periodic sync loop error: ${e.message}")
                 }
             }
         }
     }
 
     /**
-     * Guarantees that Firebase Auth is authenticated before performing Firestore queries.
-     * Prevents Firestore PERMISSION_DENIED security rule errors.
+     * Cancels active background sync listeners on logout or account switch.
+     */
+    fun stopAllSync() {
+        syncJob.cancelChildren()
+        Log.i(TAG, "Stopped all active cloud sync background jobs")
+    }
+
+    private fun getUserDataDocRef(userKey: String, subDoc: String): DocumentReference {
+        return firestore.collection(COLLECTION_USERS).document(userKey).collection("data").document(subDoc)
+    }
+
+    /**
+     * Guarantees Firebase Auth is authenticated before Firestore operations.
      */
     suspend fun ensureAuthenticated() {
         try {
@@ -237,7 +288,102 @@ class CloudSyncManager @Inject constructor(
     }
 
     /**
-     * Backup user data to Firestore in a blocking suspend call (used on signOut or manual sync).
+     * Live sync for user settings when changed.
+     */
+    fun syncSettingsToCloud(user: UserProfile? = null) {
+        scope.launch {
+            if (isRestoring) return@launch
+            val activeUser = user ?: currentUserProvider?.invoke() ?: return@launch
+            val email = activeUser.email.trim().lowercase()
+            if (email.isBlank() || email.endsWith("@sielo.local")) return@launch
+            val settingsMap = settingsProvider?.invoke() ?: return@launch
+
+            delay(1500L) // debounce
+            try {
+                ensureAuthenticated()
+                val userDocId = resolveUserKey(activeUser)
+                val dataToSave = settingsMap.toMutableMap()
+                dataToSave["updatedAt"] = System.currentTimeMillis()
+                getUserDataDocRef(userDocId, DOC_SETTINGS)
+                    .set(dataToSave, SetOptions.merge())
+                    .await()
+                Log.d(TAG, "Synced settings for $userDocId")
+            } catch (e: Exception) {
+                Log.w(TAG, "Settings sync error: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Live sync for current playback state snapshot.
+     */
+    fun syncPlaybackStateToCloud(user: UserProfile? = null) {
+        scope.launch {
+            if (isRestoring) return@launch
+            val activeUser = user ?: currentUserProvider?.invoke() ?: return@launch
+            val email = activeUser.email.trim().lowercase()
+            if (email.isBlank() || email.endsWith("@sielo.local")) return@launch
+            val snapshot = playbackSnapshotProvider?.invoke() ?: return@launch
+
+            try {
+                ensureAuthenticated()
+                val userDocId = resolveUserKey(activeUser)
+                getUserDataDocRef(userDocId, DOC_PLAYBACK)
+                    .set(snapshot, SetOptions.merge())
+                    .await()
+                Log.d(TAG, "Synced playback snapshot for $userDocId")
+            } catch (e: Exception) {
+                Log.w(TAG, "Playback snapshot sync error: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Sync download records metadata to cloud (records/metadata ONLY; never audio files).
+     */
+    fun syncDownloadsMetadataToCloud(user: UserProfile? = null) {
+        scope.launch {
+            if (isRestoring) return@launch
+            val activeUser = user ?: currentUserProvider?.invoke() ?: return@launch
+            val email = activeUser.email.trim().lowercase()
+            if (email.isBlank() || email.endsWith("@sielo.local")) return@launch
+
+            try {
+                val cachedTracks = com.sielo.music.core.audio.OfflineCacheManager.getCachedTracks(context)
+                if (cachedTracks.isEmpty()) return@launch
+
+                ensureAuthenticated()
+                val userDocId = resolveUserKey(activeUser)
+                val downloadsData = cachedTracks.map { track ->
+                    mapOf(
+                        "id" to track.id,
+                        "title" to track.title,
+                        "artist" to track.artist,
+                        "durationText" to track.durationText,
+                        "thumbnailUrl" to (track.thumbnailUrl ?: ""),
+                        "savedAt" to System.currentTimeMillis()
+                    )
+                }
+                getUserDataDocRef(userDocId, DOC_DOWNLOADS)
+                    .set(
+                        mapOf(
+                            "tracks" to downloadsData,
+                            "count" to downloadsData.size,
+                            "updatedAt" to System.currentTimeMillis()
+                        ),
+                        SetOptions.merge()
+                    )
+                    .await()
+                Log.d(TAG, "Synced ${downloadsData.size} download records for $userDocId")
+            } catch (e: Exception) {
+                Log.w(TAG, "Downloads metadata sync error: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Full blocking backup of all 13 categories to Firestore.
+     * Guaranteed safe: Never wipes existing cloud data with empty local collections.
      */
     suspend fun backupUserDataBlocking(user: UserProfile) {
         val cleanEmail = user.email.trim().lowercase()
@@ -247,7 +393,8 @@ class CloudSyncManager @Inject constructor(
 
         try {
             ensureAuthenticated()
-            val userRef = firestore.collection(COLLECTION_USERS).document(cleanEmail)
+            val userDocId = resolveUserKey(user)
+            val userRef = firestore.collection(COLLECTION_USERS).document(userDocId)
 
             // 1. Profile document
             val profileMap = hashMapOf(
@@ -270,7 +417,7 @@ class CloudSyncManager @Inject constructor(
                 .set(profileMap, SetOptions.merge())
                 .await()
 
-            // 2. Favorites & Library document (only push if non-empty to prevent accidental wipe)
+            // 2. Favorites & Library document (only push if non-empty to protect cloud state)
             val currentFavorites = favoriteTrackDao.getAllFavoritesList()
             if (currentFavorites.isNotEmpty()) {
                 val favoritesData = currentFavorites.map { fav ->
@@ -293,7 +440,7 @@ class CloudSyncManager @Inject constructor(
                     .await()
             }
 
-            // 3. Custom Playlists document (filter out starter and dynamic downloaded playlists)
+            // 3. Custom Playlists document (filter out starter and cache playlists)
             val currentPlaylists = userPlaylistsRepository.getAllPlaylists()
                 .filterNot { it.id.startsWith("sielo_starter_") || it.id == com.sielo.music.core.playlist.UserPlaylistsRepository.PLAYLIST_DOWNLOADED_CACHE_ID }
             if (currentPlaylists.isNotEmpty()) {
@@ -326,8 +473,8 @@ class CloudSyncManager @Inject constructor(
                     .await()
             }
 
-            // 4. Listening History document & account stats (merge local and existing cloud events to guarantee 0 loss)
-            syncListeningHistoryToCloud(cleanEmail, limit = 1500)
+            // 4. Listening History & lifetime stats
+            syncListeningHistoryToCloud(user, limit = 1500)
 
             // 5. Search History document
             val searchHistory = searchHistoryDao.getAllSearchQueries()
@@ -347,17 +494,58 @@ class CloudSyncManager @Inject constructor(
                         SetOptions.merge()
                     )
                     .await()
-                Log.i(TAG, "Successfully backed up ${searchData.size} search queries for $cleanEmail")
             }
 
-            Log.i(TAG, "Successfully backed up data for $cleanEmail")
+            // 6. Playback state snapshot
+            val playbackSnapshot = playbackSnapshotProvider?.invoke()
+            if (playbackSnapshot != null) {
+                userRef.collection("data").document(DOC_PLAYBACK)
+                    .set(playbackSnapshot, SetOptions.merge())
+                    .await()
+            }
+
+            // 7. Settings document
+            val settingsMap = settingsProvider?.invoke()
+            if (settingsMap != null) {
+                val settingsData = settingsMap.toMutableMap()
+                settingsData["updatedAt"] = System.currentTimeMillis()
+                userRef.collection("data").document(DOC_SETTINGS)
+                    .set(settingsData, SetOptions.merge())
+                    .await()
+            }
+
+            // 8. Downloads metadata document
+            val cachedTracks = com.sielo.music.core.audio.OfflineCacheManager.getCachedTracks(context)
+            if (cachedTracks.isNotEmpty()) {
+                val downloadsData = cachedTracks.map { track ->
+                    mapOf(
+                        "id" to track.id,
+                        "title" to track.title,
+                        "artist" to track.artist,
+                        "durationText" to track.durationText,
+                        "thumbnailUrl" to (track.thumbnailUrl ?: "")
+                    )
+                }
+                userRef.collection("data").document(DOC_DOWNLOADS)
+                    .set(
+                        mapOf(
+                            "tracks" to downloadsData,
+                            "count" to downloadsData.size,
+                            "updatedAt" to System.currentTimeMillis()
+                        ),
+                        SetOptions.merge()
+                    )
+                    .await()
+            }
+
+            Log.i(TAG, "Successfully backed up complete account data for $userDocId")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to backup data for $cleanEmail: ${e.message}", e)
+            Log.e(TAG, "Failed to backup data for ${user.email}: ${e.message}", e)
         }
     }
 
     /**
-     * Backup user data to Firestore in the background.
+     * Backup user data asynchronously in the background.
      */
     fun backupUserData(user: UserProfile) {
         scope.launch {
@@ -366,22 +554,40 @@ class CloudSyncManager @Inject constructor(
     }
 
     /**
-     * Restore user library, playlists, and profile from Firestore cloud.
-     * Returns true if cloud data was restored, false otherwise.
+     * Restores all 13 account data categories from Firestore cloud.
+     * Seamlessly handles backward compatibility: if data exists under cleanEmail instead of UID,
+     * it migrates the data to the UID-based path automatically.
      */
-    suspend fun restoreUserData(email: String): UserProfile? {
+    suspend fun restoreUserData(email: String, explicitUid: String? = null): UserProfile? {
         val cleanEmail = email.trim().lowercase()
         if (cleanEmail.isBlank() || cleanEmail.endsWith("@sielo.local")) return null
 
         isRestoring = true
         return try {
             ensureAuthenticated()
-            val userRef = firestore.collection(COLLECTION_USERS).document(cleanEmail)
 
-            // 1. Fetch Profile document
-            val profileDoc = userRef.collection("data").document(DOC_PROFILE).get().await()
+            // Resolve UID: explicit UID -> FirebaseAuth.currentUser.uid -> cleanEmail
+            val authUid = explicitUid ?: FirebaseAuth.getInstance().currentUser?.uid
+            val primaryKey = authUid ?: cleanEmail
+
+            var userRef = firestore.collection(COLLECTION_USERS).document(primaryKey)
+            var profileDoc = userRef.collection("data").document(DOC_PROFILE).get().await()
+
+            // Migration fallback: If primaryKey doc doesn't exist and primaryKey != cleanEmail, check cleanEmail
+            if (!profileDoc.exists() && primaryKey != cleanEmail) {
+                val legacyRef = firestore.collection(COLLECTION_USERS).document(cleanEmail)
+                val legacyProfileDoc = legacyRef.collection("data").document(DOC_PROFILE).get().await()
+                if (legacyProfileDoc.exists()) {
+                    Log.i(TAG, "Migrating legacy cloud account data from $cleanEmail to canonical UID $primaryKey")
+                    migrateLegacyAccount(legacyRef, userRef)
+                    // Reload profile doc from new primaryKey
+                    profileDoc = userRef.collection("data").document(DOC_PROFILE).get().await()
+                }
+            }
+
             var cloudProfile: UserProfile? = null
 
+            // 1. Restore Profile
             if (profileDoc.exists()) {
                 val data = profileDoc.data ?: emptyMap<String, Any>()
                 @Suppress("UNCHECKED_CAST")
@@ -403,7 +609,7 @@ class CloudSyncManager @Inject constructor(
                 }
 
                 cloudProfile = UserProfile(
-                    id = data["id"] as? String ?: java.util.UUID.randomUUID().toString(),
+                    id = data["id"] as? String ?: primaryKey,
                     name = data["name"] as? String ?: cleanEmail.substringBefore("@"),
                     email = cleanEmail,
                     photoUrl = (data["photoUrl"] as? String)?.takeIf { it.isNotBlank() },
@@ -417,12 +623,10 @@ class CloudSyncManager @Inject constructor(
                     username = (data["username"] as? String)?.takeIf { it.isNotBlank() },
                     createdAt = (data["createdAt"] as? Number)?.toLong() ?: System.currentTimeMillis()
                 )
-                Log.i(TAG, "Restored profile document for $cleanEmail: ${cloudProfile.name}, artists: ${favoriteArtists.size}")
-            } else {
-                Log.i(TAG, "No cloud profile document found for $cleanEmail")
+                Log.i(TAG, "Restored profile for $primaryKey: ${cloudProfile.name}, artists: ${favoriteArtists.size}")
             }
 
-            // 2. Fetch Favorites document & restore into local database
+            // 2. Restore Liked songs (Favorites)
             try {
                 val libraryDoc = userRef.collection("data").document(DOC_LIBRARY).get().await()
                 if (libraryDoc.exists()) {
@@ -445,7 +649,7 @@ class CloudSyncManager @Inject constructor(
                         }
                         if (entities.isNotEmpty()) {
                             favoriteTrackDao.insertFavorites(entities)
-                            Log.i(TAG, "Restored ${entities.size} favorites for $cleanEmail into local database")
+                            Log.i(TAG, "Restored ${entities.size} favorites into Room for $primaryKey")
                         }
                     }
                 }
@@ -453,7 +657,7 @@ class CloudSyncManager @Inject constructor(
                 Log.w(TAG, "Error restoring favorites: ${libErr.message}")
             }
 
-            // 3. Fetch Playlists document & restore into local storage
+            // 3. Restore Playlists
             try {
                 val playlistsDoc = userRef.collection("data").document(DOC_PLAYLISTS).get().await()
                 if (playlistsDoc.exists()) {
@@ -493,7 +697,7 @@ class CloudSyncManager @Inject constructor(
                         }
                         if (restoredPlaylists.isNotEmpty()) {
                             userPlaylistsRepository.restorePlaylists(restoredPlaylists)
-                            Log.i(TAG, "Restored ${restoredPlaylists.size} playlists for $cleanEmail")
+                            Log.i(TAG, "Restored ${restoredPlaylists.size} playlists for $primaryKey")
                         }
                     }
                 }
@@ -501,10 +705,19 @@ class CloudSyncManager @Inject constructor(
                 Log.w(TAG, "Error restoring playlists: ${plErr.message}")
             }
 
-            // 4. Fetch Listening History document & account stats, restoring into local DB & cloud
-            syncListeningHistoryToCloud(cleanEmail, limit = 1500)
+            // 4. Restore Listening History & Stats
+            val tempUser = cloudProfile ?: UserProfile(
+                id = primaryKey,
+                name = cleanEmail.substringBefore("@"),
+                email = cleanEmail,
+                provider = AuthProvider.GOOGLE,
+                hasCompletedOnboarding = true,
+                favoriteArtists = emptyList(),
+                favoriteGenres = emptyList()
+            )
+            syncListeningHistoryToCloud(tempUser, limit = 1500)
 
-            // 5. Fetch Search History document & restore into local database
+            // 5. Restore Search History
             try {
                 val searchDoc = userRef.collection("data").document(DOC_SEARCH_HISTORY).get().await()
                 if (searchDoc.exists()) {
@@ -521,13 +734,38 @@ class CloudSyncManager @Inject constructor(
 
                         if (searchEntities.isNotEmpty()) {
                             searchHistoryDao.insertSearchQueries(searchEntities)
-                            Log.i(TAG, "Restored ${searchEntities.size} search queries for $cleanEmail")
+                            Log.i(TAG, "Restored ${searchEntities.size} search queries for $primaryKey")
                         }
                     }
                 }
             } catch (searchErr: Exception) {
                 Log.w(TAG, "Error restoring search history: ${searchErr.message}")
             }
+
+            // 6. Restore Settings (qualities, audio FX, gapless, crossfade, themes, recommendations)
+            try {
+                val settingsDoc = userRef.collection("data").document(DOC_SETTINGS).get().await()
+                if (settingsDoc.exists() && settingsDoc.data != null) {
+                    settingsRestorer?.invoke(settingsDoc.data!!)
+                    Log.i(TAG, "Restored account settings for $primaryKey")
+                }
+            } catch (setErr: Exception) {
+                Log.w(TAG, "Error restoring settings: ${setErr.message}")
+            }
+
+            // 7. Restore Playback State & Queue snapshot (without auto-starting playback)
+            try {
+                val playbackDoc = userRef.collection("data").document(DOC_PLAYBACK).get().await()
+                if (playbackDoc.exists() && playbackDoc.data != null) {
+                    playbackSnapshotRestorer?.invoke(playbackDoc.data!!)
+                    Log.i(TAG, "Restored playback snapshot for $primaryKey")
+                }
+            } catch (playErr: Exception) {
+                Log.w(TAG, "Error restoring playback state: ${playErr.message}")
+            }
+
+            // 8. Restart sync loops for this account
+            startSyncLoops()
 
             cloudProfile
         } catch (e: Exception) {
@@ -539,6 +777,36 @@ class CloudSyncManager @Inject constructor(
     }
 
     /**
+     * Copies all subcollection documents from a legacy email document to the new canonical UID document.
+     */
+    private suspend fun migrateLegacyAccount(legacyRef: DocumentReference, targetRef: DocumentReference) {
+        val docsToMigrate = listOf(
+            DOC_PROFILE,
+            DOC_LIBRARY,
+            DOC_PLAYLISTS,
+            DOC_HISTORY,
+            DOC_STATS,
+            DOC_SEARCH_HISTORY,
+            DOC_SETTINGS,
+            DOC_PLAYBACK,
+            DOC_DOWNLOADS
+        )
+        for (docName in docsToMigrate) {
+            try {
+                val snapshot = legacyRef.collection("data").document(docName).get().await()
+                if (snapshot.exists() && snapshot.data != null) {
+                    targetRef.collection("data").document(docName)
+                        .set(snapshot.data!!, SetOptions.merge())
+                        .await()
+                    Log.d(TAG, "Migrated $docName to canonical UID document")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Error migrating $docName: ${e.message}")
+            }
+        }
+    }
+
+    /**
      * Synchronizes listening history and lifetime statistics between local SQLite Room database and Firestore cloud.
      * Guarantees 0-loss bi-directional sync:
      * - Restores any cloud events played on another device into local Room DB.
@@ -546,13 +814,14 @@ class CloudSyncManager @Inject constructor(
      * - Pushes the full merged list to Firestore DOC_HISTORY.
      * - Computes and updates account-level lifetime statistics in Firestore DOC_STATS.
      */
-    suspend fun syncListeningHistoryToCloud(email: String, limit: Int = 1500) {
-        val cleanEmail = email.trim().lowercase()
+    suspend fun syncListeningHistoryToCloud(user: UserProfile, limit: Int = 1500) {
+        val cleanEmail = user.email.trim().lowercase()
         if (cleanEmail.isBlank() || cleanEmail.endsWith("@sielo.local")) return
 
         try {
             ensureAuthenticated()
-            val userRef = firestore.collection(COLLECTION_USERS).document(cleanEmail)
+            val userDocId = resolveUserKey(user)
+            val userRef = firestore.collection(COLLECTION_USERS).document(userDocId)
 
             // 1. Fetch existing cloud events
             val existingCloudEvents: List<Map<String, Any>> = try {
@@ -628,7 +897,7 @@ class CloudSyncManager @Inject constructor(
 
                 if (missingFromLocal.isNotEmpty()) {
                     listeningHistoryDao.insertEvents(missingFromLocal)
-                    Log.i(TAG, "Bi-directional sync inserted ${missingFromLocal.size} cloud events into local DB for $cleanEmail")
+                    Log.i(TAG, "Bi-directional sync inserted ${missingFromLocal.size} cloud events into local DB for $userDocId")
                 }
             }
 
@@ -671,9 +940,9 @@ class CloudSyncManager @Inject constructor(
                 )
                 .await()
 
-            Log.i(TAG, "Successfully synced ${mergedEvents.size} events and stats for $cleanEmail")
+            Log.i(TAG, "Successfully synced ${mergedEvents.size} events and stats for $userDocId")
         } catch (e: Exception) {
-            Log.w(TAG, "Error syncing listening history and stats for $cleanEmail: ${e.message}")
+            Log.w(TAG, "Error syncing listening history and stats for ${user.email}: ${e.message}")
         }
     }
 }

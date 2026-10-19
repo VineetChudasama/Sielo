@@ -26,7 +26,8 @@ class SettingsRepository @Inject constructor(
     private val listeningHistoryDao: ListeningHistoryDao,
     private val userManager: UserManager,
     private val playerManager: PlayerManager,
-    private val databaseCleaner: DatabaseCleaner
+    private val databaseCleaner: DatabaseCleaner,
+    private val cloudSyncManager: com.sielo.music.core.sync.CloudSyncManager
 ) {
     private val prefs: SharedPreferences = context.getSharedPreferences("sielo_user_settings", Context.MODE_PRIVATE)
 
@@ -117,6 +118,10 @@ class SettingsRepository @Inject constructor(
     val prioritizeFollowedArtists: StateFlow<Boolean> = _prioritizeFollowedArtists.asStateFlow()
 
     init {
+        // Wire cloud sync providers
+        cloudSyncManager.settingsProvider = { getSettingsMap() }
+        cloudSyncManager.settingsRestorer = { restoreSettingsMap(it) }
+
         // Sync initial player manager flags with persisted settings
         playerManager.isPrivateListeningEnabled = _privateListening.value
         playerManager.isAutoplayEnabled = _autoplayEnabled.value
@@ -138,17 +143,23 @@ class SettingsRepository @Inject constructor(
         com.sielo.music.core.network.innertube.InnerTubeClient.preferredBitrateSuffix = suffix
     }
 
-    // ── SETTERS WITH IMMEDIATE PERSISTENCE ──
+    private fun notifySettingChanged() {
+        cloudSyncManager.syncSettingsToCloud()
+    }
+
+    // ── SETTERS WITH IMMEDIATE PERSISTENCE & CLOUD SYNC ──
 
     fun setStreamQuality(quality: String) {
         prefs.edit().putString(KEY_STREAM_QUALITY, quality).apply()
         _streamQuality.value = quality
         updateStreamQualityBitrate(quality)
+        notifySettingChanged()
     }
 
     fun setDownloadQuality(quality: String) {
         prefs.edit().putString(KEY_DOWNLOAD_QUALITY, quality).apply()
         _downloadQuality.value = quality
+        notifySettingChanged()
     }
 
     fun toggleEqualizer() {
@@ -156,6 +167,7 @@ class SettingsRepository @Inject constructor(
         prefs.edit().putBoolean(KEY_EQUALIZER_ENABLED, next).apply()
         _equalizerEnabled.value = next
         com.sielo.music.core.audio.AudioEffectsManager.setEqualizerEnabled(next)
+        notifySettingChanged()
     }
 
     fun toggleBassBoost() {
@@ -163,35 +175,41 @@ class SettingsRepository @Inject constructor(
         prefs.edit().putBoolean(KEY_BASS_BOOST_ENABLED, next).apply()
         _bassBoostEnabled.value = next
         com.sielo.music.core.audio.AudioEffectsManager.setBassBoostEnabled(next)
+        notifySettingChanged()
     }
 
     fun setBassStrength(strength: Int) {
         prefs.edit().putInt(KEY_BASS_STRENGTH, strength).apply()
         _bassStrength.value = strength
         com.sielo.music.core.audio.AudioEffectsManager.setBassStrength(strength)
+        notifySettingChanged()
     }
 
     fun setEqualizerPreset(preset: String) {
         prefs.edit().putString(KEY_EQUALIZER_PRESET, preset).apply()
         _equalizerPreset.value = preset
         com.sielo.music.core.audio.AudioEffectsManager.setEqualizerPreset(preset)
+        notifySettingChanged()
     }
 
     fun setPlaybackSpeed(speed: Float) {
         prefs.edit().putFloat(KEY_PLAYBACK_SPEED, speed).apply()
         _playbackSpeed.value = speed
         playerManager.setPlaybackSpeed(speed)
+        notifySettingChanged()
     }
 
     fun toggleGaplessPlayback() {
         val next = !_gaplessPlayback.value
         prefs.edit().putBoolean(KEY_GAPLESS_PLAYBACK, next).apply()
         _gaplessPlayback.value = next
+        notifySettingChanged()
     }
 
     fun setCrossfadeSeconds(seconds: Int) {
         prefs.edit().putInt(KEY_CROSSFADE_SECONDS, seconds).apply()
         _crossfadeSeconds.value = seconds
+        notifySettingChanged()
     }
 
     fun toggleAutoplay() {
@@ -199,78 +217,91 @@ class SettingsRepository @Inject constructor(
         prefs.edit().putBoolean(KEY_AUTOPLAY_ENABLED, next).apply()
         _autoplayEnabled.value = next
         playerManager.isAutoplayEnabled = next
+        notifySettingChanged()
     }
 
     fun toggleRememberPosition() {
         val next = !_rememberPosition.value
         prefs.edit().putBoolean(KEY_REMEMBER_POSITION, next).apply()
         _rememberPosition.value = next
+        notifySettingChanged()
     }
 
     fun togglePauseOnDisconnect() {
         val next = !_pauseOnDisconnect.value
         prefs.edit().putBoolean(KEY_PAUSE_ON_DISCONNECT, next).apply()
         _pauseOnDisconnect.value = next
+        notifySettingChanged()
     }
 
     fun toggleBluetoothAutoResume() {
         val next = !_bluetoothAutoResume.value
         prefs.edit().putBoolean(KEY_BLUETOOTH_AUTO_RESUME, next).apply()
         _bluetoothAutoResume.value = next
+        notifySettingChanged()
     }
 
     fun toggleVolumeNormalization() {
         val next = !_volumeNormalization.value
         prefs.edit().putBoolean(KEY_VOLUME_NORMALIZATION, next).apply()
         _volumeNormalization.value = next
+        notifySettingChanged()
     }
 
     fun toggleDownloadWifiOnly() {
         val next = !_downloadWifiOnly.value
         prefs.edit().putBoolean(KEY_DOWNLOAD_WIFI_ONLY, next).apply()
         _downloadWifiOnly.value = next
+        notifySettingChanged()
     }
 
     fun toggleOledDarkTheme() {
         val next = !_oledDarkTheme.value
         prefs.edit().putBoolean(KEY_OLED_DARK_THEME, next).apply()
         _oledDarkTheme.value = next
+        notifySettingChanged()
     }
 
     fun toggleDynamicArtworkTint() {
         val next = !_dynamicArtworkTint.value
         prefs.edit().putBoolean(KEY_DYNAMIC_ARTWORK_TINT, next).apply()
         _dynamicArtworkTint.value = next
+        notifySettingChanged()
     }
 
     fun toggleHighFpsVisuals() {
         val next = !_highFpsVisuals.value
         prefs.edit().putBoolean(KEY_HIGH_FPS_VISUALS, next).apply()
         _highFpsVisuals.value = next
+        notifySettingChanged()
     }
 
     fun toggleNotificationsPlayback() {
         val next = !_notificationsPlayback.value
         prefs.edit().putBoolean(KEY_NOTIF_PLAYBACK, next).apply()
         _notificationsPlayback.value = next
+        notifySettingChanged()
     }
 
     fun toggleNotificationsListenTogether() {
         val next = !_notificationsListenTogether.value
         prefs.edit().putBoolean(KEY_NOTIF_LISTEN_TOGETHER, next).apply()
         _notificationsListenTogether.value = next
+        notifySettingChanged()
     }
 
     fun toggleAllowRoomInvites() {
         val next = !_allowRoomInvites.value
         prefs.edit().putBoolean(KEY_ALLOW_ROOM_INVITES, next).apply()
         _allowRoomInvites.value = next
+        notifySettingChanged()
     }
 
     fun toggleAutoRejoinSession() {
         val next = !_autoRejoinSession.value
         prefs.edit().putBoolean(KEY_AUTO_REJOIN_SESSION, next).apply()
         _autoRejoinSession.value = next
+        notifySettingChanged()
     }
 
     fun togglePrivateListening() {
@@ -278,17 +309,163 @@ class SettingsRepository @Inject constructor(
         prefs.edit().putBoolean(KEY_PRIVATE_LISTENING, next).apply()
         _privateListening.value = next
         playerManager.isPrivateListeningEnabled = next
+        notifySettingChanged()
     }
 
     fun setRecommendationDiversity(level: String) {
         prefs.edit().putString(KEY_REC_DIVERSITY, level).apply()
         _recommendationDiversity.value = level
+        notifySettingChanged()
     }
 
     fun togglePrioritizeFollowedArtists() {
         val next = !_prioritizeFollowedArtists.value
         prefs.edit().putBoolean(KEY_PRIORITIZE_FOLLOWED, next).apply()
         _prioritizeFollowedArtists.value = next
+        notifySettingChanged()
+    }
+
+    fun getSettingsMap(): Map<String, Any> {
+        return mapOf(
+            KEY_STREAM_QUALITY to _streamQuality.value,
+            KEY_DOWNLOAD_QUALITY to _downloadQuality.value,
+            KEY_EQUALIZER_ENABLED to _equalizerEnabled.value,
+            KEY_BASS_BOOST_ENABLED to _bassBoostEnabled.value,
+            KEY_BASS_STRENGTH to _bassStrength.value,
+            KEY_EQUALIZER_PRESET to _equalizerPreset.value,
+            KEY_PLAYBACK_SPEED to _playbackSpeed.value,
+            KEY_GAPLESS_PLAYBACK to _gaplessPlayback.value,
+            KEY_CROSSFADE_SECONDS to _crossfadeSeconds.value,
+            KEY_AUTOPLAY_ENABLED to _autoplayEnabled.value,
+            KEY_REMEMBER_POSITION to _rememberPosition.value,
+            KEY_PAUSE_ON_DISCONNECT to _pauseOnDisconnect.value,
+            KEY_BLUETOOTH_AUTO_RESUME to _bluetoothAutoResume.value,
+            KEY_VOLUME_NORMALIZATION to _volumeNormalization.value,
+            KEY_DOWNLOAD_WIFI_ONLY to _downloadWifiOnly.value,
+            KEY_OLED_DARK_THEME to _oledDarkTheme.value,
+            KEY_DYNAMIC_ARTWORK_TINT to _dynamicArtworkTint.value,
+            KEY_HIGH_FPS_VISUALS to _highFpsVisuals.value,
+            KEY_NOTIF_PLAYBACK to _notificationsPlayback.value,
+            KEY_NOTIF_LISTEN_TOGETHER to _notificationsListenTogether.value,
+            KEY_ALLOW_ROOM_INVITES to _allowRoomInvites.value,
+            KEY_AUTO_REJOIN_SESSION to _autoRejoinSession.value,
+            KEY_PRIVATE_LISTENING to _privateListening.value,
+            KEY_REC_DIVERSITY to _recommendationDiversity.value,
+            KEY_PRIORITIZE_FOLLOWED to _prioritizeFollowedArtists.value
+        )
+    }
+
+    fun restoreSettingsMap(map: Map<String, Any>) {
+        val editor = prefs.edit()
+        (map[KEY_STREAM_QUALITY] as? String)?.let {
+            editor.putString(KEY_STREAM_QUALITY, it)
+            _streamQuality.value = it
+            updateStreamQualityBitrate(it)
+        }
+        (map[KEY_DOWNLOAD_QUALITY] as? String)?.let {
+            editor.putString(KEY_DOWNLOAD_QUALITY, it)
+            _downloadQuality.value = it
+        }
+        (map[KEY_EQUALIZER_ENABLED] as? Boolean)?.let {
+            editor.putBoolean(KEY_EQUALIZER_ENABLED, it)
+            _equalizerEnabled.value = it
+            com.sielo.music.core.audio.AudioEffectsManager.setEqualizerEnabled(it)
+        }
+        (map[KEY_BASS_BOOST_ENABLED] as? Boolean)?.let {
+            editor.putBoolean(KEY_BASS_BOOST_ENABLED, it)
+            _bassBoostEnabled.value = it
+            com.sielo.music.core.audio.AudioEffectsManager.setBassBoostEnabled(it)
+        }
+        (map[KEY_BASS_STRENGTH] as? Number)?.let {
+            editor.putInt(KEY_BASS_STRENGTH, it.toInt())
+            _bassStrength.value = it.toInt()
+            com.sielo.music.core.audio.AudioEffectsManager.setBassStrength(it.toInt())
+        }
+        (map[KEY_EQUALIZER_PRESET] as? String)?.let {
+            editor.putString(KEY_EQUALIZER_PRESET, it)
+            _equalizerPreset.value = it
+            com.sielo.music.core.audio.AudioEffectsManager.setEqualizerPreset(it)
+        }
+        (map[KEY_PLAYBACK_SPEED] as? Number)?.let {
+            editor.putFloat(KEY_PLAYBACK_SPEED, it.toFloat())
+            _playbackSpeed.value = it.toFloat()
+            playerManager.setPlaybackSpeed(it.toFloat())
+        }
+        (map[KEY_GAPLESS_PLAYBACK] as? Boolean)?.let {
+            editor.putBoolean(KEY_GAPLESS_PLAYBACK, it)
+            _gaplessPlayback.value = it
+        }
+        (map[KEY_CROSSFADE_SECONDS] as? Number)?.let {
+            editor.putInt(KEY_CROSSFADE_SECONDS, it.toInt())
+            _crossfadeSeconds.value = it.toInt()
+        }
+        (map[KEY_AUTOPLAY_ENABLED] as? Boolean)?.let {
+            editor.putBoolean(KEY_AUTOPLAY_ENABLED, it)
+            _autoplayEnabled.value = it
+            playerManager.isAutoplayEnabled = it
+        }
+        (map[KEY_REMEMBER_POSITION] as? Boolean)?.let {
+            editor.putBoolean(KEY_REMEMBER_POSITION, it)
+            _rememberPosition.value = it
+        }
+        (map[KEY_PAUSE_ON_DISCONNECT] as? Boolean)?.let {
+            editor.putBoolean(KEY_PAUSE_ON_DISCONNECT, it)
+            _pauseOnDisconnect.value = it
+        }
+        (map[KEY_BLUETOOTH_AUTO_RESUME] as? Boolean)?.let {
+            editor.putBoolean(KEY_BLUETOOTH_AUTO_RESUME, it)
+            _bluetoothAutoResume.value = it
+        }
+        (map[KEY_VOLUME_NORMALIZATION] as? Boolean)?.let {
+            editor.putBoolean(KEY_VOLUME_NORMALIZATION, it)
+            _volumeNormalization.value = it
+        }
+        (map[KEY_DOWNLOAD_WIFI_ONLY] as? Boolean)?.let {
+            editor.putBoolean(KEY_DOWNLOAD_WIFI_ONLY, it)
+            _downloadWifiOnly.value = it
+        }
+        (map[KEY_OLED_DARK_THEME] as? Boolean)?.let {
+            editor.putBoolean(KEY_OLED_DARK_THEME, it)
+            _oledDarkTheme.value = it
+        }
+        (map[KEY_DYNAMIC_ARTWORK_TINT] as? Boolean)?.let {
+            editor.putBoolean(KEY_DYNAMIC_ARTWORK_TINT, it)
+            _dynamicArtworkTint.value = it
+        }
+        (map[KEY_HIGH_FPS_VISUALS] as? Boolean)?.let {
+            editor.putBoolean(KEY_HIGH_FPS_VISUALS, it)
+            _highFpsVisuals.value = it
+        }
+        (map[KEY_NOTIF_PLAYBACK] as? Boolean)?.let {
+            editor.putBoolean(KEY_NOTIF_PLAYBACK, it)
+            _notificationsPlayback.value = it
+        }
+        (map[KEY_NOTIF_LISTEN_TOGETHER] as? Boolean)?.let {
+            editor.putBoolean(KEY_NOTIF_LISTEN_TOGETHER, it)
+            _notificationsListenTogether.value = it
+        }
+        (map[KEY_ALLOW_ROOM_INVITES] as? Boolean)?.let {
+            editor.putBoolean(KEY_ALLOW_ROOM_INVITES, it)
+            _allowRoomInvites.value = it
+        }
+        (map[KEY_AUTO_REJOIN_SESSION] as? Boolean)?.let {
+            editor.putBoolean(KEY_AUTO_REJOIN_SESSION, it)
+            _autoRejoinSession.value = it
+        }
+        (map[KEY_PRIVATE_LISTENING] as? Boolean)?.let {
+            editor.putBoolean(KEY_PRIVATE_LISTENING, it)
+            _privateListening.value = it
+            playerManager.isPrivateListeningEnabled = it
+        }
+        (map[KEY_REC_DIVERSITY] as? String)?.let {
+            editor.putString(KEY_REC_DIVERSITY, it)
+            _recommendationDiversity.value = it
+        }
+        (map[KEY_PRIORITIZE_FOLLOWED] as? Boolean)?.let {
+            editor.putBoolean(KEY_PRIORITIZE_FOLLOWED, it)
+            _prioritizeFollowedArtists.value = it
+        }
+        editor.apply()
     }
 
     // ── REAL ACTION METHODS ──

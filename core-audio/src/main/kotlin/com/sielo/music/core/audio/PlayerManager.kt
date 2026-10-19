@@ -272,6 +272,76 @@ class PlayerManager @Inject constructor(
         } catch (_: Exception) {}
     }
 
+    /**
+     * Exports a lightweight serializable snapshot of the current playback state and queue for cloud sync.
+     */
+    fun getPlaybackSnapshot(): Map<String, Any>? {
+        val state = _playbackState.value
+        val track = state.currentTrack ?: return null
+        return try {
+            val trackJson = json.encodeToString(track)
+            val queueJson = json.encodeToString(state.queue.take(50)) // preserve current queue window
+            mapOf(
+                "track" to trackJson,
+                "queue" to queueJson,
+                "queueIndex" to state.queueIndex,
+                "positionMs" to state.currentPositionMs,
+                "durationMs" to state.durationMs,
+                "isShuffle" to state.isShuffle,
+                "updatedAt" to System.currentTimeMillis()
+            )
+        } catch (e: Exception) {
+            Log.w("SieloAudio", "Failed to build playback snapshot: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Restores playback state from cloud snapshot into local storage and memory.
+     * Guarantees isPlaying remains false so playback does NOT auto-start unexpectedly on login.
+     */
+    fun restoreFromCloudSnapshot(snapshot: Map<String, Any>) {
+        try {
+            val trackJson = snapshot["track"] as? String
+            val queueJson = snapshot["queue"] as? String
+            val queueIndex = (snapshot["queueIndex"] as? Number)?.toInt() ?: 0
+            val positionMs = (snapshot["positionMs"] as? Number)?.toLong() ?: 0L
+            val durationMs = (snapshot["durationMs"] as? Number)?.toLong() ?: 0L
+            val isShuffle = snapshot["isShuffle"] as? Boolean ?: false
+
+            if (!trackJson.isNullOrBlank()) {
+                val track = json.decodeFromString<SieloTrack>(trackJson)
+                val queue = if (!queueJson.isNullOrBlank()) {
+                    try {
+                        json.decodeFromString<List<SieloTrack>>(queueJson)
+                    } catch (_: Exception) {
+                        listOf(track)
+                    }
+                } else {
+                    listOf(track)
+                }
+
+                savePlaybackState(track, queue, queueIndex, positionMs, durationMs)
+
+                _playbackState.update {
+                    it.copy(
+                        currentTrack = track,
+                        queue = queue,
+                        queueIndex = queueIndex.coerceIn(0, (queue.size - 1).coerceAtLeast(0)),
+                        currentPositionMs = positionMs,
+                        durationMs = if (durationMs > 0L) durationMs else (track.durationSeconds * 1000L),
+                        isPlaying = false,
+                        isBuffering = false,
+                        isShuffle = isShuffle
+                    )
+                }
+                Log.i("SieloAudio", "Restored playback state from cloud snapshot: ${track.title} by ${track.artist}")
+            }
+        } catch (e: Exception) {
+            Log.e("SieloAudio", "Error restoring playback state from cloud: ${e.message}", e)
+        }
+    }
+
     private suspend fun getController(): MediaController? = suspendCancellableCoroutine { cont ->
         val current = mediaController
         if (current != null) {

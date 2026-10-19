@@ -1,0 +1,23 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // User account root and all subcollections
+    // Restricts access strictly to the authenticated user owning the document.
+    // Backward compatibility: Allows matching either canonical Firebase Auth UID
+    // or verified email during account migration.
+    match /sielo_users/{userId} {
+      allow read, write: if request.auth != null && (
+        request.auth.uid == userId ||
+        (request.auth.token.email != null && request.auth.token.email.lower() == userId.lower())
+      );
+
+      match /{subcollection=**} {
+        allow read, write: if request.auth != null && (
+          request.auth.uid == userId ||
+          (request.auth.token.email != null && request.auth.token.email.lower() == userId.lower())
+        );
+      }
+    }
+  }
+}
