@@ -16,8 +16,8 @@ android {
         applicationId = "com.sielo.music"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1152
-        versionName = "11.5.2"
+        versionCode = 1153
+        versionName = "11.5.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -73,6 +73,10 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    testOptions {
+        unitTests.isReturnDefaultValues = true
     }
 
     lint {

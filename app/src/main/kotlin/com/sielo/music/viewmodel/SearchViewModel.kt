@@ -18,6 +18,8 @@
     import com.sielo.music.core.network.models.SieloArtist
     import com.sielo.music.core.network.models.SieloTrack
     import dagger.hilt.android.lifecycle.HiltViewModel
+    import java.util.Locale
+    import kotlinx.coroutines.CancellationException
     import kotlinx.coroutines.Dispatchers
     import kotlinx.coroutines.Job
     import kotlinx.coroutines.delay
@@ -103,112 +105,172 @@
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     
         init {
-            // Automatically prune prefix-redundant keystrokes from previous app launches
-            viewModelScope.launch {
-                try {
-                    val allQueries = searchHistoryDao.getAllSearchQueries()
-                    val redundant = mutableListOf<String>()
-                    for (item in allQueries) {
-                        val q = item.query.trim().lowercase()
-                        val hasLonger = allQueries.any { other ->
-                            val otherQ = other.query.trim().lowercase()
-                            otherQ != q && otherQ.startsWith(q)
-                        }
-                        if (hasLonger) {
-                            redundant.add(item.query)
-                        }
-                    }
-                    if (redundant.isNotEmpty()) {
-                        searchHistoryDao.deleteSearchQueries(redundant)
-                    }
-                } catch (_: Exception) {}
+            // Search history preserved safely without destructive prefix deletions
+        }
+
+        private var searchJob: Job? = null
+        private var searchSequence: Long = 0L
+
+        data class CachedSearchResult(
+            val tracks: List<SieloTrack>,
+            val artists: List<SieloArtist>,
+            val timestampMs: Long
+        )
+
+        class SearchResultCache(
+            private val maxEntries: Int = 40,
+            private val ttlMs: Long = 60_000L
+        ) {
+            private val lock = Any()
+            private val cache = object : LinkedHashMap<String, CachedSearchResult>(maxEntries, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedSearchResult>?): Boolean {
+                    return size > maxEntries
+                }
+            }
+
+            fun get(category: String, normalizedQuery: String): CachedSearchResult? = synchronized(lock) {
+                val key = "${category.lowercase(Locale.ROOT)}:$normalizedQuery"
+                val entry = cache[key] ?: return null
+                if (System.currentTimeMillis() - entry.timestampMs > ttlMs) {
+                    cache.remove(key)
+                    return null
+                }
+                entry
+            }
+
+            fun put(category: String, normalizedQuery: String, tracks: List<SieloTrack>, artists: List<SieloArtist>) = synchronized(lock) {
+                val key = "${category.lowercase(Locale.ROOT)}:$normalizedQuery"
+                cache[key] = CachedSearchResult(
+                    tracks = tracks,
+                    artists = artists,
+                    timestampMs = System.currentTimeMillis()
+                )
+            }
+
+            fun clear() = synchronized(lock) {
+                cache.clear()
+            }
+
+            fun size(): Int = synchronized(lock) {
+                cache.size
             }
         }
-    
-        private var searchJob: Job? = null
-    
+
+        internal val searchCache = SearchResultCache(maxEntries = 40, ttlMs = 60_000L)
+
         fun onSearchQueryChanged(query: String) {
             _searchQuery.value = query
             searchJob?.cancel()
-            if (query.isBlank()) {
+            val currentSeq = ++searchSequence
+            val normalized = normalizeSearchQuery(query)
+            if (normalized.isBlank()) {
                 _searchResults.value = emptyList()
                 _artistResults.value = emptyList()
                 _isSearching.value = false
                 return
             }
-    
+
+            val cached = searchCache.get(_filterCategory.value, normalized)
+            if (cached != null) {
+                _searchResults.value = cached.tracks
+                _artistResults.value = cached.artists
+                _isSearching.value = false
+                return
+            }
+
             searchJob = viewModelScope.launch {
                 delay(280)
-                executeSearch(query, _filterCategory.value)
+                executeSearch(query, _filterCategory.value, currentSeq)
             }
         }
-    
+
         fun submitSearch(query: String) {
             val trimmed = query.trim()
             if (trimmed.isBlank()) return
             _searchQuery.value = trimmed
             saveSearchQuery(trimmed)
             searchJob?.cancel()
+            val currentSeq = ++searchSequence
+            val normalized = normalizeSearchQuery(trimmed)
+            val cached = searchCache.get(_filterCategory.value, normalized)
+            if (cached != null) {
+                _searchResults.value = cached.tracks
+                _artistResults.value = cached.artists
+                _isSearching.value = false
+                return
+            }
             searchJob = viewModelScope.launch {
-                executeSearch(trimmed, _filterCategory.value)
+                executeSearch(trimmed, _filterCategory.value, currentSeq)
             }
         }
-    
+
         fun saveSearchQuery(query: String) {
             val trimmed = query.trim()
             if (trimmed.length >= 2) {
                 viewModelScope.launch {
                     try {
-                        // Remove any existing sub-queries that are prefixes of this query to keep history clean
-                        val all = searchHistoryDao.getAllSearchQueries()
-                        val toRemove = all.filter {
-                            val existing = it.query.trim().lowercase()
-                            (trimmed.lowercase().startsWith(existing) || existing.startsWith(trimmed.lowercase())) && existing != trimmed.lowercase()
-                        }.map { it.query }
-                        if (toRemove.isNotEmpty()) {
-                            searchHistoryDao.deleteSearchQueries(toRemove)
-                        }
+                        searchHistoryDao.insertSearchQuery(
+                            SearchHistoryEntity(query = trimmed, timestampMs = System.currentTimeMillis())
+                        )
                     } catch (_: Exception) {}
-                    searchHistoryDao.insertSearchQuery(SearchHistoryEntity(query = trimmed, timestampMs = System.currentTimeMillis()))
                 }
             }
         }
-    
+
         fun deleteSearchQuery(query: String) {
             viewModelScope.launch {
-                searchHistoryDao.deleteSearchQuery(query)
+                try {
+                    searchHistoryDao.deleteSearchQuery(query)
+                } catch (_: Exception) {}
             }
         }
-    
+
         fun clearAllSearches() {
             viewModelScope.launch {
-                searchHistoryDao.clearAllSearchHistory()
+                try {
+                    searchHistoryDao.clearAllSearchHistory()
+                } catch (_: Exception) {}
             }
         }
-    
+
         fun setCategory(category: String) {
+            if (_filterCategory.value == category) return
             _filterCategory.value = category
             val currentQuery = _searchQuery.value.trim()
+            searchJob?.cancel()
+            val currentSeq = ++searchSequence
             if (currentQuery.isNotBlank()) {
-                searchJob?.cancel()
-                searchJob = viewModelScope.launch {
-                    executeSearch(currentQuery, category)
+                val normalized = normalizeSearchQuery(currentQuery)
+                val cached = searchCache.get(category, normalized)
+                if (cached != null) {
+                    _searchResults.value = cached.tracks
+                    _artistResults.value = cached.artists
+                    _isSearching.value = false
+                } else {
+                    _searchResults.value = emptyList()
+                    _artistResults.value = emptyList()
+                    _isSearching.value = true
+                    searchJob = viewModelScope.launch {
+                        executeSearch(currentQuery, category, currentSeq)
+                    }
                 }
+            } else {
+                _searchResults.value = emptyList()
+                _artistResults.value = emptyList()
+                _isSearching.value = false
             }
         }
-    
+
         fun clearSearch() {
             _searchQuery.value = ""
             _searchResults.value = emptyList()
             _artistResults.value = emptyList()
             _isSearching.value = false
             searchJob?.cancel()
+            searchSequence++
         }
-    
-        private fun normalizeSearchQuery(raw: String): String {
-            return raw.trim()
-                .replace(Regex("(?i)\\bhe\\b"), "hi")
-        }
+
+        fun normalizeSearchQuery(raw: String): String = Companion.normalizeSearchQuery(raw)
     
     data class UserTasteSnapshot(
         val topArtistNames: Set<String> = emptySet(),
@@ -292,335 +354,228 @@
         }
     }
 
-    private suspend fun executeSearch(query: String, category: String) {
+    internal fun levenshteinDistance(s1: String, s2: String, maxDistance: Int = 2): Int =
+        Companion.levenshteinDistance(s1, s2, maxDistance)
+
+    private suspend fun executeSearch(query: String, category: String, sequenceId: Long) {
         val trimmed = query.trim()
-        if (trimmed.isBlank()) {
-            _searchResults.value = emptyList()
-            _artistResults.value = emptyList()
-            _isSearching.value = false
+        val normalized = normalizeSearchQuery(trimmed)
+        if (normalized.isBlank()) {
+            if (sequenceId == searchSequence) {
+                _searchResults.value = emptyList()
+                _artistResults.value = emptyList()
+                _isSearching.value = false
+            }
             return
         }
-        val normalized = normalizeSearchQuery(trimmed)
-        _isSearching.value = true
+
+        // 1. Check in-memory cache first
+        val cached = searchCache.get(category, normalized)
+        if (cached != null) {
+            if (sequenceId == searchSequence && _filterCategory.value == category) {
+                _searchResults.value = cached.tracks
+                _artistResults.value = cached.artists
+                _isSearching.value = false
+            }
+            return
+        }
+
+        if (sequenceId == searchSequence) {
+            _isSearching.value = true
+        }
 
         try {
             val taste = getUserTasteSnapshot()
             when (category) {
                 "Artists" -> {
-                    coroutineScope {
-                        val ytArtistsDeferred = async { innerTubeClient.searchArtists(trimmed) }
-                        val mbArtistsDeferred = async {
+                    val artists = coroutineScope {
+                        val ytDeferred = async {
                             try {
-                                musicMetadataRepository.searchArtist(trimmed)
+                                innerTubeClient.searchArtists(trimmed)
+                            } catch (e: CancellationException) {
+                                throw e
                             } catch (_: Exception) {
                                 emptyList()
                             }
                         }
-                        val artists = ytArtistsDeferred.await()
-                        val mbArtists = mbArtistsDeferred.await()
-                        val combined = mergeArtists(artists, mbArtists)
-                        if (_searchQuery.value.trim().equals(trimmed, ignoreCase = true)) {
-                            _artistResults.value = rankArtists(combined, trimmed, taste)
-                            _searchResults.value = emptyList()
+                        val mbDeferred = async {
+                            try {
+                                musicMetadataRepository.searchArtist(trimmed)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (_: Exception) {
+                                emptyList()
+                            }
+                        }
+                        mergeArtists(ytDeferred.await(), mbDeferred.await())
+                    }
+
+                    if (sequenceId == searchSequence &&
+                        normalizeSearchQuery(_searchQuery.value) == normalized &&
+                        _filterCategory.value == category
+                    ) {
+                        val ranked = rankArtists(artists, trimmed, taste)
+                        _artistResults.value = ranked
+                        _searchResults.value = emptyList()
+                        if (ranked.isNotEmpty()) {
+                            searchCache.put(category, normalized, emptyList(), ranked)
                         }
                     }
                 }
                 "Songs" -> {
-                    val primaryTracks = innerTubeClient.search(trimmed)
-                    val additionalTracks = if (normalized != trimmed) innerTubeClient.search(normalized) else emptyList()
-                    val allTracks = (primaryTracks + additionalTracks)
-                    val deduplicated = TrackMatchValidator.deduplicateTracks(allTracks).distinctBy { it.id }
-                    if (_searchQuery.value.trim().equals(trimmed, ignoreCase = true)) {
-                        _searchResults.value = rankTracks(deduplicated, trimmed, taste)
+                    val tracks = coroutineScope {
+                        val primaryDeferred = async {
+                            try {
+                                innerTubeClient.search(trimmed)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (_: Exception) {
+                                emptyList()
+                            }
+                        }
+                        val altDeferred = async {
+                            if (normalized != trimmed.lowercase(Locale.ROOT)) {
+                                try {
+                                    innerTubeClient.search(normalized)
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (_: Exception) {
+                                    emptyList()
+                                }
+                            } else emptyList()
+                        }
+                        val combined = primaryDeferred.await() + altDeferred.await()
+                        TrackMatchValidator.deduplicateTracks(combined).distinctBy { it.id }
+                    }
+
+                    if (sequenceId == searchSequence &&
+                        normalizeSearchQuery(_searchQuery.value) == normalized &&
+                        _filterCategory.value == category
+                    ) {
+                        val ranked = rankTracks(tracks, trimmed, taste)
+                        _searchResults.value = ranked
                         _artistResults.value = emptyList()
+                        if (ranked.isNotEmpty()) {
+                            searchCache.put(category, normalized, ranked, emptyList())
+                        }
                     }
                 }
-                else -> { // "All" or other
-                    coroutineScope {
+                else -> { // "All" category: songs and artists are retrieved independently
+                    val (tracks, artists) = coroutineScope {
                         val tracksDeferred = async {
-                            val primaryTracks = innerTubeClient.search(trimmed)
-                            val additionalTracks = if (normalized != trimmed) innerTubeClient.search(normalized) else emptyList()
-                            val allTracks = (primaryTracks + additionalTracks)
-                            TrackMatchValidator.deduplicateTracks(allTracks).distinctBy { it.id }
-                        }
-                        val artistsDeferred = async {
-                            innerTubeClient.searchArtists(trimmed)
-                        }
-                        val mbArtistsDeferred = async {
                             try {
-                                musicMetadataRepository.searchArtist(trimmed)
+                                val primary = innerTubeClient.search(trimmed)
+                                val alt = if (normalized != trimmed.lowercase(Locale.ROOT)) {
+                                    try { innerTubeClient.search(normalized) } catch (_: Exception) { emptyList() }
+                                } else emptyList()
+                                TrackMatchValidator.deduplicateTracks(primary + alt).distinctBy { it.id }
+                            } catch (e: CancellationException) {
+                                throw e
                             } catch (_: Exception) {
                                 emptyList()
                             }
                         }
 
-                        val tracks = tracksDeferred.await()
-                        val artists = artistsDeferred.await()
-                        val mbArtists = mbArtistsDeferred.await()
-                        val combined = mergeArtists(artists, mbArtists)
+                        val artistsDeferred = async {
+                            val yt = try {
+                                innerTubeClient.searchArtists(trimmed)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (_: Exception) {
+                                emptyList()
+                            }
+                            val mb = try {
+                                musicMetadataRepository.searchArtist(trimmed)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (_: Exception) {
+                                emptyList()
+                            }
+                            mergeArtists(yt, mb)
+                        }
 
-                        if (_searchQuery.value.trim().equals(trimmed, ignoreCase = true)) {
-                            _searchResults.value = rankTracks(tracks, trimmed, taste)
-                            _artistResults.value = rankArtists(combined, trimmed, taste)
+                        tracksDeferred.await() to artistsDeferred.await()
+                    }
+
+                    if (sequenceId == searchSequence &&
+                        normalizeSearchQuery(_searchQuery.value) == normalized &&
+                        _filterCategory.value == category
+                    ) {
+                        val rankedTracks = rankTracks(tracks, trimmed, taste)
+                        val rankedArtists = rankArtists(artists, trimmed, taste)
+                        _searchResults.value = rankedTracks
+                        _artistResults.value = rankedArtists
+                        if (rankedTracks.isNotEmpty() || rankedArtists.isNotEmpty()) {
+                            searchCache.put(category, normalized, rankedTracks, rankedArtists)
                         }
                     }
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Failure in one provider must not crash the entire search screen
         } finally {
-            if (_searchQuery.value.trim().equals(trimmed, ignoreCase = true)) {
+            if (sequenceId == searchSequence &&
+                normalizeSearchQuery(_searchQuery.value) == normalized &&
+                _filterCategory.value == category
+            ) {
                 _isSearching.value = false
             }
         }
     }
 
-    private fun rankTracks(tracks: List<SieloTrack>, query: String, taste: UserTasteSnapshot): List<SieloTrack> {
-        val q = query.trim().lowercase()
-        if (q.isBlank()) return tracks
-        val words = q.split(Regex("\\s+")).filter { it.isNotBlank() }
+    internal fun rankTracks(tracks: List<SieloTrack>, query: String, taste: UserTasteSnapshot = UserTasteSnapshot()): List<SieloTrack> =
+        Companion.rankTracks(tracks, query, taste)
 
-        val scoredTracks = tracks.map { track ->
-            val title = track.title.trim().lowercase()
-            val artist = track.artist.trim().lowercase()
-            val cleanArtist = cleanForArtistMatch(artist)
-            var textScore = 0
-
-            // 1. Text Relevance Match
-            if (title == q) textScore += 10000
-            else if (artist == q) textScore += 8000
-            else if (title.startsWith(q)) textScore += 5000
-            else if (artist.startsWith(q)) textScore += 4000
-            else if (title.contains(" $q") || title.contains("($q") || title.contains("[$q")) textScore += 3000
-            else if (artist.contains(" $q")) textScore += 2500
-            else if (title.contains(q)) textScore += 1500
-            else if (artist.contains(q)) textScore += 1000
-
-            // Multi-word / token matching
-            var matchingWords = 0
-            for (w in words) {
-                if (title.startsWith(w)) {
-                    textScore += 300
-                    matchingWords++
-                } else if (title.contains(w)) {
-                    textScore += 150
-                    matchingWords++
-                }
-                if (artist.startsWith(w)) {
-                    textScore += 200
-                    matchingWords++
-                } else if (artist.contains(w)) {
-                    textScore += 100
-                    matchingWords++
-                }
+    fun refreshArtist() {
+        val current = _selectedArtist.value ?: return
+        viewModelScope.launch {
+            _isArtistLoading.value = true
+            val saavnId = if (current.id.all { it.isDigit() }) current.id else null
+            val fullDetails = musicMetadataRepository.getArtistDetails(
+                artistName = current.name,
+                imageUrl = current.imageUrl,
+                artistId = saavnId,
+                forceRefresh = true
+            )
+            if (fullDetails != null) {
+                _selectedArtist.value = fullDetails
             }
-
-            // Clean studio bonus & noise penalties
-            if (CandidatePoolBuilder.isCleanStudioTrack(track.title, track.artist)) {
-                textScore += 250
-            }
-            val noiseKeywords = listOf("remix", "karaoke", "instrumental", "cover", "slowed", "reverb", "parody", "mashup")
-            if (noiseKeywords.any { title.contains(it) && !q.contains(it) }) {
-                textScore -= 1500
-            }
-
-            // 2. Plays / Popularity Boost (0 to 1800 pts)
-            var playScore = 0
-            if (track.viewCount > 0) {
-                val logViews = kotlin.math.log10(track.viewCount.toDouble()).coerceIn(0.0, 10.0)
-                playScore += (logViews * 180).toInt()
-            }
-
-            // 3. User Listening History & Plays Personalization Boost
-            val userPlayCount = taste.playedSongCounts[track.id] ?: 0
-            if (userPlayCount > 0) {
-                playScore += 1500 + (userPlayCount * 120).coerceAtMost(1200)
-            }
-            if (track.id in taste.searchPlayedSongIds) {
-                playScore += 1800
-            }
-            if (track.id in taste.favoriteSongIds) {
-                playScore += 2200
-            }
-
-            // User artist affinity (top played / favorite artists)
-            val artistWeight = taste.topArtistWeights.entries.firstOrNull { (name, _) ->
-                artist.contains(name) || name.contains(artist) || cleanForArtistMatch(name) == cleanArtist
-            }?.value ?: 0
-            if (artistWeight > 0) {
-                playScore += (1000 + (artistWeight * 150)).coerceAtMost(3000)
-            }
-
-            // 4. Music Type / Style Affinity (Language & Vibe)
-            val trackLang = SongClassifier.detectLanguage(track)
-            if (trackLang in taste.topLanguages) {
-                val langRank = taste.topLanguages.toList().indexOf(trackLang)
-                playScore += if (langRank == 0) 1200 else 600
-            }
-
-            val trackVibe = SongClassifier.detectVibe(track)
-            if (trackVibe in taste.topVibes) {
-                playScore += 800
-            }
-
-            if (taste.favoriteGenres.isNotEmpty()) {
-                val combined = "$title $artist".lowercase()
-                if (taste.favoriteGenres.any { combined.contains(it) }) {
-                    playScore += 600
-                }
-            }
-
-            val totalScore = textScore + playScore
-            track to Triple(totalScore, textScore, matchingWords)
+            _isArtistLoading.value = false
         }
-
-        val filtered = if (words.size >= 2) {
-            scoredTracks.filter { (_, meta) ->
-                val (_, textScore, matchingWords) = meta
-                textScore >= 150 || matchingWords >= (words.size / 2).coerceAtLeast(1)
-            }
-        } else {
-            scoredTracks.filter { (_, meta) -> meta.second > 0 }
-        }
-
-        val finalSelection = if (filtered.isNotEmpty()) filtered else scoredTracks
-        return finalSelection.sortedByDescending { it.second.first }.map { it.first }
     }
-    
-        fun refreshArtist() {
-            val current = _selectedArtist.value ?: return
-            viewModelScope.launch {
-                _isArtistLoading.value = true
-                val saavnId = if (current.id.all { it.isDigit() }) current.id else null
-                val fullDetails = musicMetadataRepository.getArtistDetails(
-                    artistName = current.name,
-                    imageUrl = current.imageUrl,
-                    artistId = saavnId,
-                    forceRefresh = true
-                )
-                if (fullDetails != null) {
-                    _selectedArtist.value = fullDetails
+
+    internal fun cleanForArtistMatch(name: String): String = Companion.cleanForArtistMatch(name)
+
+    private fun mergeArtists(primary: List<SieloArtist>, secondary: List<SieloArtist>): List<SieloArtist> {
+        val result = mutableListOf<SieloArtist>()
+        result.addAll(primary)
+        for (sec in secondary) {
+            val secClean = cleanForArtistMatch(sec.name)
+            val existing = result.find { cleanForArtistMatch(it.name) == secClean }
+            if (existing == null) {
+                if (primary.isEmpty() || !sec.imageUrl.isNullOrBlank()) {
+                    result.add(sec)
                 }
-                _isArtistLoading.value = false
-            }
-        }
-
-        private fun cleanForArtistMatch(name: String): String {
-            return name.trim().lowercase()
-                .replace(Regex("^(the|a|an)\\s+"), "")
-                .replace(Regex("[^a-z0-9]"), "")
-        }
-
-        private fun mergeArtists(primary: List<SieloArtist>, secondary: List<SieloArtist>): List<SieloArtist> {
-            val result = mutableListOf<SieloArtist>()
-            result.addAll(primary)
-            for (sec in secondary) {
-                val secClean = cleanForArtistMatch(sec.name)
-                val existing = result.find { cleanForArtistMatch(it.name) == secClean }
-                if (existing == null) {
-                    if (primary.isEmpty() || !sec.imageUrl.isNullOrBlank()) {
-                        result.add(sec)
-                    }
-                } else {
-                    val existingHasYtImage = existing.imageUrl?.let {
-                        it.contains("googleusercontent.com") || it.contains("ggpht.com") || it.contains("ytimg.com")
-                    } == true
-                    val secHasVerifiedImage = sec.imageUrl?.let {
-                        it.contains("wikimedia.org") || it.contains("wikipedia.org") || it.contains("saavncdn.com") || it.contains("dzcdn.net")
-                    } == true
-                    if (existing.imageUrl.isNullOrBlank() || (existingHasYtImage && secHasVerifiedImage)) {
-                        val idx = result.indexOf(existing)
-                        result[idx] = existing.copy(imageUrl = sec.imageUrl)
-                    }
-                }
-            }
-            return result
-        }
-
-        private fun rankArtists(artists: List<SieloArtist>, query: String, taste: UserTasteSnapshot = UserTasteSnapshot()): List<SieloArtist> {
-            val q = query.trim().lowercase()
-            if (q.isBlank()) return emptyList()
-            val qClean = cleanForArtistMatch(q)
-            val words = q.split(Regex("\\s+")).filter { it.isNotBlank() }
-
-            val scored = artists.mapIndexed { index, artist ->
-                val name = artist.name.trim().lowercase()
-                val aClean = cleanForArtistMatch(name)
-                var score = 0
-
-                // 1. Exact match (handles "The Weeknd" for "weeknd", "sombr" for "sombr", "Arijit Singh" for "arijit singh")
-                if (aClean == qClean || name == q) {
-                    score += 100000
-                }
-                // 2. Starts with query (e.g. "Arijit Singh" for "arijit")
-                else if (aClean.startsWith(qClean) || name.startsWith(q)) {
-                    val lenDiff = (aClean.length - qClean.length).coerceAtLeast(0)
-                    score += 50000 - minOf(lenDiff * 100, 10000)
-                }
-                // 3. Distinct word contains
-                else if (name.contains(" $q") || name.contains(" $q ")) {
-                    score += 25000
-                }
-                // 4. Substring contains
-                else if (name.contains(q) || aClean.contains(qClean)) {
-                    score += 15000
-                }
-                else {
-                    // Artists who worked with the searched artist (collaborators returned by YouTube)
-                    // Retain their prominence ordering directly
-                    score += (artists.size - index) * 100
-                }
-
-                // Token match bonus
-                for (w in words) {
-                    if (w.length > 1) {
-                        if (name.startsWith(w) || aClean.startsWith(w)) score += 500
-                        else if (name.contains(w)) score += 200
-                    }
-                }
-
-                // User played artist boost
-                val artistWeight = taste.topArtistWeights.entries.firstOrNull { (tName, _) ->
-                    tName == aClean || name == tName || aClean.contains(cleanForArtistMatch(tName)) || cleanForArtistMatch(tName).contains(aClean)
-                }?.value ?: 0
-                if (artistWeight > 0) {
-                    score += (6000 + (artistWeight * 600)).coerceAtMost(30000)
-                }
-
-                // Severe penalty for spam / noise in artist name
-                val spamNoise = listOf(" bar", " party", " stanna", " fan", " cover", " tribute", " remix", " mix", "ai studio")
-                if (spamNoise.any { name.contains(it) }) {
-                    score -= 50000
-                }
-
-                artist to score
-            }
-
-            // Exclude negative scores
-            val valid = scored.filter { it.second > 0 }.sortedByDescending { it.second }.map { it.first }
-
-            // Deduplicate by clean name to ensure no duplicate or spoof accounts
-            val distinctArtists = mutableListOf<SieloArtist>()
-            val seenClean = mutableSetOf<String>()
-            for (a in valid) {
-                val clean = cleanForArtistMatch(a.name)
-                if (clean.isNotBlank() && !seenClean.contains(clean)) {
-                    seenClean.add(clean)
-                    distinctArtists.add(a)
-                }
-            }
-
-            // Ensure no two artists share the same profile picture
-            val seenImages = mutableSetOf<String>()
-            return distinctArtists.map { artist ->
-                if (!artist.imageUrl.isNullOrBlank() && !seenImages.contains(artist.imageUrl)) {
-                    seenImages.add(artist.imageUrl!!)
-                    artist
-                } else if (!artist.imageUrl.isNullOrBlank()) {
-                    artist.copy(imageUrl = null)
-                } else {
-                    artist
+            } else {
+                val existingHasYtImage = existing.imageUrl?.let {
+                    it.contains("googleusercontent.com") || it.contains("ggpht.com") || it.contains("ytimg.com")
+                } == true
+                val secHasVerifiedImage = sec.imageUrl?.let {
+                    it.contains("wikimedia.org") || it.contains("wikipedia.org") || it.contains("saavncdn.com") || it.contains("dzcdn.net")
+                } == true
+                if (existing.imageUrl.isNullOrBlank() || (existingHasYtImage && secHasVerifiedImage)) {
+                    val idx = result.indexOf(existing)
+                    result[idx] = existing.copy(imageUrl = sec.imageUrl)
                 }
             }
         }
+        return result
+    }
+
+    internal fun rankArtists(artists: List<SieloArtist>, query: String, taste: UserTasteSnapshot = UserTasteSnapshot()): List<SieloArtist> =
+        Companion.rankArtists(artists, query, taste)
 
         private val artistHistoryStack = ArrayDeque<ArtistDetails>()
 
@@ -811,6 +766,318 @@
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
+                }
+            }
+        }
+
+        companion object {
+            fun normalizeSearchQuery(raw: String): String {
+                return raw.trim()
+                    .replace(Regex("\\s+"), " ")
+                    .lowercase(Locale.ROOT)
+            }
+
+            internal fun cleanForArtistMatch(name: String): String {
+                return name.trim().lowercase(Locale.ROOT)
+                    .replace(Regex("^(the|a|an)\\s+"), "")
+                    .replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+            }
+
+            internal fun levenshteinDistance(s1: String, s2: String, maxDistance: Int = 2): Int {
+                if (s1 == s2) return 0
+                val l1 = s1.length
+                val l2 = s2.length
+                if (kotlin.math.abs(l1 - l2) > maxDistance) return maxDistance + 1
+
+                var prev = IntArray(l2 + 1) { it }
+                var curr = IntArray(l2 + 1)
+
+                for (i in 1..l1) {
+                    curr[0] = i
+                    var minInRow = curr[0]
+                    for (j in 1..l2) {
+                        val cost = if (s1[i - 1] == s2[j - 1]) 0 else 1
+                        curr[j] = minOf(
+                            curr[j - 1] + 1,
+                            prev[j] + 1,
+                            prev[j - 1] + cost
+                        )
+                        minInRow = minOf(minInRow, curr[j])
+                    }
+                    if (minInRow > maxDistance) return maxDistance + 1
+                    val temp = prev
+                    prev = curr
+                    curr = temp
+                }
+                return prev[l2]
+            }
+
+            internal fun rankTracks(tracks: List<SieloTrack>, query: String, taste: UserTasteSnapshot = UserTasteSnapshot()): List<SieloTrack> {
+                val q = normalizeSearchQuery(query)
+                if (q.isBlank()) return tracks
+                val qClean = cleanForArtistMatch(q)
+                val words = q.split(Regex("\\s+")).filter { it.isNotBlank() }
+
+                val scoredTracks = tracks.map { track ->
+                    val title = normalizeSearchQuery(track.title)
+                    val artist = normalizeSearchQuery(track.artist)
+                    val cleanArtist = cleanForArtistMatch(artist)
+                    var textScore = 0
+
+                    // 1. Text Relevance Match
+                    // A. Exact song title match
+                    if (title == q) {
+                        textScore += 100_000
+                    }
+                    // B. Exact artist name match
+                    else if (artist == q || cleanArtist == qClean) {
+                        textScore += 80_000
+                    }
+                    // C. Song title starts with the query
+                    else if (title.startsWith(q)) {
+                        val lenDiff = (title.length - q.length).coerceAtLeast(0)
+                        textScore += 50_000 - minOf(lenDiff * 50, 10_000)
+                    }
+                    // D. Artist name starts with the query
+                    else if (artist.startsWith(q) || cleanArtist.startsWith(qClean)) {
+                        val lenDiff = (cleanArtist.length - qClean.length).coerceAtLeast(0)
+                        textScore += 40_000 - minOf(lenDiff * 50, 10_000)
+                    }
+                    // E. Strong partial title match
+                    else if (title.contains(" $q") || title.contains("($q") || title.contains("[$q")) {
+                        textScore += 30_000
+                    } else if (title.contains(q)) {
+                        textScore += 20_000
+                    }
+                    // F. Strong partial artist match
+                    else if (artist.contains(" $q") || cleanArtist.contains(" $qClean")) {
+                        textScore += 25_000
+                    } else if (artist.contains(q) || cleanArtist.contains(qClean)) {
+                        textScore += 15_000
+                    } else {
+                        // G. Fuzzy match for small spelling mistakes
+                        val allowDist = if (q.length >= 8) 2 else if (q.length >= 4) 1 else 0
+                        if (allowDist > 0) {
+                            val titleWords = title.split(Regex("\\s+")).filter { it.isNotBlank() }
+                            var bestWordDist = allowDist + 1
+                            for (tw in titleWords) {
+                                if (kotlin.math.abs(tw.length - q.length) <= allowDist) {
+                                    val d = levenshteinDistance(q, tw, allowDist)
+                                    if (d < bestWordDist) bestWordDist = d
+                                }
+                            }
+                            if (bestWordDist <= allowDist) {
+                                textScore += 10_000 - (bestWordDist * 2500)
+                            } else if (kotlin.math.abs(title.length - q.length) <= allowDist) {
+                                val d = levenshteinDistance(q, title, allowDist)
+                                if (d <= allowDist) {
+                                    textScore += 10_000 - (d * 2500)
+                                }
+                            }
+
+                            if (textScore == 0) {
+                                val artistWords = artist.split(Regex("\\s+")).filter { it.isNotBlank() }
+                                var bestArtistDist = allowDist + 1
+                                for (aw in artistWords) {
+                                    if (kotlin.math.abs(aw.length - q.length) <= allowDist) {
+                                        val d = levenshteinDistance(q, aw, allowDist)
+                                        if (d < bestArtistDist) bestArtistDist = d
+                                    }
+                                }
+                                if (bestArtistDist <= allowDist) {
+                                    textScore += 8_000 - (bestArtistDist * 2000)
+                                }
+                            }
+                        }
+                    }
+
+                    // Multi-word / token matching bonus
+                    var matchingWords = 0
+                    for (w in words) {
+                        if (w.length > 1) {
+                            var hit = false
+                            if (title.startsWith(w)) {
+                                textScore += 600
+                                hit = true
+                            } else if (title.contains(w)) {
+                                textScore += 300
+                                hit = true
+                            }
+                            if (artist.startsWith(w)) {
+                                textScore += 400
+                                hit = true
+                            } else if (artist.contains(w)) {
+                                textScore += 200
+                                hit = true
+                            }
+                            if (hit) matchingWords++
+                        }
+                    }
+
+                    // Clean studio bonus & noise penalties
+                    if (CandidatePoolBuilder.isCleanStudioTrack(track.title, track.artist)) {
+                        textScore += 500
+                    }
+                    val noiseKeywords = listOf("remix", "karaoke", "instrumental", "cover", "slowed", "reverb", "parody", "mashup")
+                    if (noiseKeywords.any { title.contains(it) && !q.contains(it) }) {
+                        textScore -= 3000
+                    }
+
+                    // 2. Plays / Popularity Boost (0 to 800 pts)
+                    var popScore = 0
+                    if (track.viewCount > 0) {
+                        val logViews = kotlin.math.log10(track.viewCount.toDouble()).coerceIn(0.0, 10.0)
+                        popScore += (logViews * 80).toInt()
+                    }
+
+                    // 3. User Listening History & Personalization (Strictly capped at max 3,500 pts!)
+                    var personalScore = 0
+                    val userPlayCount = taste.playedSongCounts[track.id] ?: 0
+                    if (userPlayCount > 0) {
+                        personalScore += 500 + minOf(userPlayCount * 50, 500)
+                    }
+                    if (track.id in taste.searchPlayedSongIds) {
+                        personalScore += 600
+                    }
+                    if (track.id in taste.favoriteSongIds) {
+                        personalScore += 800
+                    }
+
+                    val artistWeight = taste.topArtistWeights.entries.firstOrNull { (name, _) ->
+                        artist.contains(name) || name.contains(artist) || cleanForArtistMatch(name) == cleanArtist
+                    }?.value ?: 0
+                    if (artistWeight > 0) {
+                        personalScore += minOf(400 + (artistWeight * 50), 1000)
+                    }
+
+                    val trackLang = SongClassifier.detectLanguage(track)
+                    if (trackLang in taste.topLanguages) {
+                        personalScore += 300
+                    }
+
+                    val trackVibe = SongClassifier.detectVibe(track)
+                    if (trackVibe in taste.topVibes) {
+                        personalScore += 200
+                    }
+
+                    val normalizedPersonalScore = minOf(personalScore, 3500)
+                    val totalScore = textScore + popScore + normalizedPersonalScore
+                    track to Triple(totalScore, textScore, matchingWords)
+                }
+
+                val filtered = if (words.size >= 2) {
+                    scoredTracks.filter { (_, meta) ->
+                        val (_, textScore, matchingWords) = meta
+                        textScore >= 300 || matchingWords >= (words.size / 2).coerceAtLeast(1)
+                    }
+                } else {
+                    scoredTracks.filter { (_, meta) -> meta.second > 0 }
+                }
+
+                val finalSelection = if (filtered.isNotEmpty()) filtered else scoredTracks
+                return finalSelection.sortedByDescending { it.second.first }.map { it.first }
+            }
+
+            internal fun rankArtists(artists: List<SieloArtist>, query: String, taste: UserTasteSnapshot = UserTasteSnapshot()): List<SieloArtist> {
+                val q = normalizeSearchQuery(query)
+                if (q.isBlank()) return emptyList()
+                val qClean = cleanForArtistMatch(q)
+                val words = q.split(Regex("\\s+")).filter { it.isNotBlank() }
+
+                val scored = artists.mapIndexed { index, artist ->
+                    val name = normalizeSearchQuery(artist.name)
+                    val aClean = cleanForArtistMatch(name)
+                    var score = 0
+
+                    // 1. Exact match
+                    if (aClean == qClean || name == q) {
+                        score += 100_000
+                    }
+                    // 2. Starts with query
+                    else if (aClean.startsWith(qClean) || name.startsWith(q)) {
+                        val lenDiff = (aClean.length - qClean.length).coerceAtLeast(0)
+                        score += 50_000 - minOf(lenDiff * 100, 10_000)
+                    }
+                    // 3. Distinct word contains
+                    else if (name.contains(" $q") || name.contains(" $q ")) {
+                        score += 25_000
+                    }
+                    // 4. Substring contains
+                    else if (name.contains(q) || aClean.contains(qClean)) {
+                        score += 15_000
+                    }
+                    else {
+                        // Fuzzy match for small spelling mistakes
+                        val allowDist = if (qClean.length >= 8) 2 else if (qClean.length >= 4) 1 else 0
+                        var fuzzyHit = false
+                        if (allowDist > 0) {
+                            val d = levenshteinDistance(qClean, aClean, allowDist)
+                            if (d <= allowDist) {
+                                score += 10_000 - (d * 2500)
+                                fuzzyHit = true
+                            } else {
+                                val aWords = aClean.split(Regex("\\s+")).filter { it.isNotBlank() }
+                                for (aw in aWords) {
+                                    val wd = levenshteinDistance(qClean, aw, allowDist)
+                                    if (wd <= allowDist) {
+                                        score += 8_000 - (wd * 2000)
+                                        fuzzyHit = true
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                        if (!fuzzyHit) {
+                            score += (artists.size - index).coerceAtLeast(0) * 10
+                        }
+                    }
+
+                    // Token match bonus
+                    for (w in words) {
+                        if (w.length > 1) {
+                            if (name.startsWith(w) || aClean.startsWith(w)) score += 500
+                            else if (name.contains(w)) score += 200
+                        }
+                    }
+
+                    // User played artist boost (capped at 4,000 pts so it can't beat textual match)
+                    val artistWeight = taste.topArtistWeights.entries.firstOrNull { (tName, _) ->
+                        tName == aClean || name == tName || aClean.contains(cleanForArtistMatch(tName)) || cleanForArtistMatch(tName).contains(aClean)
+                    }?.value ?: 0
+                    if (artistWeight > 0) {
+                        score += minOf(1500 + (artistWeight * 100), 4000)
+                    }
+
+                    // Severe penalty for spam / noise in artist name
+                    val spamNoise = listOf(" bar", " party", " stanna", " fan", " cover", " tribute", " remix", " mix", "ai studio")
+                    if (spamNoise.any { name.contains(it) }) {
+                        score -= 50_000
+                    }
+
+                    artist to score
+                }
+
+                val valid = scored.filter { it.second > 0 }.sortedByDescending { it.second }.map { it.first }
+                val distinctArtists = mutableListOf<SieloArtist>()
+                val seenClean = mutableSetOf<String>()
+                for (a in valid) {
+                    val clean = cleanForArtistMatch(a.name)
+                    if (clean.isNotBlank() && !seenClean.contains(clean)) {
+                        seenClean.add(clean)
+                        distinctArtists.add(a)
+                    }
+                }
+
+                val seenImages = mutableSetOf<String>()
+                return distinctArtists.map { artist ->
+                    if (!artist.imageUrl.isNullOrBlank() && !seenImages.contains(artist.imageUrl)) {
+                        seenImages.add(artist.imageUrl!!)
+                        artist
+                    } else if (!artist.imageUrl.isNullOrBlank()) {
+                        artist.copy(imageUrl = null)
+                    } else {
+                        artist
+                    }
                 }
             }
         }
