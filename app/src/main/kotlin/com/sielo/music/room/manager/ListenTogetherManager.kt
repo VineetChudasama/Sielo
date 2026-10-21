@@ -1981,6 +1981,6 @@ class ListenTogetherManager @Inject constructor(
     }
 
     fun getInviteLink(state: ActiveRoomState): String {
-        return "https://www.sielo.site/listen/${state.roomId}?key=${state.roomKey}"
+        return "https://sielo.site/listen/${state.roomId}?key=${state.roomKey}"
     }
 }

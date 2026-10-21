@@ -294,7 +294,7 @@ fun AppUpdateDialog(
                     )
                     Spacer(modifier = Modifier.width(7.dp))
                     Text(
-                        text = "Or download from website: www.sielo.site",
+                        text = "Or download from website: sielo.site",
                         color = PaletteSand,
                         fontFamily = SoraFontFamily,
                         fontSize = 12.sp,

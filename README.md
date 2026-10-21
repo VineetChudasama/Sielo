@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  🌐 <strong>Official Website</strong>: <a href="https://www.sielo.site"><strong>www.sielo.site</strong></a>
+  🌐 <strong>Official Website</strong>: <a href="https://sielo.site"><strong>sielo.site</strong></a>
 </p>
 
 <p align="center">
@@ -15,8 +15,8 @@
   <a href="https://developer.android.com"><img src="https://img.shields.io/badge/Platform-Android-3DDC84.svg?logo=android&logoColor=white" alt="Android" /></a>
   <a href="https://developer.android.com/jetpack/compose"><img src="https://img.shields.io/badge/UI-Jetpack%20Compose-4285F4.svg?logo=jetpackcompose&logoColor=white" alt="Jetpack Compose" /></a>
   <a href="https://developer.android.com/media/media3"><img src="https://img.shields.io/badge/Audio-Media3%20ExoPlayer-FF6F00.svg" alt="Media3" /></a>
-  <a href="https://github.com/VineetChudasama/Sielo/releases"><img src="https://img.shields.io/badge/Version-v11.5.4-E63946.svg" alt="Version 11.5.4" /></a>
-  <a href="https://www.sielo.site"><img src="https://img.shields.io/badge/Website-www.sielo.site-0D1B2A.svg?logo=googlechrome&logoColor=white" alt="Website" /></a>
+  <a href="https://github.com/VineetChudasama/Sielo/releases"><img src="https://img.shields.io/badge/Version-v11.5.5-E63946.svg" alt="Version 11.5.5" /></a>
+  <a href="https://sielo.site"><img src="https://img.shields.io/badge/Website-sielo.site-0D1B2A.svg?logo=googlechrome&logoColor=white" alt="Website" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License" /></a>
 </p>
 
@@ -76,7 +76,7 @@ What sets **Sielo** apart from typical streaming clients:
 ### 10. 🚀 In-App Seamless Updates & Direct Website Access
 - **In-App APK Downloader**: Download new app releases directly inside Sielo with real-time transfer progress, cancellation support, and a single-tap "Install & Restart App" workflow.
 - **Home Screen Update Indicator**: A subtle, non-intrusive update badge appears directly beside the search icon in the top-right header whenever a new version is available.
-- **Direct Official Website Access**: Direct link to [www.sielo.site](https://www.sielo.site) embedded right inside the update dialog so users can download or explore anytime.
+- **Direct Official Website Access**: Direct link to [sielo.site](https://sielo.site) embedded right inside the update dialog so users can download or explore anytime.
 
 ### 11. 💾 Dynamic Offline Cache Playlist & Local Audio Vault
 - **Dynamic Downloaded Cache Playlist**: Automatically aggregates all cached songs in your local storage into a dynamic "Downloaded Cache" playlist with instant gapless replay.

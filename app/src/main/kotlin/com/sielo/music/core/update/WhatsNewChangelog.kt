@@ -14,6 +14,13 @@ object WhatsNewChangelog {
      * Keep this map sorted newest-to-oldest so iteration order is correct.
      */
     val entries: Map<String, List<String>> = linkedMapOf(
+        "11.5.5" to listOf(
+            "🔀 Playlist Drag-and-Drop Reorder: Tactile drag handles and smooth animated reordering with instant cloud & Room synchronization in your custom and imported playlists",
+            "📥 Transparent Playlist Importer: Added a glowing animated progress bar and a dedicated scrollable report listing any songs that couldn't be resolved during import",
+            "📶 Complete Offline Mode: Keep your loaded feeds intact when offline with friendly offline prompts; dedicated Downloaded Cache showcase on Home screen and full-screen playlist view from Profile",
+            "🚫 Censored & Clean Track Elimination: Engine-level filtering strictly suppresses censored or clean radio versions throughout the entire app",
+            "🔗 Direct Deep Link Integration: Optimized App Links for https://sielo.site/ with dual certificate verification for direct app opening without redirecting to browser"
+        ),
         "11.5.4" to listOf(
             "🚀 In-App Seamless Updates: Download new app versions directly within Sielo with live progress and one-tap install & restart, plus quick access via the official website",
             "🔔 Home Screen Update Badge: A dedicated update indicator appears right beside search on your Home page whenever a newer version is ready",

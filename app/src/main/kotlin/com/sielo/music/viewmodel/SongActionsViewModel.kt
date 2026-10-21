@@ -158,7 +158,7 @@ class SongActionsViewModel @Inject constructor(
         try {
             val encodedTitle = java.net.URLEncoder.encode(track.title, "UTF-8")
             val encodedArtist = java.net.URLEncoder.encode(track.artist, "UTF-8")
-            val webLink = "https://www.sielo.site/song/${track.id}?title=$encodedTitle&artist=$encodedArtist"
+            val webLink = "https://sielo.site/song/${track.id}?title=$encodedTitle&artist=$encodedArtist"
             val shareText = "Listen to \"${track.title}\" by ${track.artist} on Sielo:\n$webLink"
             val sendIntent = Intent().apply {
                 action = Intent.ACTION_SEND

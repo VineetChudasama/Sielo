@@ -62,20 +62,43 @@
                 <data android:scheme="https" android:host="vineetchudasama.github.io" android:pathPrefix="/Sielo" />
                 <data android:scheme="http" android:host="vineetchudasama.github.io" android:pathPrefix="/Sielo" />
             </intent-filter>
+            <!-- Primary Android App Links with autoVerify for https://sielo.site -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="sielo.site" />
+            </intent-filter>
+
+            <!-- Secondary App Links for www.sielo.site -->
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="https" android:host="www.sielo.site" />
-                <data android:scheme="https" android:host="sielo.site" />
-                <data android:scheme="https" android:host="sielo-music.vercel.app" />
             </intent-filter>
+
+            <!-- Custom URI Schemes: sielo://track/*, sielo://song/*, sielo://album/*, sielo://room/*, sielo://artist/* -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="http" android:host="www.sielo.site" />
+                <data android:scheme="sielo" android:host="track" />
+                <data android:scheme="sielo" android:host="song" />
+                <data android:scheme="sielo" android:host="album" />
+                <data android:scheme="sielo" android:host="room" />
+                <data android:scheme="sielo" android:host="listen" />
+                <data android:scheme="sielo" android:host="artist" />
+            </intent-filter>
+
+            <!-- Web Fallback -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="http" android:host="sielo.site" />
+                <data android:scheme="http" android:host="www.sielo.site" />
+                <data android:scheme="https" android:host="sielo-music.vercel.app" />
                 <data android:scheme="http" android:host="sielo-music.vercel.app" />
             </intent-filter>
         </activity>
