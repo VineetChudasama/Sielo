@@ -93,6 +93,13 @@ import com.sielo.music.ui.components.SongActionsSheet
 import androidx.compose.foundation.combinedClickable
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.sielo.music.viewmodel.PlaylistImportViewModel
+import com.sielo.music.core.network.NetworkHelper
+import com.sielo.music.core.audio.OfflineCacheManager
+import com.sielo.music.core.playlist.UserPlaylist
+import com.sielo.music.core.playlist.UserPlaylistsRepository
+import com.sielo.music.ui.screens.UserPlaylistDetailView
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalContext
 
 @Composable
 fun HomeScreen(
@@ -119,6 +126,33 @@ fun HomeScreen(
     val isGenreLoading by viewModel.isGenreLoading.collectAsState()
     val songsForYouTracks by viewModel.songsForYouTracks.collectAsState()
     val playbackState by viewModel.playbackState.collectAsState()
+    val isOnline by NetworkHelper.isOnline.collectAsState()
+    val offlineErrorMessage by viewModel.offlineErrorMessage.collectAsState()
+    val context = LocalContext.current
+
+    val cacheVersion by OfflineCacheManager.cacheUpdated.collectAsState()
+    val cachedTracks = remember(cacheVersion) { OfflineCacheManager.getCachedTracks(context) }
+    val dynamicDownloadedPlaylist = remember(cachedTracks) {
+        UserPlaylist(
+            id = UserPlaylistsRepository.PLAYLIST_DOWNLOADED_CACHE_ID,
+            title = "Downloaded Cache",
+            description = if (cachedTracks.isEmpty()) {
+                "Offline Vault • Songs you play are cached here for offline replay"
+            } else {
+                "Offline Vault • ${cachedTracks.size} songs ready for offline replay"
+            },
+            coverUrl = cachedTracks.firstOrNull()?.thumbnailUrl ?: "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=500&q=80",
+            tracks = cachedTracks
+        )
+    }
+    var selectedDownloadedPlaylist by remember { mutableStateOf<UserPlaylist?>(null) }
+
+    LaunchedEffect(offlineErrorMessage) {
+        offlineErrorMessage?.let { msg ->
+            android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+            viewModel.clearOfflineErrorMessage()
+        }
+    }
 
     val customPlaylists = viewModel.customPlaylists
     val trendingGenres = viewModel.trendingGenres
@@ -216,6 +250,33 @@ fun HomeScreen(
             onBack = { viewModel.closeGenre() },
             onPlayTrack = { track, q -> viewModel.playTrack(track, q) },
             onMoreTrack = { selectedSongActionsTrack = it },
+            modifier = modifier
+        )
+        return
+    }
+
+    // Display Downloaded Cache / Offline Playlist if selected
+    if (selectedDownloadedPlaylist != null) {
+        BackHandler {
+            selectedDownloadedPlaylist = null
+        }
+        UserPlaylistDetailView(
+            playlist = dynamicDownloadedPlaylist,
+            onBack = { selectedDownloadedPlaylist = null },
+            onPlayTrack = { track, queue -> viewModel.playAlbum(track, queue) },
+            onPlayAll = {
+                if (dynamicDownloadedPlaylist.tracks.isNotEmpty()) {
+                    viewModel.playAlbum(dynamicDownloadedPlaylist.tracks.first(), dynamicDownloadedPlaylist.tracks)
+                }
+            },
+            onDeletePlaylist = {
+                OfflineCacheManager.clearCache(context)
+                selectedDownloadedPlaylist = null
+            },
+            onRemoveTrack = { trackId ->
+                OfflineCacheManager.removeTrack(context, trackId)
+            },
+            onMoveTrack = { _, _ -> },
             modifier = modifier
         )
         return
@@ -408,6 +469,53 @@ fun HomeScreen(
                         }
                     }
                     Spacer(modifier = Modifier.height(10.dp))
+                }
+
+                // Offline Mode: Show Downloaded Cache Playlist and Offline Songs
+                if (!isOnline) {
+                    item {
+                        OfflineHomeBanner()
+                        Spacer(modifier = Modifier.height(6.dp))
+                    }
+                    item {
+                        OfflineVaultHomeCard(
+                            playlist = dynamicDownloadedPlaylist,
+                            trackCount = cachedTracks.size,
+                            onOpen = { selectedDownloadedPlaylist = dynamicDownloadedPlaylist },
+                            onPlayAll = {
+                                if (cachedTracks.isNotEmpty()) {
+                                    viewModel.playAlbum(cachedTracks.first(), cachedTracks)
+                                }
+                            }
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                    }
+                    if (cachedTracks.isNotEmpty()) {
+                        item {
+                            Text(
+                                text = "Downloaded Songs",
+                                color = PaletteSand,
+                                fontFamily = SoraFontFamily,
+                                fontSize = 22.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
+                            )
+                            LazyRow(
+                                contentPadding = PaddingValues(horizontal = 20.dp),
+                                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                modifier = Modifier.padding(top = 8.dp)
+                            ) {
+                                items(cachedTracks, key = { it.id }) { track ->
+                                    KeepListeningCard(
+                                        track = track,
+                                        onPlay = { viewModel.playAlbum(track, cachedTracks) },
+                                        onMore = { selectedSongActionsTrack = track }
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(28.dp))
+                        }
+                    }
                 }
 
                 // Section 1: Keep listening (Shown strictly ONLY if user has listened to at least one song)
@@ -1268,6 +1376,127 @@ fun RediscoverFavoriteRow(
                     tint = PaletteSand.copy(alpha = 0.7f),
                     modifier = Modifier.size(18.dp)
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun OfflineHomeBanner() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(PaletteOxfordBlue.copy(alpha = 0.85f))
+            .border(1.dp, PaletteSand.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Icon(
+            imageVector = Icons.Default.CloudDownload,
+            contentDescription = "Offline Mode",
+            tint = PaletteSand,
+            modifier = Modifier.size(20.dp)
+        )
+        Text(
+            text = "You are offline • Showing saved & cached music",
+            color = PaletteCream,
+            fontFamily = SoraFontFamily,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
+
+@Composable
+private fun OfflineVaultHomeCard(
+    playlist: UserPlaylist,
+    trackCount: Int,
+    onOpen: () -> Unit,
+    onPlayAll: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(
+                Brush.linearGradient(
+                    colors = listOf(
+                        PaletteSlateBlue.copy(alpha = 0.35f),
+                        PaletteOxfordBlue.copy(alpha = 0.65f)
+                    )
+                )
+            )
+            .border(1.dp, BorderGlass, RoundedCornerShape(16.dp))
+            .clickable { onOpen() }
+            .padding(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(68.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(PaletteOxfordBlue)
+            ) {
+                if (!playlist.coverUrl.isNullOrBlank()) {
+                    AsyncImage(
+                        model = playlist.coverUrl,
+                        contentDescription = "Downloaded Cache Cover",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.CloudDownload,
+                        contentDescription = null,
+                        tint = PaletteSand,
+                        modifier = Modifier
+                            .size(32.dp)
+                            .align(Alignment.Center)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.width(14.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Downloaded Cache",
+                    color = PaletteCream,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = SoraFontFamily
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = if (trackCount == 0) "Offline Vault • No songs cached yet" else "Offline Vault • $trackCount songs ready to play",
+                    color = TextMuted,
+                    fontSize = 13.sp,
+                    fontFamily = UrbanistFontFamily
+                )
+            }
+
+            if (trackCount > 0) {
+                IconButton(
+                    onClick = onPlayAll,
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(CircleShape)
+                        .background(PaletteSand)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Play Downloaded Songs",
+                        tint = PaletteDarkNavy,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
             }
         }
     }

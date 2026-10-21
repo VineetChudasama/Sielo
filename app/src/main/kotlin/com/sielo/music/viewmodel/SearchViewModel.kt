@@ -93,6 +93,13 @@
     
         private val _isSearching = MutableStateFlow(false)
         val isSearching: StateFlow<Boolean> = _isSearching.asStateFlow()
+
+        private val _offlineErrorMessage = MutableStateFlow<String?>(null)
+        val offlineErrorMessage: StateFlow<String?> = _offlineErrorMessage.asStateFlow()
+
+        fun clearOfflineErrorMessage() {
+            _offlineErrorMessage.value = null
+        }
     
         // Recent Search Queries
         val recentSearches: StateFlow<List<SearchHistoryEntity>> = searchHistoryDao.getRecentSearchQueries(15)
@@ -418,6 +425,11 @@
         Companion.levenshteinDistance(s1, s2, maxDistance)
 
     private suspend fun executeSearch(query: String, category: String, sequenceId: Long) {
+        if (!com.sielo.music.core.network.NetworkHelper.isOnline.value) {
+            _offlineErrorMessage.value = "No internet connection. Search requires internet."
+            _isSearching.value = false
+            return
+        }
         val trimmed = query.trim()
         val normalized = normalizeSearchQuery(trimmed)
         if (normalized.isBlank()) {
@@ -651,6 +663,17 @@
                 artistHistoryStack.addLast(current)
             }
             viewModelScope.launch {
+                val cached = musicMetadataRepository.getCachedArtist(artist.name)
+                if (cached != null) {
+                    _selectedArtist.value = cached
+                    _isArtistLoading.value = false
+                    return@launch
+                }
+                if (!com.sielo.music.core.network.NetworkHelper.isOnline.value) {
+                    _offlineErrorMessage.value = "No internet connection. Cannot load online artist."
+                    _isArtistLoading.value = false
+                    return@launch
+                }
                 _isArtistLoading.value = true
                 _selectedArtist.value = ArtistDetails(
                     id = artist.id,
@@ -729,6 +752,10 @@
         }
     
         fun openCategory(category: BrowseCategory) {
+            if (!com.sielo.music.core.network.NetworkHelper.isOnline.value) {
+                _offlineErrorMessage.value = "No internet connection. Cannot browse online categories."
+                return
+            }
             _selectedCategory.value = category
             viewModelScope.launch {
                 _isCategoryLoading.value = true

@@ -70,6 +70,13 @@ class HomeViewModel @Inject constructor(
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
 
+    private val _offlineErrorMessage = MutableStateFlow<String?>(null)
+    val offlineErrorMessage: StateFlow<String?> = _offlineErrorMessage.asStateFlow()
+
+    fun clearOfflineErrorMessage() {
+        _offlineErrorMessage.value = null
+    }
+
     // 5 Most Recently Played Unique Tracks (snapshot loaded on launch & updated ONLY on refresh/relaunch)
     private val _recentPlayedSongs = MutableStateFlow<List<ListeningEventEntity>>(emptyList())
     val recentPlayedSongs: StateFlow<List<ListeningEventEntity>> = _recentPlayedSongs.asStateFlow()
@@ -294,36 +301,38 @@ class HomeViewModel @Inject constructor(
                     _currentSimilarToArtist.value = topArtistName
                     lastResolvedArtist = topArtistName
 
-                    launch {
-                        try {
-                            val tracks = innerTubeClient.search(query)
-                            if (tracks.isNotEmpty()) {
-                                _trendingTracks.value = tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
-                            } else {
+                    if (com.sielo.music.core.network.NetworkHelper.isOnline.value) {
+                        launch {
+                            try {
+                                val tracks = innerTubeClient.search(query)
+                                if (tracks.isNotEmpty()) {
+                                    _trendingTracks.value = tracks.distinctBy { it.id }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+                                } else {
+                                    _trendingTracks.value = defaultStarterTracks()
+                                }
+                            } catch (e: Exception) {
                                 _trendingTracks.value = defaultStarterTracks()
                             }
-                        } catch (e: Exception) {
-                            _trendingTracks.value = defaultStarterTracks()
                         }
-                    }
 
-                    launch {
-                        try {
-                            val similarList = fetchSimilarArtistProfiles(topArtistName)
-                            if (similarList.isNotEmpty()) {
-                                _currentSimilarToArtist.value = topArtistName
-                                _dynamicSimilarArtists.value = similarList
+                        launch {
+                            try {
+                                val similarList = fetchSimilarArtistProfiles(topArtistName)
+                                if (similarList.isNotEmpty()) {
+                                    _currentSimilarToArtist.value = topArtistName
+                                    _dynamicSimilarArtists.value = similarList
+                                }
+                            } catch (_: Exception) {
                             }
-                        } catch (_: Exception) {
                         }
-                    }
 
-                    launch {
-                        try {
-                            val songs = resolveSongsForYou()
-                            _songsForYouTracks.value = songs
-                        } catch (_: Exception) {
-                            _songsForYouTracks.value = defaultStarterTracks().shuffled().take(8)
+                        launch {
+                            try {
+                                val songs = resolveSongsForYou()
+                                _songsForYouTracks.value = songs
+                            } catch (_: Exception) {
+                                _songsForYouTracks.value = defaultStarterTracks().shuffled().take(8)
+                            }
                         }
                     }
                 }
@@ -336,6 +345,11 @@ class HomeViewModel @Inject constructor(
     }
 
     fun refreshHome() {
+        if (!com.sielo.music.core.network.NetworkHelper.isOnline.value) {
+            _offlineErrorMessage.value = "You are offline. Showing cached music."
+            _isRefreshing.value = false
+            return
+        }
         viewModelScope.launch {
             _isRefreshing.value = true
             try {
@@ -490,6 +504,10 @@ class HomeViewModel @Inject constructor(
     }
 
     fun openGenre(genre: GenreItem) {
+        if (!com.sielo.music.core.network.NetworkHelper.isOnline.value) {
+            _offlineErrorMessage.value = "No internet connection. Cannot browse online genres."
+            return
+        }
         _selectedGenre.value = genre
         viewModelScope.launch {
             _isGenreLoading.value = true
@@ -524,6 +542,12 @@ class HomeViewModel @Inject constructor(
             val cached = musicMetadataRepository.getCachedArtist(artistName)
             if (cached != null) {
                 _selectedArtist.value = cached
+                _isArtistLoading.value = false
+                return@launch
+            }
+
+            if (!com.sielo.music.core.network.NetworkHelper.isOnline.value) {
+                _offlineErrorMessage.value = "No internet connection. Cannot load online artist."
                 _isArtistLoading.value = false
                 return@launch
             }
@@ -591,6 +615,10 @@ class HomeViewModel @Inject constructor(
     }
 
     fun selectMood(mood: String) {
+        if (!com.sielo.music.core.network.NetworkHelper.isOnline.value) {
+            _offlineErrorMessage.value = "No internet connection. Cannot load mood."
+            return
+        }
         _selectedMood.value = mood
         val cleanedQuery = mood.replace(Regex("[^a-zA-Z0-9 ]"), "").trim()
         loadFeed(cleanedQuery)
@@ -609,6 +637,10 @@ class HomeViewModel @Inject constructor(
     }
 
     fun openPlaylist(playlist: PlaylistCardItem) {
+        if (!playlist.isLiked && !com.sielo.music.core.network.NetworkHelper.isOnline.value) {
+            _offlineErrorMessage.value = "No internet connection. Cannot load online playlist."
+            return
+        }
         _selectedPlaylist.value = playlist
         viewModelScope.launch {
             _isPlaylistLoading.value = true

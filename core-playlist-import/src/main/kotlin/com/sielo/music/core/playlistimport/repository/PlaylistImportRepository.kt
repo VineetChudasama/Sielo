@@ -68,6 +68,7 @@ class PlaylistImportRepository @Inject constructor(
         onProgress: (Int, Int) -> Unit
     ): ImportResult {
         val resolvedTracks = mutableListOf<SieloTrack>()
+        val unimportedTracks = mutableListOf<ImportedTrackCandidate>()
         var progress = 0
 
         for (candidate in candidates) {
@@ -106,9 +107,11 @@ class PlaylistImportRepository @Inject constructor(
 
                 if (match != null) {
                     resolvedTracks.add(match)
+                } else {
+                    unimportedTracks.add(candidate)
                 }
             } catch (e: Exception) {
-                // Silently skip if search fails
+                unimportedTracks.add(candidate)
             }
 
             progress++
@@ -125,7 +128,8 @@ class PlaylistImportRepository @Inject constructor(
             albumId = albumId,
             totalCandidates = candidates.size,
             importedCount = resolvedTracks.size,
-            skippedCount = candidates.size - resolvedTracks.size
+            skippedCount = unimportedTracks.size,
+            unimportedTracks = unimportedTracks
         )
     }
 

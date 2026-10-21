@@ -72,4 +72,16 @@ class UserPlaylistsViewModel @Inject constructor(
             )
         }
     }
+
+    fun moveTrack(playlistId: String, fromIndex: Int, toIndex: Int) {
+        if (playlistId == UserPlaylistsRepository.PLAYLIST_DOWNLOADED_CACHE_ID) return
+        val current = _selectedPlaylist.value ?: return
+        if (current.id != playlistId) return
+        if (fromIndex !in current.tracks.indices || toIndex !in current.tracks.indices || fromIndex == toIndex) return
+        val list = current.tracks.toMutableList()
+        val item = list.removeAt(fromIndex)
+        list.add(toIndex, item)
+        _selectedPlaylist.value = current.copy(tracks = list)
+        playlistsRepository.reorderPlaylistTracks(playlistId, list)
+    }
 }

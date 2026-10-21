@@ -353,14 +353,17 @@ object TrackMatchValidator {
 
         val result = ArrayList<com.sielo.music.core.network.models.SieloTrack>()
         for ((_, group) in groups) {
+            val uncensoredTracks = group.filterNot { isCleanOrCensored(it.title, it.album) }
+            val candidateGroup = if (uncensoredTracks.isNotEmpty()) uncensoredTracks else emptyList()
+            if (candidateGroup.isEmpty()) continue
             // Sort each group so that:
             // 1. Explicit / Uncensored tracks ALWAYS preferred over clean/censored tracks (0 before 1)
             // 2. Tracks explicitly titled "clean/radio edit/censored" ALWAYS penalized (1 after 0)
             // 3. YouTube Topic / official audio preferred over music video (which often censors audio for YouTube guidelines)
             // 4. Original studio/movie releases come BEFORE compilation re-issues (prevents fake compilation art)
             // 5. Audio stream URL availability preferred
-            val hasExplicitInGroup = group.any { it.isExplicit }
-            val bestTrack = group.minWithOrNull(
+            val hasExplicitInGroup = candidateGroup.any { it.isExplicit }
+            val bestTrack = candidateGroup.minWithOrNull(
                 compareBy<com.sielo.music.core.network.models.SieloTrack> { track ->
                     if (isCoverOrKaraokeTrack(track.title, track.artist)) 1 else 0
                 }.thenBy { track ->
@@ -375,8 +378,8 @@ object TrackMatchValidator {
                 }.thenBy { track ->
                     if (!track.streamUrl.isNullOrBlank()) 0 else 1
                 }
-            ) ?: group.first()
-            val maxViews = group.maxOfOrNull { it.viewCount } ?: 0L
+            ) ?: candidateGroup.first()
+            val maxViews = candidateGroup.maxOfOrNull { it.viewCount } ?: 0L
             val resolvedExplicit = bestTrack.isExplicit || hasExplicitInGroup
             result.add(bestTrack.copy(
                 viewCount = if (maxViews > bestTrack.viewCount) maxViews else bestTrack.viewCount,
@@ -386,8 +389,11 @@ object TrackMatchValidator {
         return result
     }
 
-    fun isCleanOrCensored(title: String): Boolean {
-        return title.contains(Regex("(?i)\\b(clean|clean version|radio edit|censored|edited)\\b"))
+    fun isCleanOrCensored(title: String?, album: String? = null): Boolean {
+        val t = title.orEmpty()
+        val a = album.orEmpty()
+        val pattern = Regex("(?i)\\b(clean|clean version|clean edit|radio edit|radio version|censored|censored version|edited version|edited|kidz bop|family friendly)\\b")
+        return t.contains(pattern) || a.contains(pattern)
     }
 
     fun isCoverOrKaraokeTrack(title: String?, artist: String?): Boolean {

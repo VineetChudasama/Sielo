@@ -14,6 +14,7 @@ class SieloApp : Application(), ImageLoaderFactory {
 
     override fun onCreate() {
         super.onCreate()
+        com.sielo.music.core.network.NetworkHelper.init(this)
         // Clean up any residual disk image cache directories to ensure zero permanent storage
         try {
             cacheDir.resolve("sielo_image_cache").deleteRecursively()

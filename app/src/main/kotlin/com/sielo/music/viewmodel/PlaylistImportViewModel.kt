@@ -18,7 +18,12 @@ sealed class PlaylistImportState {
     object Idle : PlaylistImportState()
     data class FetchingMetadata(val source: String) : PlaylistImportState()
     data class Resolving(val progress: Int, val total: Int) : PlaylistImportState()
-    data class Success(val albumId: String, val imported: Int, val skipped: Int) : PlaylistImportState()
+    data class Success(
+        val albumId: String,
+        val imported: Int,
+        val skipped: Int,
+        val unimportedTracks: List<com.sielo.music.core.playlistimport.model.ImportedTrackCandidate> = emptyList()
+    ) : PlaylistImportState()
     data class Error(val message: String) : PlaylistImportState()
 }
 
@@ -52,6 +57,10 @@ class PlaylistImportViewModel @Inject constructor(
     }
 
     private fun startImport(source: ImportSource, identifier: String, albumName: String) {
+        if (!com.sielo.music.core.network.NetworkHelper.isOnline.value) {
+            _importState.value = PlaylistImportState.Error("No internet connection. Cannot import playlists while offline.")
+            return
+        }
         if (identifier.isBlank()) {
             _importState.value = PlaylistImportState.Error("Import source cannot be empty")
             return
@@ -72,7 +81,8 @@ class PlaylistImportViewModel @Inject constructor(
                 _importState.value = PlaylistImportState.Success(
                     albumId = result.albumId,
                     imported = result.importedCount,
-                    skipped = result.skippedCount
+                    skipped = result.skippedCount,
+                    unimportedTracks = result.unimportedTracks
                 )
             } catch (e: Exception) {
                 _importState.value = PlaylistImportState.Error(e.message ?: "An unknown error occurred during import")

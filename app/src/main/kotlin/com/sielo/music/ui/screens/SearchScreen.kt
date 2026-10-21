@@ -98,6 +98,15 @@ fun SearchScreen(
     val recentSearches by viewModel.recentSearches.collectAsState()
     val previousPlayedSongs by viewModel.previousPlayedSongs.collectAsState()
     val playbackState by viewModel.playbackState.collectAsState()
+    val offlineErrorMessage by viewModel.offlineErrorMessage.collectAsState()
+    val context = androidx.compose.ui.platform.LocalContext.current
+
+    LaunchedEffect(offlineErrorMessage) {
+        offlineErrorMessage?.let { msg ->
+            android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+            viewModel.clearOfflineErrorMessage()
+        }
+    }
 
     var isDedicatedSearchOpen by remember { mutableStateOf(false) }
     var selectedSongActionsTrack by remember { mutableStateOf<SieloTrack?>(null) }

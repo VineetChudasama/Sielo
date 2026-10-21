@@ -62,7 +62,7 @@ class UserPlaylistsRepository @Inject constructor(
         listOf(dynamicCachedPlaylist) + raw.filter { it.id != PLAYLIST_DOWNLOADED_CACHE_ID }
     }.stateIn(scope, SharingStarted.Eagerly, listOf(getDynamicDownloadedPlaylist()))
 
-    private fun getDynamicDownloadedPlaylist(): UserPlaylist {
+    fun getDynamicDownloadedPlaylist(): UserPlaylist {
         val cachedTracks = OfflineCacheManager.getCachedTracks(context)
         return UserPlaylist(
             id = PLAYLIST_DOWNLOADED_CACHE_ID,
@@ -200,6 +200,16 @@ class UserPlaylistsRepository @Inject constructor(
         val updated = _rawPlaylists.value.map { pl ->
             if (pl.id == playlistId) {
                 pl.copy(tracks = pl.tracks.filter { it.id != trackId })
+            } else pl
+        }
+        savePlaylistsInternal(updated)
+    }
+
+    fun reorderPlaylistTracks(playlistId: String, newTracks: List<SieloTrack>) {
+        if (playlistId == PLAYLIST_DOWNLOADED_CACHE_ID) return
+        val updated = _rawPlaylists.value.map { pl ->
+            if (pl.id == playlistId) {
+                pl.copy(tracks = newTracks)
             } else pl
         }
         savePlaylistsInternal(updated)

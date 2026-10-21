@@ -204,6 +204,10 @@ class InnerTubeClient @Inject constructor(
                     return@mapNotNull null
                 }
 
+                if (TrackMatchValidator.isCleanOrCensored(title, obj["album"]?.jsonPrimitive?.content)) {
+                    return@mapNotNull null
+                }
+
                 val explicitContent = obj["explicit_content"]?.jsonPrimitive?.content
                 val isExplicit = (explicitContent == "1" || explicitContent?.toIntOrNull() == 1 || title.contains("explicit", ignoreCase = true)) &&
                     !TrackMatchValidator.isCleanOrCensored(title)
@@ -3046,6 +3050,10 @@ class InnerTubeClient @Inject constructor(
                 if (parsed != null && parsed > extractedViews) {
                     extractedViews = parsed
                 }
+            }
+
+            if (TrackMatchValidator.isCleanOrCensored(title)) {
+                return null
             }
 
             if (!isAlbumOrPlaylist && !isPureMusicTrack(title, artist)) {

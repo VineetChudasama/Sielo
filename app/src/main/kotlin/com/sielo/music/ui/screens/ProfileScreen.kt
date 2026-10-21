@@ -157,6 +157,51 @@ fun ProfileScreen(
 
     // ArtistProfileScreen handles its own back gestures cleanly when open
 
+    val cacheVersion by com.sielo.music.core.audio.OfflineCacheManager.cacheUpdated.collectAsState()
+    val cachedTracks = remember(cacheVersion) { com.sielo.music.core.audio.OfflineCacheManager.getCachedTracks(context) }
+    val dynamicDownloadedPlaylist = remember(cachedTracks) {
+        com.sielo.music.core.playlist.UserPlaylist(
+            id = com.sielo.music.core.playlist.UserPlaylistsRepository.PLAYLIST_DOWNLOADED_CACHE_ID,
+            title = "Downloaded Cache",
+            description = if (cachedTracks.isEmpty()) {
+                "Offline Vault • Songs you play are cached here for offline replay"
+            } else {
+                "Offline Vault • ${cachedTracks.size} songs ready for offline replay"
+            },
+            coverUrl = cachedTracks.firstOrNull()?.thumbnailUrl
+                ?: "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600&auto=format&fit=crop&q=80",
+            createdAt = Long.MAX_VALUE,
+            tracks = cachedTracks
+        )
+    }
+
+    var selectedOfflinePlaylist by remember { mutableStateOf<com.sielo.music.core.playlist.UserPlaylist?>(null) }
+
+    if (selectedOfflinePlaylist != null) {
+        BackHandler {
+            selectedOfflinePlaylist = null
+        }
+        UserPlaylistDetailView(
+            playlist = dynamicDownloadedPlaylist,
+            onBack = { selectedOfflinePlaylist = null },
+            onPlayTrack = { track, q -> viewModel.playTrack(track, q) },
+            onPlayAll = {
+                if (dynamicDownloadedPlaylist.tracks.isNotEmpty()) {
+                    viewModel.playAlbum(dynamicDownloadedPlaylist.tracks.first(), dynamicDownloadedPlaylist.tracks)
+                }
+            },
+            onDeletePlaylist = {
+                com.sielo.music.core.audio.OfflineCacheManager.clearCache(context)
+                selectedOfflinePlaylist = null
+            },
+            onRemoveTrack = { trackId ->
+                com.sielo.music.core.audio.OfflineCacheManager.removeTrack(context, trackId)
+            },
+            modifier = modifier
+        )
+        return
+    }
+
     if (selectedArtist != null) {
         val artist = selectedArtist!!
         ArtistProfileScreen(
@@ -269,7 +314,7 @@ fun ProfileScreen(
                     onPlayLikedSongs = { viewModel.playLikedSongs() },
                     onOpenPlaylists = onOpenPlaylists,
                     onOpenHistory = { showHistorySheet = true },
-                    onOpenOffline = { showOfflineSheet = true }
+                    onOpenOffline = { selectedOfflinePlaylist = dynamicDownloadedPlaylist }
                 )
             }
 

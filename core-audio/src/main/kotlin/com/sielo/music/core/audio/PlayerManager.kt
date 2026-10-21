@@ -579,6 +579,18 @@ class PlayerManager @Inject constructor(
             scopeArtistName = null
         }
 
+        val isCached = OfflineCacheManager.isCached(context, track.id)
+        if (!com.sielo.music.core.network.NetworkHelper.isOnline(context) && !isCached) {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                android.widget.Toast.makeText(
+                    context,
+                    "No internet connection. This song is not cached for offline replay.",
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+            }
+            return
+        }
+
         val generation = ++playbackGeneration
         currentlyLoadingTrackId = track.id
 

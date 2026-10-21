@@ -1,5 +1,29 @@
 package com.sielo.music.ui.screens
 
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.material.icons.filled.DragHandle
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.WarningAmber
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.lazy.items
+import android.widget.Toast
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -227,6 +251,96 @@ fun CreatePlaylistDialog(
 }
 
 @Composable
+fun AnimatedImportProgressView(progress: Int, total: Int) {
+    val target = if (total > 0) (progress.toFloat() / total).coerceIn(0f, 1f) else 0f
+    val animatedProgress by animateFloatAsState(
+        targetValue = target,
+        animationSpec = tween(durationMillis = 350, easing = FastOutSlowInEasing),
+        label = "animatedImportProgress"
+    )
+
+    val infiniteTransition = rememberInfiniteTransition(label = "shimmer")
+    val shimmerAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.45f,
+        targetValue = 0.95f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 900, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "shimmerAlpha"
+    )
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Resolving & Verifying Tracks...",
+                color = PaletteCream,
+                fontFamily = SoraFontFamily,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.5.sp
+            )
+            Text(
+                text = "${(animatedProgress * 100).toInt()}%",
+                color = PaletteSand,
+                fontFamily = SoraFontFamily,
+                fontWeight = FontWeight.Bold,
+                fontSize = 14.sp
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(14.dp)
+                .clip(RoundedCornerShape(7.dp))
+                .background(PaletteDarkNavy)
+                .border(1.dp, BorderGlass, RoundedCornerShape(7.dp))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(fraction = animatedProgress.coerceAtLeast(0.02f))
+                    .height(14.dp)
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(
+                        Brush.horizontalGradient(
+                            listOf(
+                                PaletteSand,
+                                Color(0xFFF4A261),
+                                PaletteSageGreen.copy(alpha = shimmerAlpha)
+                            )
+                        )
+                    )
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "Progress: $progress of $total tracks",
+                color = PaletteSand.copy(alpha = 0.85f),
+                fontFamily = UrbanistFontFamily,
+                fontSize = 12.sp
+            )
+            Text(
+                text = "Strict master verification",
+                color = TextSecondary,
+                fontFamily = UrbanistFontFamily,
+                fontSize = 11.sp
+            )
+        }
+    }
+}
+
+@Composable
 fun ImportPlaylistDialog(
     viewModel: PlaylistImportViewModel,
     onDismiss: () -> Unit
@@ -330,20 +444,113 @@ fun ImportPlaylistDialog(
                     }
                     is PlaylistImportState.Resolving -> {
                         val state = importState as PlaylistImportState.Resolving
-                        Text("Resolving tracks on InnerTube...", color = PaletteCream)
-                        Text("Progress: ${state.progress} / ${state.total}", color = PaletteSand)
-                        LinearProgressIndicator(
-                            progress = { if (state.total > 0) state.progress.toFloat() / state.total else 0f },
-                            color = PaletteSand,
-                            trackColor = PaletteDarkNavy,
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                        AnimatedImportProgressView(progress = state.progress, total = state.total)
                     }
                     is PlaylistImportState.Success -> {
                         val state = importState as PlaylistImportState.Success
-                        Text("Import Successful!", color = PaletteSand, fontWeight = FontWeight.Bold)
-                        Text("Imported: ${state.imported} tracks", color = PaletteCream)
-                        Text("Skipped/Unresolved: ${state.skipped} tracks", color = PaletteCream)
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = null,
+                                    tint = PaletteSageGreen,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                                Text(
+                                    text = "Import Complete!",
+                                    color = PaletteSand,
+                                    fontFamily = SoraFontFamily,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 16.sp
+                                )
+                            }
+                            Text(
+                                text = "Successfully imported ${state.imported} tracks into '${albumName.ifBlank { "Playlist" }}'",
+                                color = PaletteCream,
+                                fontFamily = UrbanistFontFamily,
+                                fontSize = 13.sp
+                            )
+
+                            if (state.skipped > 0 && state.unimportedTracks.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(PaletteDarkNavy.copy(alpha = 0.85f))
+                                        .border(1.dp, Color(0xFFF4A261).copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                                        .padding(10.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.WarningAmber,
+                                            contentDescription = null,
+                                            tint = Color(0xFFF4A261),
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Text(
+                                            text = "${state.unimportedTracks.size} Track${if (state.unimportedTracks.size > 1) "s" else ""} Not Found On Sielo",
+                                            color = Color(0xFFF4A261),
+                                            fontFamily = SoraFontFamily,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    LazyColumn(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .heightIn(max = 160.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        items(state.unimportedTracks) { unimported ->
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(PaletteOxfordBlue.copy(alpha = 0.6f))
+                                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    text = "•",
+                                                    color = PaletteSand,
+                                                    fontSize = 14.sp,
+                                                    modifier = Modifier.padding(end = 6.dp)
+                                                )
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = unimported.title,
+                                                        color = PaletteCream,
+                                                        fontFamily = SoraFontFamily,
+                                                        fontSize = 12.sp,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    if (unimported.artistGuess.isNotBlank()) {
+                                                        Text(
+                                                            text = unimported.artistGuess,
+                                                            color = TextSecondary,
+                                                            fontFamily = UrbanistFontFamily,
+                                                            fontSize = 11.sp,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -427,6 +634,9 @@ fun UserPlaylistsScreen(importViewModel: com.sielo.music.viewmodel.PlaylistImpor
             },
             onRemoveTrack = { trackId ->
                 viewModel.removeTrack(selectedPlaylist!!.id, trackId)
+            },
+            onMoveTrack = { from, to ->
+                viewModel.moveTrack(selectedPlaylist!!.id, from, to)
             },
             modifier = modifier
         )
@@ -831,7 +1041,7 @@ private fun PlaylistRowCard(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun UserPlaylistDetailView(
+fun UserPlaylistDetailView(
     playlist: UserPlaylist,
     onBack: () -> Unit,
     onPlayTrack: (SieloTrack, List<SieloTrack>) -> Unit,
@@ -839,6 +1049,7 @@ private fun UserPlaylistDetailView(
     onRenamePlaylist: (String) -> Unit = {},
     onDeletePlaylist: () -> Unit,
     onRemoveTrack: (String) -> Unit,
+    onMoveTrack: (Int, Int) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     var showDeleteConfirm by remember { mutableStateOf(false) }
@@ -846,6 +1057,11 @@ private fun UserPlaylistDetailView(
     var selectedSongActionsTrack by remember { mutableStateOf<SieloTrack?>(null) }
     val songActionsVm: SongActionsViewModel = hiltViewModel()
     val isDownloadedCache = playlist.id == com.sielo.music.core.playlist.UserPlaylistsRepository.PLAYLIST_DOWNLOADED_CACHE_ID
+    var draggingIndex by remember { mutableStateOf<Int?>(null) }
+    var dragOffsetY by remember { mutableStateOf(0f) }
+    var measuredItemHeightPx by remember { mutableStateOf(0f) }
+    val density = LocalDensity.current
+    val itemHeightPx = if (measuredItemHeightPx > 0f) measuredItemHeightPx else with(density) { 64.dp.toPx() }
 
     Box(
         modifier = modifier
@@ -1062,15 +1278,41 @@ private fun UserPlaylistDetailView(
                     }
                 }
             } else {
-                itemsIndexed(playlist.tracks) { index, track ->
+                itemsIndexed(playlist.tracks, key = { _, track -> track.id }) { index, track ->
+                    val isDragging = draggingIndex == index
+                    val elevation by animateDpAsState(if (isDragging) 8.dp else 0.dp, label = "elevation")
+                    val scale by animateFloatAsState(if (isDragging) 1.03f else 1.0f, label = "scale")
+                    val currentIdxState = rememberUpdatedState(index)
+                    val maxIndexState = rememberUpdatedState(playlist.tracks.lastIndex)
+
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .animateItem()
+                            .zIndex(if (isDragging) 10f else 1f)
+                            .graphicsLayer {
+                                translationY = if (isDragging) dragOffsetY else 0f
+                                scaleX = scale
+                                scaleY = scale
+                                shadowElevation = elevation.toPx()
+                            }
+                            .onGloballyPositioned { coordinates ->
+                                if (measuredItemHeightPx == 0f && coordinates.size.height > 0) {
+                                    measuredItemHeightPx = coordinates.size.height.toFloat()
+                                }
+                            }
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (isDragging) PaletteOxfordBlue else Color.Transparent)
+                            .border(
+                                1.dp,
+                                if (isDragging) PaletteSand else Color.Transparent,
+                                RoundedCornerShape(12.dp)
+                            )
                             .combinedClickable(
                                 onClick = { onPlayTrack(track, playlist.tracks) },
                                 onLongClick = { selectedSongActionsTrack = track }
                             )
-                            .padding(horizontal = 20.dp, vertical = 8.dp),
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
@@ -1109,6 +1351,55 @@ private fun UserPlaylistDetailView(
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
+
+                        if (!isDownloadedCache) {
+                            IconButton(
+                                onClick = {},
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .pointerInput(Unit) {
+                                        detectDragGesturesAfterLongPress(
+                                            onDragStart = {
+                                                draggingIndex = currentIdxState.value
+                                                dragOffsetY = 0f
+                                            },
+                                            onDrag = { change, dragAmount ->
+                                                change.consume()
+                                                dragOffsetY += dragAmount.y
+                                                val current = draggingIndex ?: return@detectDragGesturesAfterLongPress
+                                                val maxIdx = maxIndexState.value
+                                                val threshold = itemHeightPx * 0.65f
+
+                                                if (dragOffsetY > threshold && current < maxIdx) {
+                                                    onMoveTrack(current, current + 1)
+                                                    draggingIndex = current + 1
+                                                    dragOffsetY -= itemHeightPx
+                                                } else if (dragOffsetY < -threshold && current > 0) {
+                                                    onMoveTrack(current, current - 1)
+                                                    draggingIndex = current - 1
+                                                    dragOffsetY += itemHeightPx
+                                                }
+                                            },
+                                            onDragEnd = {
+                                                draggingIndex = null
+                                                dragOffsetY = 0f
+                                            },
+                                            onDragCancel = {
+                                                draggingIndex = null
+                                                dragOffsetY = 0f
+                                            }
+                                        )
+                                    }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.DragHandle,
+                                    contentDescription = "Drag to reorder",
+                                    tint = if (isDragging) PaletteSand else TextSecondary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
+
                         IconButton(
                             onClick = { selectedSongActionsTrack = track },
                             modifier = Modifier.size(32.dp)

@@ -80,15 +80,22 @@ What sets **Sielo** apart from typical streaming clients:
 
 ### 11. 💾 Dynamic Offline Cache Playlist & Local Audio Vault
 - **Dynamic Downloaded Cache Playlist**: Automatically aggregates all cached songs in your local storage into a dynamic "Downloaded Cache" playlist with instant gapless replay.
+- **Offline Home Display & Standalone Playlist**: When offline, Sielo showcases your Downloaded Cache playlist directly on the Home Screen and opens it as a dedicated full-screen playlist from Profile.
+- **Offline Network Shield**: Retains previously loaded feeds when offline; prevents disruptive refreshes and displays friendly offline indicators whenever network actions are attempted.
 - **Zero-Network Engine Prioritization**: Audio engine checks the local vault first before making network calls, enabling seamless instant playback with zero data usage.
 - **Manual Vault Management**: Cache any song on demand via track action sheets or remove individual items anytime.
 
-### 12. ☁️ Account-Level Cloud Synchronization & Continuous Stats Protection
+### 12. 🎶 Playlist Drag-and-Drop Reorder & Transparent Importer
+- **Intuitive Track Reordering**: Effortlessly reorder songs in your created and imported playlists via tactile drag handles with smooth animations and instant persistence.
+- **Transparent Importer & Animated Progress**: Real-time glowing animated progress bar and dedicated scrollable report displaying any songs that could not be resolved during playlist imports.
+- **Explicit Audio Guarantee (No Censored Songs)**: Engine-wide filtering strictly removes clean, edited, or censored versions across search, streaming, and imports.
+
+### 13. ☁️ Account-Level Cloud Synchronization & Continuous Stats Protection
 - **Cross-Device Cloud Sync**: Seamlessly syncs user profiles, playlists, liked tracks, listening history, lifetime stream stats, and taste profiles with Cloud Firestore.
 - **Multi-Device & Account Switch Persistence**: Switching accounts or logging in from a different device never resets or overwrites your stats or listening history.
 - **Continuous 3-Minute Interval Sync**: Automatic background worker continuously synchronizes listening metrics and stats to ensure zero data loss.
 
-### 13. 🔥 Trending-Aware Search Ranking
+### 14. 🔥 Trending-Aware Search Ranking
 - **Multi-Provider Priority Architecture**: Blends textual search relevance with trending popularity signals.
 - **Provider Chain**: Primary YouTube Data API (India region prioritized) ➔ Fallback 1: Last.fm API ➔ Fallback 2: Firestore community listening statistics ➔ Fallback 3: Last-known-good snapshot.
 

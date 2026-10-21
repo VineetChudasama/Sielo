@@ -67,6 +67,8 @@ class FakeCandidatePoolBuilder : CandidatePoolBuilder(
         override suspend fun getTopArtistsSnapshot(sinceMs: Long, limit: Int) = emptyList<com.sielo.music.core.database.dao.ArtistStat>()
         override suspend fun getSongIdsPlayedSince(sinceMs: Long) = emptyList<String>()
         override suspend fun getTopSongsSnapshot(sinceMs: Long, limit: Int) = emptyList<com.sielo.music.core.database.dao.SongStat>()
+        override suspend fun getAllHistoryList(limit: Int): List<com.sielo.music.core.database.entity.ListeningEventEntity> = emptyList()
+        override suspend fun getAllTimestamps(): List<Long> = emptyList()
         override suspend fun clearAll() {}
     },
     recommendationHistoryDao = FakeRecommendationHistoryDao(),
