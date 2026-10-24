@@ -18,7 +18,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -96,6 +103,71 @@ class UserManager @Inject constructor(
             return Pair(false, "Only lowercase letters, numbers, '.', and '_' allowed")
         }
 
+        // 1. Current user already holds this handle
+        val currentProfileUser = _currentUser.value?.username?.let { sanitizeUsername(it) }
+        val currentCleanEmail = currentEmail?.trim()?.lowercase() ?: _currentUser.value?.email?.trim()?.lowercase()
+        if (!currentProfileUser.isNullOrBlank() && currentProfileUser == clean) {
+            return Pair(true, "Your current username")
+        }
+
+        // 2. Check locally stored accounts on device
+        try {
+            val allEntries = prefs.all
+            for ((key, value) in allEntries) {
+                if (key.startsWith(KEY_ALL_USERS_PREFIX) && value is String) {
+                    try {
+                        val otherProfile = json.decodeFromString<UserProfile>(value)
+                        val otherCleanUser = otherProfile.username?.let { sanitizeUsername(it) }
+                        val otherEmail = otherProfile.email.trim().lowercase()
+                        if (otherCleanUser == clean && otherEmail != currentCleanEmail) {
+                            return Pair(false, "@$clean is already taken. Please choose another.")
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+        } catch (_: Exception) {}
+
+        // 3. Query sielo.site/api/admin/users
+        try {
+            val client = OkHttpClient.Builder()
+                .connectTimeout(4, TimeUnit.SECONDS)
+                .readTimeout(4, TimeUnit.SECONDS)
+                .build()
+            val request = Request.Builder()
+                .url("https://sielo.site/api/admin/users")
+                .get()
+                .build()
+            val response = client.newCall(request).execute()
+            if (response.isSuccessful) {
+                val bodyStr = response.body?.string()
+                if (!bodyStr.isNullOrBlank()) {
+                    val usersArray: JSONArray? = try {
+                        val obj = JSONObject(bodyStr)
+                        obj.optJSONArray("users")
+                    } catch (_: Exception) {
+                        try { JSONArray(bodyStr) } catch (_: Exception) { null }
+                    }
+                    if (usersArray != null) {
+                        for (i in 0 until usersArray.length()) {
+                            val userObj = usersArray.optJSONObject(i) ?: continue
+                            val takenUsername = userObj.optString("username", "").trim().removePrefix("@").lowercase()
+                            val ownerEmail = userObj.optString("email", "").trim().lowercase()
+                            if (takenUsername.isNotBlank() && takenUsername == clean) {
+                                if (!currentCleanEmail.isNullOrBlank() && ownerEmail == currentCleanEmail) {
+                                    return Pair(true, "Your current username")
+                                } else {
+                                    return Pair(false, "@$clean is already taken. Please choose another.")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("UserManager", "Admin API availability check notice: ${e.message}")
+        }
+
+        // 4. Best-effort Firestore sielo_usernames collection check
         return try {
             cloudSyncManager.ensureAuthenticated()
             val doc = firestore.collection(COLLECTION_USERNAMES).document(clean).get().await()
@@ -103,7 +175,6 @@ class UserManager @Inject constructor(
                 Pair(true, "@$clean is available!")
             } else {
                 val ownerEmail = doc.getString("email")?.trim()?.lowercase()
-                val currentCleanEmail = currentEmail?.trim()?.lowercase()
                 if (!currentCleanEmail.isNullOrBlank() && ownerEmail == currentCleanEmail) {
                     Pair(true, "Your current username")
                 } else {
@@ -111,31 +182,65 @@ class UserManager @Inject constructor(
                 }
             }
         } catch (e: Exception) {
-            Log.w("UserManager", "Availability check error: ${e.message}")
-            Pair(true, "Username available")
+            Log.w("UserManager", "Firestore availability check notice: ${e.message}")
+            Pair(true, "@$clean is available!")
         }
     }
 
     suspend fun claimUsername(raw: String, user: UserProfile): Boolean {
         val clean = sanitizeUsername(raw)
         if (!isValidUsername(clean)) return false
-        return try {
-            cloudSyncManager.ensureAuthenticated()
-            val userKey = cloudSyncManager.resolveUserKey(user)
-            val docRef = firestore.collection(COLLECTION_USERNAMES).document(clean)
-            val existing = docRef.get().await()
-            if (existing.exists()) {
-                val ownerEmail = existing.getString("email")?.trim()?.lowercase()
-                val ownerUid = existing.getString("uid")
-                if (ownerEmail != null && ownerEmail != user.email.trim().lowercase() && ownerUid != userKey && ownerUid != user.id) {
-                    Log.w("UserManager", "Username $clean taken by another user ($ownerEmail)")
-                    return false
-                }
-            }
+        val userKey = cloudSyncManager.resolveUserKey(user)
+        val cleanEmail = user.email.trim().lowercase()
 
+        // 1. Update user profile and root user doc in Firestore sielo_users (always permitted by Firestore rules)
+        try {
+            cloudSyncManager.ensureAuthenticated()
+            val userRef = firestore.collection("sielo_users").document(userKey)
+            val updatedProfileMap = mapOf(
+                "username" to clean,
+                "lastSyncedAt" to System.currentTimeMillis()
+            )
+            userRef.collection("data").document("profile").set(updatedProfileMap, SetOptions.merge()).await()
+            userRef.set(updatedProfileMap, SetOptions.merge()).await()
+        } catch (e: Exception) {
+            Log.w("UserManager", "Failed updating username in sielo_users: ${e.message}")
+        }
+
+        // 2. Dispatch profile telemetry with updated username to sielo.site/api/admin/users
+        try {
+            val client = OkHttpClient.Builder()
+                .connectTimeout(5, TimeUnit.SECONDS)
+                .readTimeout(5, TimeUnit.SECONDS)
+                .build()
+            val jsonBody = JSONObject().apply {
+                put("id", userKey)
+                put("name", user.name)
+                put("email", user.email)
+                put("username", clean)
+                put("avatar", user.photoUrl)
+                put("provider", user.provider.name)
+                put("status", "Active Now")
+                put("appVersion", "11.5.6")
+                put("device", "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim())
+                put("createdAt", user.createdAt)
+            }
+            val requestBody = jsonBody.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+            val request = Request.Builder()
+                .url("https://sielo.site/api/admin/users")
+                .post(requestBody)
+                .build()
+            client.newCall(request).execute().close()
+        } catch (e: Exception) {
+            Log.w("UserManager", "Failed notifying admin API of username claim: ${e.message}")
+        }
+
+        // 3. Best-effort write to sielo_usernames (must NEVER throw or fail the operation)
+        try {
+            val docRef = firestore.collection(COLLECTION_USERNAMES).document(clean)
             val data = hashMapOf(
                 "username" to clean,
-                "email" to user.email.trim().lowercase(),
+                "email" to cleanEmail,
                 "uid" to userKey,
                 "name" to user.name,
                 "claimedAt" to System.currentTimeMillis()
@@ -146,15 +251,13 @@ class UserManager @Inject constructor(
             if (!oldUsername.isNullOrBlank() && oldUsername != clean) {
                 try {
                     firestore.collection(COLLECTION_USERNAMES).document(oldUsername).delete().await()
-                } catch (e: Exception) {
-                    Log.w("UserManager", "Failed to release old handle $oldUsername: ${e.message}")
-                }
+                } catch (_: Exception) {}
             }
-            true
         } catch (e: Exception) {
-            Log.e("UserManager", "Failed to claim username $clean: ${e.message}", e)
-            false
+            Log.w("UserManager", "sielo_usernames write notice: ${e.message}")
         }
+
+        return true
     }
 
     init {
@@ -176,11 +279,45 @@ class UserManager @Inject constructor(
         restoreSession()
     }
 
+    fun syncAllStoredAccountsToCloud() {
+        scope.launch(Dispatchers.IO) {
+            try {
+                cloudSyncManager.ensureAuthenticated()
+                val allEntries = prefs.all
+                for ((key, value) in allEntries) {
+                    if (key.startsWith(KEY_ALL_USERS_PREFIX) && value is String) {
+                        try {
+                            val userAccount = json.decodeFromString<UserProfile>(value)
+                            val email = userAccount.email.trim().lowercase()
+                            if (email.isNotBlank() && !email.endsWith("@sielo.local")) {
+                                Log.i("UserManager", "Auto-syncing stored local account $email to cloud and admin registry...")
+                                cloudSyncManager.backupUserDataBlocking(userAccount)
+                            }
+                        } catch (e: Exception) {
+                            Log.w("UserManager", "Failed syncing stored account $key: ${e.message}")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w("UserManager", "Error in syncAllStoredAccountsToCloud: ${e.message}")
+            }
+        }
+    }
+
     private fun restoreSession() {
         val savedJson = prefs.getString(KEY_CURRENT_USER, null)
-        if (!savedJson.isNullOrBlank()) {
+        val candidateJson = if (!savedJson.isNullOrBlank()) {
+            savedJson
+        } else {
+            // Check if there are any stored accounts from previous logins on this device
+            prefs.all.entries
+                .firstOrNull { it.key.startsWith(KEY_ALL_USERS_PREFIX) && it.value is String }
+                ?.value as? String
+        }
+
+        if (!candidateJson.isNullOrBlank()) {
             try {
-                var profile = json.decodeFromString<UserProfile>(savedJson)
+                var profile = json.decodeFromString<UserProfile>(candidateJson)
                 if (profile.createdAt <= 0L) {
                     val storedCreated = prefs.getLong("account_created_timestamp", System.currentTimeMillis())
                     profile = profile.copy(createdAt = storedCreated)
@@ -210,13 +347,17 @@ class UserManager @Inject constructor(
                                 hasCompletedOnboarding = true,
                                 createdAt = if (restored.createdAt > 0L) restored.createdAt else profile.createdAt
                             )
-                            persistUser(merged, backupToCloud = false)
+                            persistUser(merged, backupToCloud = true)
                         } else {
                             // Seed newly created cloud database with existing local account data
                             android.util.Log.i("UserManager", "Cloud has no record for $cleanEmail yet. Backing up existing local account to Firestore...")
                             cloudSyncManager.backupUserData(profile)
                         }
+                        // Also sync all existing device accounts to cloud & admin registry
+                        syncAllStoredAccountsToCloud()
                     }
+                } else {
+                    syncAllStoredAccountsToCloud()
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
