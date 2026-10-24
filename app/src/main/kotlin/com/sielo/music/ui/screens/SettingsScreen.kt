@@ -1,4 +1,9 @@
 package com.sielo.music.ui.screens
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.material3.CircularProgressIndicator
 
 import android.content.Intent
 import android.net.Uri
@@ -557,6 +562,57 @@ private fun AccountProfileSubScreen(
     var displayName by remember(currentUser) { mutableStateOf(currentUser?.name ?: "") }
     var username by remember(currentUser) { mutableStateOf(currentUser?.username ?: "") }
     var bio by remember(currentUser) { mutableStateOf(currentUser?.bio ?: "") }
+    var usernameStatusMessage by remember { mutableStateOf<String?>(null) }
+    var isUsernameValid by remember { mutableStateOf(true) }
+    var isCheckingUsername by remember { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
+
+    LaunchedEffect(username) {
+        val clean = username.trim().removePrefix("@").lowercase()
+        val currentClean = currentUser?.username?.trim()?.removePrefix("@")?.lowercase()
+        if (clean.isBlank()) {
+            usernameStatusMessage = "Username cannot be empty"
+            isUsernameValid = false
+            return@LaunchedEffect
+        }
+        if (clean == currentClean) {
+            usernameStatusMessage = "Current username"
+            isUsernameValid = true
+            return@LaunchedEffect
+        }
+        if (clean.length < 3) {
+            usernameStatusMessage = "Must be at least 3 characters"
+            isUsernameValid = false
+            return@LaunchedEffect
+        }
+        if (clean.length > 30) {
+            usernameStatusMessage = "Cannot exceed 30 characters"
+            isUsernameValid = false
+            return@LaunchedEffect
+        }
+        if (clean.startsWith(".") || clean.endsWith(".")) {
+            usernameStatusMessage = "Cannot start or end with a dot"
+            isUsernameValid = false
+            return@LaunchedEffect
+        }
+        if (clean.contains("..")) {
+            usernameStatusMessage = "Cannot have consecutive dots"
+            isUsernameValid = false
+            return@LaunchedEffect
+        }
+        if (!clean.all { it in 'a'..'z' || it in '0'..'9' || it == '.' || it == '_' }) {
+            usernameStatusMessage = "Only letters, numbers, '.', and '_' allowed"
+            isUsernameValid = false
+            return@LaunchedEffect
+        }
+
+        isCheckingUsername = true
+        delay(350L)
+        val result = viewModel.checkUsernameAvailability(clean)
+        isCheckingUsername = false
+        isUsernameValid = result.first
+        usernameStatusMessage = result.second
+    }
 
     SubScreenScaffold(
         title = "Edit Profile",
@@ -651,7 +707,9 @@ private fun AccountProfileSubScreen(
                 )
                 OutlinedTextField(
                     value = username,
-                    onValueChange = { username = it.filter { ch -> ch.isLetterOrDigit() || ch == '_' } },
+                    onValueChange = { raw ->
+                        username = raw.trim().removePrefix("@").lowercase().filter { ch -> ch in 'a'..'z' || ch in '0'..'9' || ch == '.' || ch == '_' }
+                    },
                     placeholder = { Text("e.g. maya_vibes", color = TextMuted) },
                     prefix = { Text("@", color = PaletteSand, fontWeight = FontWeight.Bold) },
                     modifier = Modifier.fillMaxWidth(),
@@ -662,10 +720,31 @@ private fun AccountProfileSubScreen(
                         focusedTextColor = PaletteCream,
                         unfocusedTextColor = PaletteCream,
                         focusedIndicatorColor = PaletteSand,
-                        unfocusedIndicatorColor = BorderGlass
+                        unfocusedIndicatorColor = if (!isUsernameValid && usernameStatusMessage != null) Color(0xFFE63946) else BorderGlass
                     ),
                     singleLine = true
                 )
+
+                if (usernameStatusMessage != null) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (isCheckingUsername) {
+                            CircularProgressIndicator(modifier = Modifier.size(10.dp), color = PaletteSand, strokeWidth = 1.5.dp)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Checking availability...", color = TextSecondary, fontSize = 11.sp)
+                        } else {
+                            val color = if (isUsernameValid) PaletteSageGreen else Color(0xFFE63946)
+                            Text(
+                                text = (if (isUsernameValid) "✓ " else "✗ ") + usernameStatusMessage.orEmpty(),
+                                color = color,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                }
 
                 Text(
                     text = "BIO",
@@ -697,17 +776,31 @@ private fun AccountProfileSubScreen(
 
                 Button(
                     onClick = {
+                        if (!isUsernameValid) {
+                            Toast.makeText(context, usernameStatusMessage ?: "Please choose a valid unique username", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
                         val finalName = displayName.trim().ifBlank { "Sielo Listener" }
                         val finalUsername = username.trim().takeIf { it.isNotBlank() }
                         val finalBio = bio.trim().takeIf { it.isNotBlank() }
-                        viewModel.updateProfile(finalName, finalUsername, finalBio)
-                        Toast.makeText(context, "Profile updated successfully", Toast.LENGTH_SHORT).show()
-                        onBack()
+                        coroutineScope.launch {
+                            val res = viewModel.updateProfileWithValidation(finalName, finalUsername, finalBio)
+                            if (res.first) {
+                                Toast.makeText(context, "Profile updated successfully", Toast.LENGTH_SHORT).show()
+                                onBack()
+                            } else {
+                                Toast.makeText(context, res.second, Toast.LENGTH_LONG).show()
+                            }
+                        }
                     },
+                    enabled = isUsernameValid && !isCheckingUsername,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(48.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = PaletteSand),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = PaletteSand,
+                        disabledContainerColor = PaletteSand.copy(alpha = 0.35f)
+                    ),
                     shape = RoundedCornerShape(14.dp)
                 ) {
                     Text(

@@ -533,6 +533,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         listenTogetherViewModel.checkPendingRejoinSession()
         playerManager.reloadCurrentTrackArtwork()
+        appUpdateManager.checkForUpdates()
     }
 
     override fun onPause() {

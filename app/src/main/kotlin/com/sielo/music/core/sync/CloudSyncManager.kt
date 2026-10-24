@@ -29,6 +29,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -396,6 +402,15 @@ class CloudSyncManager @Inject constructor(
             val userDocId = resolveUserKey(user)
             val userRef = firestore.collection(COLLECTION_USERS).document(userDocId)
 
+            // Compute lifetime streams and favorites count for profile and admin registry
+            val totalStreams = try {
+                listeningHistoryDao.getAllHistoryList(5000).size
+            } catch (_: Exception) {
+                0
+            }
+            val currentFavorites = favoriteTrackDao.getAllFavoritesList()
+            val likedCount = currentFavorites.size
+
             // 1. Profile document
             val profileMap = hashMapOf(
                 "id" to user.id,
@@ -410,6 +425,11 @@ class CloudSyncManager @Inject constructor(
                 "favoriteGenres" to user.favoriteGenres,
                 "artistTasteWeights" to user.artistTasteWeights,
                 "genreTasteWeights" to user.genreTasteWeights,
+                "totalStreams" to totalStreams,
+                "streamCount" to totalStreams,
+                "likedCount" to likedCount,
+                "appVersion" to "11.5.6",
+                "deviceModel" to "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim(),
                 "createdAt" to user.createdAt,
                 "lastSyncedAt" to System.currentTimeMillis()
             )
@@ -417,8 +437,35 @@ class CloudSyncManager @Inject constructor(
                 .set(profileMap, SetOptions.merge())
                 .await()
 
+            // 1b. Write root document in sielo_users so Firestore REST API listing sees it
+            val rootSummary = hashMapOf(
+                "id" to user.id,
+                "name" to user.name,
+                "email" to user.email,
+                "username" to (user.username ?: ""),
+                "photoUrl" to (user.photoUrl ?: ""),
+                "provider" to user.provider.name,
+                "totalStreams" to totalStreams,
+                "streamCount" to totalStreams,
+                "likedCount" to likedCount,
+                "appVersion" to "11.5.6",
+                "device" to "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim(),
+                "status" to "Active Now",
+                "createdAt" to user.createdAt,
+                "lastSyncedAt" to System.currentTimeMillis()
+            )
+            try {
+                userRef.set(rootSummary, SetOptions.merge()).await()
+            } catch (e: Exception) {
+                Log.w(TAG, "Root user doc set error: ${e.message}")
+            }
+
+            // 1c. Dispatch real-time user telemetry to website admin registry
+            scope.launch(Dispatchers.IO) {
+                sendAdminUserTelemetry(user, totalStreams, likedCount)
+            }
+
             // 2. Favorites & Library document (only push if non-empty to protect cloud state)
-            val currentFavorites = favoriteTrackDao.getAllFavoritesList()
             if (currentFavorites.isNotEmpty()) {
                 val favoritesData = currentFavorites.map { fav ->
                     mapOf(
@@ -940,9 +987,66 @@ class CloudSyncManager @Inject constructor(
                 )
                 .await()
 
+            // 6. Keep DOC_PROFILE and root user document updated with fresh totalStreams
+            try {
+                val statsUpdate = mapOf(
+                    "totalStreams" to totalStreams,
+                    "streamCount" to totalStreams,
+                    "lastSyncedAt" to System.currentTimeMillis()
+                )
+                userRef.collection("data").document(DOC_PROFILE).set(statsUpdate, SetOptions.merge()).await()
+                userRef.set(statsUpdate, SetOptions.merge()).await()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error updating totalStreams to profile: ${e.message}")
+            }
+
+            // 7. Dispatch background real-time telemetry to website admin registry
+            scope.launch(Dispatchers.IO) {
+                val likedCount = try { favoriteTrackDao.getAllFavoritesList().size } catch (_: Exception) { 0 }
+                sendAdminUserTelemetry(user, totalStreams, likedCount)
+            }
+
             Log.i(TAG, "Successfully synced ${mergedEvents.size} events and stats for $userDocId")
         } catch (e: Exception) {
             Log.w(TAG, "Error syncing listening history and stats for ${user.email}: ${e.message}")
+        }
+    }
+
+    /**
+     * Sends background telemetry heartbeat / sync to the website admin registry (sielo.site/api/admin/users)
+     */
+    private fun sendAdminUserTelemetry(user: UserProfile, streamCount: Int, likedCount: Int) {
+        try {
+            val client = OkHttpClient.Builder()
+                .connectTimeout(5, TimeUnit.SECONDS)
+                .readTimeout(5, TimeUnit.SECONDS)
+                .build()
+
+            val jsonBody = JSONObject().apply {
+                put("id", resolveUserKey(user))
+                put("name", user.name)
+                put("email", user.email)
+                put("username", user.username ?: "")
+                put("avatar", user.photoUrl)
+                put("provider", user.provider.name)
+                put("streamCount", streamCount)
+                put("likedCount", likedCount)
+                put("status", "Active Now")
+                put("appVersion", "11.5.6")
+                put("device", "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim())
+                put("createdAt", user.createdAt)
+            }
+
+            val requestBody = jsonBody.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+            val request = Request.Builder()
+                .url("https://sielo.site/api/admin/users")
+                .post(requestBody)
+                .build()
+
+            client.newCall(request).execute().close()
+            Log.d(TAG, "Dispatched user telemetry for ${user.email} (streams=$streamCount)")
+        } catch (e: Exception) {
+            Log.d(TAG, "Admin telemetry notice: ${e.message}")
         }
     }
 }

@@ -357,6 +357,20 @@ class ProfileViewModel @Inject constructor(
         userManager.updateProfile(name, username, bio, photoUrl, clearPhoto)
     }
 
+    suspend fun updateProfileWithValidation(
+        name: String,
+        username: String?,
+        bio: String?,
+        photoUrl: String? = null,
+        clearPhoto: Boolean = false
+    ): Pair<Boolean, String> {
+        return userManager.updateProfileWithUsernameCheck(name, username, bio, photoUrl, clearPhoto)
+    }
+
+    suspend fun checkUsernameAvailability(raw: String): Pair<Boolean, String> {
+        return userManager.checkUsernameAvailability(raw, currentUser.value?.email)
+    }
+
     fun playTrack(track: SieloTrack, queue: List<SieloTrack>) {
         playerManager.playTrack(track, queue)
     }

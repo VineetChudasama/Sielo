@@ -1,4 +1,9 @@
 package com.sielo.music.ui.screens
+import kotlinx.coroutines.delay
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.BorderStroke
+import android.widget.Toast
 
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -150,6 +155,13 @@ val TRENDING_ONBOARDING_GENRES = listOf(
     OnboardingGenre("Punjabi Hits", "🔥", "High-energy bhangra & modern flow", 0xFFD19A66)
 )
 
+data class PendingGoogleLogin(
+    val name: String,
+    val email: String,
+    val photoUrl: String?,
+    val idToken: String?
+)
+
 /**
  * Authentication Dialog (Google OAuth + Normal Email/Password)
  */
@@ -163,6 +175,8 @@ fun AuthDialog(
     var emailInput by remember { mutableStateOf("") }
     var passwordInput by remember { mutableStateOf("") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var pendingGoogleLogin by remember { mutableStateOf<PendingGoogleLogin?>(null) }
+    var showGoogleUsernameDialog by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
@@ -199,8 +213,14 @@ fun AuthDialog(
                 val name = account.displayName ?: "Google User"
                 val email = account.email ?: "user@gmail.com"
                 val photoUrl = account.photoUrl?.toString()
-                userManager.signInWithGoogle(name, email, photoUrl, account.idToken)
-                onDismiss()
+                val existing = userManager.getUserByEmail(email)
+                if (!existing?.username.isNullOrBlank()) {
+                    userManager.signInWithGoogle(name, email, photoUrl, account.idToken, existing?.username)
+                    onDismiss()
+                } else {
+                    pendingGoogleLogin = PendingGoogleLogin(name, email, photoUrl, account.idToken)
+                    showGoogleUsernameDialog = true
+                }
             }
         } catch (e: Exception) {
             if (e is ApiException && (e.statusCode == 12501 || e.statusCode == 12502)) {
@@ -214,8 +234,14 @@ fun AuthDialog(
                     val name = lastAccount.displayName ?: "Google User"
                     val email = lastAccount.email ?: "user@gmail.com"
                     val photoUrl = lastAccount.photoUrl?.toString()
-                    userManager.signInWithGoogle(name, email, photoUrl, lastAccount.idToken)
-                    onDismiss()
+                    val existing = userManager.getUserByEmail(email)
+                    if (!existing?.username.isNullOrBlank()) {
+                        userManager.signInWithGoogle(name, email, photoUrl, lastAccount.idToken, existing?.username)
+                        onDismiss()
+                    } else {
+                        pendingGoogleLogin = PendingGoogleLogin(name, email, photoUrl, lastAccount.idToken)
+                        showGoogleUsernameDialog = true
+                    }
                 } else {
                     val msg = if (e is ApiException) "Google Sign-In failed (${e.statusCode})" else "Google Sign-In failed"
                     android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
@@ -1221,6 +1247,265 @@ fun OnboardingGenreTile(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+            }
+        }
+    }
+}
+
+/**
+ * Interactive Popup Prompt: Ensures direct Google Sign-In users pick a unique Instagram-style handle
+ */
+@Composable
+fun GoogleUsernameChooserDialog(
+    pending: PendingGoogleLogin,
+    userManager: UserManager,
+    onDismiss: () -> Unit,
+    onConfirmed: (String) -> Unit
+) {
+    val context = LocalContext.current
+    var usernameInput by remember {
+        mutableStateOf(pending.email.substringBefore("@").replace(".", "_").filter { it.isLetterOrDigit() || it == '_' || it == '.' }.lowercase().take(24))
+    }
+    var availabilityMessage by remember { mutableStateOf<String?>(null) }
+    var isAvailable by remember { mutableStateOf(false) }
+    var isChecking by remember { mutableStateOf(false) }
+
+    LaunchedEffect(usernameInput) {
+        val clean = userManager.sanitizeUsername(usernameInput)
+        if (clean.length < 3) {
+            availabilityMessage = "Username must be at least 3 characters"
+            isAvailable = false
+            isChecking = false
+            return@LaunchedEffect
+        }
+        if (clean.length > 30) {
+            availabilityMessage = "Username cannot exceed 30 characters"
+            isAvailable = false
+            isChecking = false
+            return@LaunchedEffect
+        }
+        if (clean.startsWith(".") || clean.endsWith(".")) {
+            availabilityMessage = "Cannot start or end with a dot"
+            isAvailable = false
+            isChecking = false
+            return@LaunchedEffect
+        }
+        if (clean.contains("..")) {
+            availabilityMessage = "Cannot contain consecutive dots"
+            isAvailable = false
+            isChecking = false
+            return@LaunchedEffect
+        }
+
+        isChecking = true
+        delay(350L)
+        val result = userManager.checkUsernameAvailability(clean, pending.email)
+        isChecking = false
+        isAvailable = result.first
+        availabilityMessage = result.second
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(dismissOnBackPress = true, dismissOnClickOutside = false)
+    ) {
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = PaletteOxfordBlue,
+            border = BorderStroke(1.dp, BorderSubtle),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(22.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // Header badge
+                Box(
+                    modifier = Modifier
+                        .size(52.dp)
+                        .clip(CircleShape)
+                        .background(
+                            Brush.linearGradient(
+                                listOf(PaletteSand.copy(alpha = 0.25f), PaletteDarkNavy)
+                            )
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "@",
+                        color = PaletteSand,
+                        fontSize = 26.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = SoraFontFamily
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Text(
+                    text = "ENTER YOUR USERNAME",
+                    fontFamily = SoraFontFamily,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 17.sp,
+                    color = PaletteSand,
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Text(
+                    text = "Pick a unique handle for your Sielo identity. Like Instagram, handles are unique and reserved for you.",
+                    fontSize = 12.sp,
+                    color = TextSecondary,
+                    textAlign = TextAlign.Center,
+                    lineHeight = 17.sp
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Google user pill
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = PaletteDarkNavy.copy(alpha = 0.6f),
+                    border = BorderStroke(1.dp, BorderSubtle.copy(alpha = 0.5f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(CircleShape)
+                                .background(PaletteCream),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = pending.name.take(1).uppercase(),
+                                color = PaletteDarkNavy,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp
+                            )
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = pending.name,
+                                color = PaletteCream,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = pending.email,
+                                color = TextMuted,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Username input field
+                OutlinedTextField(
+                    value = usernameInput,
+                    onValueChange = { raw ->
+                        usernameInput = userManager.sanitizeUsername(raw)
+                    },
+                    label = { Text("Unique Username Handle", color = TextSecondary) },
+                    prefix = { Text("@", color = PaletteSand, fontWeight = FontWeight.Bold) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = PaletteCream,
+                        unfocusedTextColor = PaletteCream,
+                        focusedBorderColor = PaletteSand,
+                        unfocusedBorderColor = if (!isAvailable && availabilityMessage != null) Color(0xFFE63946) else BorderSubtle
+                    ),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // Feedback status line
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (isChecking) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(12.dp),
+                            color = PaletteSand,
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Checking availability...",
+                            color = TextSecondary,
+                            fontSize = 11.sp
+                        )
+                    } else if (availabilityMessage != null) {
+                        val color = if (isAvailable) PaletteSageGreen else Color(0xFFE63946)
+                        Text(
+                            text = (if (isAvailable) "✓ " else "✗ ") + availabilityMessage,
+                            color = color,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                // Action buttons
+                Button(
+                    onClick = {
+                        val clean = userManager.sanitizeUsername(usernameInput)
+                        if (!isAvailable) {
+                            Toast.makeText(context, availabilityMessage ?: "Please choose a valid unique username", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
+                        onConfirmed(clean)
+                    },
+                    enabled = isAvailable && !isChecking,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = PaletteSand,
+                        disabledContainerColor = PaletteSand.copy(alpha = 0.35f)
+                    ),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                ) {
+                    Text(
+                        text = "CONFIRM & ENTER SIELO",
+                        color = PaletteDarkNavy,
+                        fontFamily = SoraFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Cancel",
+                        color = TextSecondary,
+                        fontSize = 13.sp
+                    )
+                }
             }
         }
     }

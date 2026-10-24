@@ -20,6 +20,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.TimeUnit
@@ -46,6 +47,7 @@ class AppUpdateManager @Inject constructor(
         const val UPDATE_WEBSITE_URL = "https://sielo.site"
         private const val PREFS_NAME = "sielo_app_update_prefs"
         private const val KEY_LAST_UPDATE_PROMPT_TIME = "last_update_prompt_time"
+        private const val KEY_PENDING_UPDATE_VERSION = "pending_update_version"
         private const val REMIND_DELAY_MS = 24 * 60 * 60 * 1000L // 24 hours
     }
 
@@ -59,7 +61,8 @@ class AppUpdateManager @Inject constructor(
         .followSslRedirects(true)
         .build()
 
-    // Holds the new version string if an update is available, else null
+    // Holds the new version string if an update is available, else null.
+    // Initialized from persistent SharedPreferences so the update button stays visible across app restarts!
     private val _availableUpdateVersion = MutableStateFlow<String?>(null)
     val availableUpdateVersion: StateFlow<String?> = _availableUpdateVersion.asStateFlow()
 
@@ -73,6 +76,24 @@ class AppUpdateManager @Inject constructor(
 
     private var activeDownloadJob: Job? = null
     private var detectedApkDownloadUrl: String? = null
+
+    init {
+        // Persistently restore pending update status until the user actually installs it
+        val savedVersion = prefs.getString(KEY_PENDING_UPDATE_VERSION, null)
+        if (!savedVersion.isNullOrBlank()) {
+            if (isNewerVersion(savedVersion, BuildConfig.VERSION_NAME)) {
+                _availableUpdateVersion.value = savedVersion
+                val localApk = File(getUpdatesDir(), "Sielo_$savedVersion.apk")
+                if (localApk.exists() && localApk.length() > 5 * 1024 * 1024L) {
+                    _downloadState.value = UpdateDownloadState.Completed(localApk)
+                }
+            } else {
+                // Update was completed or app is already at/above saved version
+                prefs.edit().remove(KEY_PENDING_UPDATE_VERSION).apply()
+                _availableUpdateVersion.value = null
+            }
+        }
+    }
 
     fun getUpdatesDir(): File {
         val dir = File(context.cacheDir, "sielo_updates")
@@ -90,6 +111,9 @@ class AppUpdateManager @Inject constructor(
 
                 if (isNewerVersion(remoteVersion, currentVersion)) {
                     Log.i(TAG, "New version detected: $remoteVersion > $currentVersion")
+
+                    // Persist pending update version so button stays persistent on home screen
+                    prefs.edit().putString(KEY_PENDING_UPDATE_VERSION, remoteVersion).apply()
 
                     // Check if already downloaded
                     val localApk = File(getUpdatesDir(), "Sielo_$remoteVersion.apk")
@@ -109,6 +133,8 @@ class AppUpdateManager @Inject constructor(
                     }
                 } else {
                     Log.d(TAG, "App is up to date ($currentVersion >= $remoteVersion)")
+                    prefs.edit().remove(KEY_PENDING_UPDATE_VERSION).apply()
+                    _availableUpdateVersion.value = null
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to check for app updates: ${e.message}")
@@ -122,7 +148,35 @@ class AppUpdateManager @Inject constructor(
 
     private suspend fun fetchLatestVersionFromWebsite(): String? = withContext(Dispatchers.IO) {
         try {
-            // 1. Fetch index HTML
+            // 1. First priority: direct version manifest endpoint (version.json)
+            try {
+                val manifestReq = Request.Builder()
+                    .url("$UPDATE_WEBSITE_URL/version.json")
+                    .header("User-Agent", "Sielo-Android-App/${BuildConfig.VERSION_NAME}")
+                    .build()
+                val manifestResp = httpClient.newCall(manifestReq).execute()
+                if (manifestResp.isSuccessful) {
+                    val body = manifestResp.body?.string().orEmpty()
+                    val json = JSONObject(body)
+                    val ver = json.optString("version", "").trim()
+                    val apk = json.optString("apkUrl", "").trim()
+                    if (ver.isNotBlank()) {
+                        detectedApkDownloadUrl = if (apk.startsWith("http://") || apk.startsWith("https://")) {
+                            apk
+                        } else if (apk.startsWith("/")) {
+                            "$UPDATE_WEBSITE_URL$apk"
+                        } else {
+                            "$UPDATE_WEBSITE_URL/$apk"
+                        }
+                        Log.i(TAG, "Discovered version from version.json: $ver, URL: $detectedApkDownloadUrl")
+                        return@withContext ver
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "version.json check skipped or failed: ${e.message}")
+            }
+
+            // 2. Fetch index HTML
             val htmlReq = Request.Builder()
                 .url(UPDATE_WEBSITE_URL)
                 .header("User-Agent", "Sielo-Android-App/${BuildConfig.VERSION_NAME}")
@@ -138,7 +192,7 @@ class AppUpdateManager @Inject constructor(
                 return@withContext directApkMatch.first
             }
 
-            // 2. Find scripts bundled in the SPA (e.g. /assets/index-*.js)
+            // 3. Find scripts bundled in the SPA (e.g. /assets/index-*.js)
             val scriptRegex = Regex("""/assets/[a-zA-Z0-9_\.-]+\.js""")
             val scriptMatches = scriptRegex.findAll(htmlBody).map { it.value }.distinct().toList()
 
@@ -173,17 +227,17 @@ class AppUpdateManager @Inject constructor(
      * Extracts (version, directDownloadUrl) from content if an APK link or string is present.
      */
     private fun findVersionAndUrlFromContent(content: String): Pair<String, String>? {
-        val apkRegex = Regex("""(?:href=[\"'])?([^\"'\s]*?(?:[Ss]ielo[_-]?)?(\d+\.\d+(?:\.\d+)?)\.apk)[\"']?""")
+        val apkRegex = Regex("""(?:https?://[^\s"'`<>]+|/[^\s"'`<>]+|[a-zA-Z0-9_\.-]*?)(?:[Ss]ielo[_-]?)v?(\d+\.\d+(?:\.\d+)?)\.apk""")
         val matches = apkRegex.findAll(content).toList()
         if (matches.isEmpty()) return null
 
         // Find the match with highest version number
         val highest = matches.maxWithOrNull { m1, m2 ->
-            compareVersions(m1.groupValues[2], m2.groupValues[2])
+            compareVersions(m1.groupValues[1], m2.groupValues[1])
         } ?: return null
 
-        val rawUrl = highest.groupValues[1]
-        val version = highest.groupValues[2]
+        val rawUrl = highest.value
+        val version = highest.groupValues[1]
         val fullUrl = when {
             rawUrl.startsWith("http://") || rawUrl.startsWith("https://") -> rawUrl
             rawUrl.startsWith("/") -> "$UPDATE_WEBSITE_URL$rawUrl"

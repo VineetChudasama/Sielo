@@ -2177,16 +2177,29 @@ class InnerTubeClient @Inject constructor(
         explicitIdCache[cacheKey]?.let { return@withContext it }
 
         try {
-            val cleanQuery = "${TrackMatchValidator.cleanTitle(title)} $artist".trim()
-            val candidates = searchYouTube(cleanQuery)
-            val explicitMatch = candidates.firstOrNull { cand ->
-                cand.isExplicit &&
-                TrackMatchValidator.isFuzzyMatch(title, cand.title, artist, cand.artist) &&
-                !TrackMatchValidator.isCleanOrCensored(cand.title)
-            }
-            if (explicitMatch != null) {
-                explicitIdCache[cacheKey] = explicitMatch.id
-                return@withContext explicitMatch.id
+            val cleanTitle = TrackMatchValidator.cleanTitle(title)
+            val queries = listOf(
+                "$cleanTitle $artist explicit",
+                "$cleanTitle $artist audio",
+                "$cleanTitle $artist"
+            )
+            for (q in queries) {
+                val candidates = searchYouTube(q)
+                // Filter out any candidates that are music videos or marked clean/censored
+                val uncensoredCandidates = candidates.filterNot { cand ->
+                    TrackMatchValidator.isCleanOrCensored(cand.title, cand.album) ||
+                    TrackMatchValidator.isMusicVideoTitle(cand.title)
+                }
+                val explicitMatch = uncensoredCandidates.firstOrNull { cand ->
+                    cand.isExplicit &&
+                    TrackMatchValidator.isFuzzyMatch(title, cand.title, artist, cand.artist)
+                } ?: uncensoredCandidates.firstOrNull { cand ->
+                    TrackMatchValidator.isFuzzyMatch(title, cand.title, artist, cand.artist)
+                }
+                if (explicitMatch != null && isYouTubeVideoId(explicitMatch.id)) {
+                    explicitIdCache[cacheKey] = explicitMatch.id
+                    return@withContext explicitMatch.id
+                }
             }
         } catch (_: Exception) {}
         null
@@ -2235,7 +2248,7 @@ class InnerTubeClient @Inject constructor(
                 ?.get("itemSectionRenderer")?.jsonObject
                 ?.get("contents")?.jsonArray ?: return null
 
-            // First pass: match title and artist fuzzy match
+            // First pass: match title and artist fuzzy match, strictly rejecting clean versions and music videos
             for (elem in sectionContents) {
                 val vidRenderer = elem.jsonObject["videoRenderer"]?.jsonObject ?: continue
                 val vidId = vidRenderer["videoId"]?.jsonPrimitive?.content ?: continue
@@ -2250,16 +2263,18 @@ class InnerTubeClient @Inject constructor(
 
                 // Reject shorts or long mixes (> 12 mins or < 25 secs)
                 if (durSec in 1..25 || durSec > 720) continue
+                if (TrackMatchValidator.isCleanOrCensored(titleText)) continue
+                if (TrackMatchValidator.isMusicVideoTitle(titleText)) continue
 
                 if (TrackMatchValidator.isFuzzyMatch(cleanTitle, titleText, artist, null) ||
                     (artist.isNotBlank() && TrackMatchValidator.isSongByOrFeaturingArtist(titleText, "", artist))
                 ) {
-                    android.util.Log.d("InnerTubeClient", "searchYouTubeWebVideo matched: id=$vidId, title='$titleText' for '$cleanTitle' by '$artist'")
+                    android.util.Log.d("InnerTubeClient", "searchYouTubeWebVideo matched uncensored audio: id=$vidId, title='$titleText' for '$cleanTitle' by '$artist'")
                     return vidId
                 }
             }
 
-            // Second pass: pick first reasonable length video
+            // Second pass: pick first reasonable length video that is not clean/censored
             for (elem in sectionContents) {
                 val vidRenderer = elem.jsonObject["videoRenderer"]?.jsonObject ?: continue
                 val vidId = vidRenderer["videoId"]?.jsonPrimitive?.content ?: continue
@@ -2273,6 +2288,7 @@ class InnerTubeClient @Inject constructor(
                     val titleText = vidRenderer["title"]?.jsonObject
                         ?.get("runs")?.jsonArray?.firstOrNull()?.jsonObject
                         ?.get("text")?.jsonPrimitive?.content ?: ""
+                    if (TrackMatchValidator.isCleanOrCensored(titleText)) continue
                     android.util.Log.d("InnerTubeClient", "searchYouTubeWebVideo fallback candidate: id=$vidId, title='$titleText' for '$cleanTitle' by '$artist'")
                     return vidId
                 }
@@ -2297,8 +2313,10 @@ class InnerTubeClient @Inject constructor(
         android.util.Log.d("InnerTubeClient", "getStreamUrl start: videoId=$cleanId, title=$title, artist=$artist")
 
         val isDirectYtId = isYouTubeVideoId(cleanId)
+        val isCensoredOrMusicVideo = TrackMatchValidator.isMusicVideoTitle(title) ||
+                                     TrackMatchValidator.isCleanOrCensored(title)
 
-        // 1. If this is already a direct YouTube video ID, optionally check for explicit upgrade
+        // 1. If this is already a direct YouTube video ID, check for explicit/uncensored upgrade
         if (isDirectYtId) {
             var targetVideoId = cleanId
             if (!title.isNullOrBlank() && !artist.isNullOrBlank()) {
@@ -2309,28 +2327,26 @@ class InnerTubeClient @Inject constructor(
                 }
             }
 
-            val ytStream = resolveYouTubeStream(targetVideoId)
-            if (!ytStream.isNullOrBlank()) {
-                android.util.Log.d("InnerTubeClient", "YouTube stream resolved for $targetVideoId")
-                cacheStreamUrl(cleanId, ytStream)
-                cacheStreamUrl(targetVideoId, ytStream)
-                return@withContext ytStream
-            }
-
-            if (cleanId != targetVideoId) {
-                val fallbackYtStream = resolveYouTubeStream(cleanId)
-                if (!fallbackYtStream.isNullOrBlank()) {
-                    cacheStreamUrl(cleanId, fallbackYtStream)
-                    return@withContext fallbackYtStream
+            // If cleanId was a censored music video and no uncensored YouTube ID was found yet,
+            // don't play the blipped music video yet; give JioSaavn studio master first chance below!
+            val targetIsBlippedVideo = isCensoredOrMusicVideo && targetVideoId == cleanId
+            if (!targetIsBlippedVideo) {
+                val ytStream = resolveYouTubeStream(targetVideoId)
+                if (!ytStream.isNullOrBlank()) {
+                    android.util.Log.d("InnerTubeClient", "YouTube stream resolved for $targetVideoId")
+                    cacheStreamUrl(cleanId, ytStream)
+                    cacheStreamUrl(targetVideoId, ytStream)
+                    return@withContext ytStream
                 }
             }
         }
 
         // 2. Secondary: JioSaavn direct high-bitrate stream with strict title/artist validation
+        // (Guarantees pure unedited 320kbps CD-quality studio audio with NO bleeping/censoring)
         if (!title.isNullOrBlank() || !artist.isNullOrBlank()) {
             val saavnStream = resolveJioSaavnStream(title, artist, cleanId)
             if (!saavnStream.isNullOrBlank()) {
-                android.util.Log.d("InnerTubeClient", "JioSaavn stream resolved: $saavnStream")
+                android.util.Log.d("InnerTubeClient", "JioSaavn uncensored stream resolved: $saavnStream")
                 cacheStreamUrl(cleanId, saavnStream)
                 return@withContext saavnStream
             }
@@ -2376,6 +2392,16 @@ class InnerTubeClient @Inject constructor(
                     cacheStreamUrl(webVideoId, resolvedStream)
                     return@withContext resolvedStream
                 }
+            }
+        }
+
+        // 5. Ultimate fallback for direct YouTube video ID
+        if (isDirectYtId) {
+            val fallbackYtStream = resolveYouTubeStream(cleanId)
+            if (!fallbackYtStream.isNullOrBlank()) {
+                android.util.Log.d("InnerTubeClient", "Direct YouTube fallback stream resolved: id=$cleanId")
+                cacheStreamUrl(cleanId, fallbackYtStream)
+                return@withContext fallbackYtStream
             }
         }
 

@@ -369,7 +369,11 @@ object TrackMatchValidator {
                 }.thenBy { track ->
                     if (track.isExplicit) 0 else 1
                 }.thenBy { track ->
-                    if (isCleanOrCensored(track.title)) 1 else 0
+                    if (isCleanOrCensored(track.title, track.album)) 1 else 0
+                }.thenBy { track ->
+                    // Penalize Official Music Videos when pure studio audio is available,
+                    // as music videos routinely censor/blip explicit lyrics for YouTube guidelines
+                    if (isMusicVideoTitle(track.title)) 1 else 0
                 }.thenBy { track ->
                     val thumb = track.thumbnailUrl ?: ""
                     if (thumb.contains("i.ytimg.com") && !thumb.contains("hqdefault.jpg")) 1 else 0
@@ -387,6 +391,22 @@ object TrackMatchValidator {
             ))
         }
         return result
+    }
+
+    fun isMusicVideoTitle(title: String?): Boolean {
+        val t = title.orEmpty().lowercase()
+        if (t.contains("explicit") || t.contains("uncensored") || t.contains("dirty version") || t.contains("dirty")) {
+            return false
+        }
+        return t.contains("official video") ||
+               t.contains("official music video") ||
+               t.contains("music video") ||
+               t.contains("(video)") ||
+               t.contains("[video]") ||
+               t.contains("visualizer") ||
+               t.contains("lyric video") ||
+               (t.contains("(official)") && !t.contains("audio")) ||
+               (t.contains("[official]") && !t.contains("audio"))
     }
 
     fun isCleanOrCensored(title: String?, album: String? = null): Boolean {

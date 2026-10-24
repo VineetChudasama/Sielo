@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.GoogleAuthProvider
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.SetOptions
 import com.sielo.music.core.auth.model.AuthProvider
 import com.sielo.music.core.auth.model.UserProfile
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -47,6 +49,112 @@ class UserManager @Inject constructor(
         private const val PREFS_NAME = "sielo_auth_prefs"
         private const val KEY_CURRENT_USER = "current_user_profile"
         private const val KEY_ALL_USERS_PREFIX = "user_account_"
+        private const val COLLECTION_USERNAMES = "sielo_usernames"
+    }
+
+    private val firestore: FirebaseFirestore by lazy {
+        FirebaseFirestore.getInstance()
+    }
+
+    fun getUserByEmail(email: String): UserProfile? {
+        val clean = email.trim().lowercase()
+        val existingJson = prefs.getString("$KEY_ALL_USERS_PREFIX$clean", null) ?: return null
+        return try {
+            json.decodeFromString<UserProfile>(existingJson)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun isValidUsername(raw: String): Boolean {
+        val clean = raw.trim().removePrefix("@").lowercase()
+        if (clean.length !in 3..30) return false
+        if (clean.startsWith(".") || clean.endsWith(".")) return false
+        if (clean.contains("..")) return false
+        return clean.all { it in 'a'..'z' || it in '0'..'9' || it == '.' || it == '_' }
+    }
+
+    fun sanitizeUsername(raw: String): String {
+        return raw.trim().removePrefix("@").lowercase().filter { it in 'a'..'z' || it in '0'..'9' || it == '.' || it == '_' }
+    }
+
+    suspend fun checkUsernameAvailability(raw: String, currentEmail: String? = null): Pair<Boolean, String> {
+        val clean = sanitizeUsername(raw)
+        if (clean.length < 3) {
+            return Pair(false, "Username must be at least 3 characters")
+        }
+        if (clean.length > 30) {
+            return Pair(false, "Username cannot exceed 30 characters")
+        }
+        if (clean.startsWith(".") || clean.endsWith(".")) {
+            return Pair(false, "Username cannot start or end with a dot")
+        }
+        if (clean.contains("..")) {
+            return Pair(false, "Username cannot have consecutive dots")
+        }
+        if (!clean.all { it in 'a'..'z' || it in '0'..'9' || it == '.' || it == '_' }) {
+            return Pair(false, "Only lowercase letters, numbers, '.', and '_' allowed")
+        }
+
+        return try {
+            cloudSyncManager.ensureAuthenticated()
+            val doc = firestore.collection(COLLECTION_USERNAMES).document(clean).get().await()
+            if (!doc.exists()) {
+                Pair(true, "@$clean is available!")
+            } else {
+                val ownerEmail = doc.getString("email")?.trim()?.lowercase()
+                val currentCleanEmail = currentEmail?.trim()?.lowercase()
+                if (!currentCleanEmail.isNullOrBlank() && ownerEmail == currentCleanEmail) {
+                    Pair(true, "Your current username")
+                } else {
+                    Pair(false, "@$clean is already taken. Please choose another.")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("UserManager", "Availability check error: ${e.message}")
+            Pair(true, "Username available")
+        }
+    }
+
+    suspend fun claimUsername(raw: String, user: UserProfile): Boolean {
+        val clean = sanitizeUsername(raw)
+        if (!isValidUsername(clean)) return false
+        return try {
+            cloudSyncManager.ensureAuthenticated()
+            val userKey = cloudSyncManager.resolveUserKey(user)
+            val docRef = firestore.collection(COLLECTION_USERNAMES).document(clean)
+            val existing = docRef.get().await()
+            if (existing.exists()) {
+                val ownerEmail = existing.getString("email")?.trim()?.lowercase()
+                val ownerUid = existing.getString("uid")
+                if (ownerEmail != null && ownerEmail != user.email.trim().lowercase() && ownerUid != userKey && ownerUid != user.id) {
+                    Log.w("UserManager", "Username $clean taken by another user ($ownerEmail)")
+                    return false
+                }
+            }
+
+            val data = hashMapOf(
+                "username" to clean,
+                "email" to user.email.trim().lowercase(),
+                "uid" to userKey,
+                "name" to user.name,
+                "claimedAt" to System.currentTimeMillis()
+            )
+            docRef.set(data, SetOptions.merge()).await()
+
+            val oldUsername = user.username?.let { sanitizeUsername(it) }
+            if (!oldUsername.isNullOrBlank() && oldUsername != clean) {
+                try {
+                    firestore.collection(COLLECTION_USERNAMES).document(oldUsername).delete().await()
+                } catch (e: Exception) {
+                    Log.w("UserManager", "Failed to release old handle $oldUsername: ${e.message}")
+                }
+            }
+            true
+        } catch (e: Exception) {
+            Log.e("UserManager", "Failed to claim username $clean: ${e.message}", e)
+            false
+        }
     }
 
     init {
@@ -103,6 +211,10 @@ class UserManager @Inject constructor(
                                 createdAt = if (restored.createdAt > 0L) restored.createdAt else profile.createdAt
                             )
                             persistUser(merged, backupToCloud = false)
+                        } else {
+                            // Seed newly created cloud database with existing local account data
+                            android.util.Log.i("UserManager", "Cloud has no record for $cleanEmail yet. Backing up existing local account to Firestore...")
+                            cloudSyncManager.backupUserData(profile)
                         }
                     }
                 }
@@ -149,8 +261,9 @@ class UserManager @Inject constructor(
         _isOnboardingOpen.value = false
     }
 
-    fun signInWithGoogle(name: String, email: String, photoUrl: String?, idToken: String? = null) {
+    fun signInWithGoogle(name: String, email: String, photoUrl: String?, idToken: String? = null, username: String? = null) {
         val cleanEmail = email.trim().lowercase()
+        val cleanUsername = username?.let { sanitizeUsername(it) }?.ifBlank { null }
         _isAuthDialogOpen.value = false
 
         // Detect if user is switching accounts
@@ -166,6 +279,7 @@ class UserManager @Inject constructor(
                 val finalName = existing.name.takeIf { it.isNotBlank() } ?: name
                 existing.copy(
                     name = finalName,
+                    username = cleanUsername ?: existing.username,
                     photoUrl = finalPhoto,
                     provider = AuthProvider.GOOGLE,
                     hasCompletedOnboarding = true
@@ -180,7 +294,7 @@ class UserManager @Inject constructor(
             _isOnboardingOpen.value = !localProfile.hasCompletedOnboarding
         } else {
             // Tentative initial profile while restoring; keep onboarding closed until cloud lookup completes
-            val tentative = createNewUserProfile(name, cleanEmail, photoUrl, AuthProvider.GOOGLE)
+            val tentative = createNewUserProfile(name, cleanEmail, photoUrl, AuthProvider.GOOGLE).copy(username = cleanUsername)
             persistUser(tentative, backupToCloud = false)
             _isOnboardingOpen.value = false
         }
@@ -218,7 +332,7 @@ class UserManager @Inject constructor(
                     val merged = current.copy(
                         id = restored.id.takeIf { it.isNotBlank() } ?: current.id,
                         name = restored.name.takeIf { it.isNotBlank() } ?: current.name,
-                        username = restored.username ?: current.username,
+                        username = cleanUsername ?: (restored.username ?: current.username),
                         bio = restored.bio ?: current.bio,
                         photoUrl = restored.photoUrl ?: current.photoUrl,
                         favoriteArtists = if (restored.favoriteArtists.isNotEmpty()) restored.favoriteArtists else current.favoriteArtists,
@@ -228,6 +342,9 @@ class UserManager @Inject constructor(
                         hasCompletedOnboarding = true,
                         createdAt = if (restored.createdAt > 0L) restored.createdAt else current.createdAt
                     )
+                    if (!cleanUsername.isNullOrBlank()) {
+                        claimUsername(cleanUsername, merged)
+                    }
                     persistUser(merged, backupToCloud = true)
                     _isOnboardingOpen.value = false
                 } else {
@@ -476,13 +593,61 @@ class UserManager @Inject constructor(
             photoUrl != null -> photoUrl
             else -> current.photoUrl
         }
+        val cleanUser = username?.let { sanitizeUsername(it) }?.ifBlank { null }
         val updated = current.copy(
             name = name.trim().ifBlank { current.name },
-            username = username?.trim()?.removePrefix("@")?.ifBlank { null },
+            username = cleanUser ?: current.username,
             bio = bio?.trim()?.ifBlank { null },
             photoUrl = newPhotoUrl
         )
         persistUser(updated)
+        if (!cleanUser.isNullOrBlank() && cleanUser != current.username?.let { sanitizeUsername(it) }) {
+            scope.launch {
+                claimUsername(cleanUser, updated)
+            }
+        }
+    }
+
+    suspend fun updateProfileWithUsernameCheck(
+        name: String,
+        newUsername: String?,
+        bio: String? = null,
+        photoUrl: String? = null,
+        clearPhoto: Boolean = false
+    ): Pair<Boolean, String> {
+        val current = _currentUser.value ?: return Pair(false, "No active user")
+        val cleanUser = newUsername?.let { sanitizeUsername(it) }?.ifBlank { null }
+
+        if (!cleanUser.isNullOrBlank()) {
+            if (!isValidUsername(cleanUser)) {
+                return Pair(false, "Username must be 3-30 lowercase letters, numbers, '.', or '_'")
+            }
+            val currentUsername = current.username?.let { sanitizeUsername(it) }
+            if (cleanUser != currentUsername) {
+                val (available, message) = checkUsernameAvailability(cleanUser, current.email)
+                if (!available) {
+                    return Pair(false, message)
+                }
+                val claimed = claimUsername(cleanUser, current)
+                if (!claimed) {
+                    return Pair(false, "Could not reserve username. Please try again.")
+                }
+            }
+        }
+
+        val newPhotoUrl = when {
+            clearPhoto -> null
+            photoUrl != null -> photoUrl
+            else -> current.photoUrl
+        }
+        val updated = current.copy(
+            name = name.trim().ifBlank { current.name },
+            username = cleanUser ?: current.username,
+            bio = bio?.trim()?.ifBlank { null },
+            photoUrl = newPhotoUrl
+        )
+        persistUser(updated, backupToCloud = true)
+        return Pair(true, "Profile updated successfully")
     }
 
     /**

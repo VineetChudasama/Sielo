@@ -95,6 +95,14 @@ class SettingsViewModel @Inject constructor(
         userManager.updateProfile(name, username, bio)
     }
 
+    suspend fun updateProfileWithValidation(name: String, username: String?, bio: String?): Pair<Boolean, String> {
+        return userManager.updateProfileWithUsernameCheck(name, username, bio)
+    }
+
+    suspend fun checkUsernameAvailability(raw: String): Pair<Boolean, String> {
+        return userManager.checkUsernameAvailability(raw, currentUser.value?.email)
+    }
+
     fun openAuthDialog() {
         userManager.openAuthDialog()
     }
