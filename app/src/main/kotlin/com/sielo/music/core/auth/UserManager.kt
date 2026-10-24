@@ -14,6 +14,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.serialization.encodeToString
@@ -273,8 +276,35 @@ class UserManager @Inject constructor(
         cloudSyncManager.playbackSnapshotRestorer = {
             playerManager.restoreFromCloudSnapshot(it)
         }
+        cloudSyncManager.isPlayingProvider = {
+            playerManager.playbackState.value.isPlaying
+        }
+        cloudSyncManager.currentTrackProvider = {
+            val track = playerManager.playbackState.value.currentTrack
+            if (track != null) Pair(track.title, track.artist) else null
+        }
         scope.launch {
             cloudSyncManager.ensureAuthenticated()
+        }
+        // Live listener: immediately dispatch telemetry when play/pause or track changes
+        scope.launch {
+            playerManager.playbackState
+                .map { Triple(it.isPlaying, it.currentTrack?.title, it.currentTrack?.artist) }
+                .distinctUntilChanged()
+                .collectLatest { (isPlaying, trackTitle, trackArtist) ->
+                    val user = _currentUser.value ?: return@collectLatest
+                    val email = user.email.trim().lowercase()
+                    if (email.isNotBlank() && !email.endsWith("@sielo.local")) {
+                        cloudSyncManager.sendAdminUserTelemetry(
+                            user = user,
+                            streamCount = 0,
+                            likedCount = 0,
+                            isPlaying = isPlaying,
+                            currentTrack = trackTitle,
+                            currentArtist = trackArtist
+                        )
+                    }
+                }
         }
         restoreSession()
     }

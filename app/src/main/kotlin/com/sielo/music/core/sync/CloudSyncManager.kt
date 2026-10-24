@@ -62,6 +62,17 @@ class CloudSyncManager @Inject constructor(
     var playbackSnapshotRestorer: ((Map<String, Any>) -> Unit)? = null
     var settingsProvider: (() -> Map<String, Any>)? = null
     var settingsRestorer: ((Map<String, Any>) -> Unit)? = null
+    var isPlayingProvider: (() -> Boolean)? = null
+    var currentTrackProvider: (() -> Pair<String, String>?)? = null
+
+    fun getAppVersionName(): String {
+        return try {
+            val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+            pInfo.versionName ?: "11.5.6"
+        } catch (_: Exception) {
+            "11.5.6"
+        }
+    }
 
     companion object {
         private const val TAG = "CloudSyncManager"
@@ -264,6 +275,33 @@ class CloudSyncManager @Inject constructor(
                 }
             }
         }
+
+        // 6. Live telemetry & heartbeat loop (every 30 seconds) for real-time listener and active user tracking
+        scope.launch {
+            while (true) {
+                delay(30_000L)
+                try {
+                    val user = currentUserProvider?.invoke()
+                    val email = user?.email?.trim()?.lowercase()
+                    if (!email.isNullOrBlank() && !email.endsWith("@sielo.local")) {
+                        val isPlaying = isPlayingProvider?.invoke() ?: false
+                        val trackInfo = currentTrackProvider?.invoke()
+                        val streams = try { listeningHistoryDao.getAllHistoryList(5000).size } catch (_: Exception) { 0 }
+                        val likes = try { favoriteTrackDao.getAllFavoritesList().size } catch (_: Exception) { 0 }
+                        sendAdminUserTelemetry(
+                            user = user,
+                            streamCount = streams,
+                            likedCount = likes,
+                            isPlaying = isPlaying,
+                            currentTrack = trackInfo?.first,
+                            currentArtist = trackInfo?.second
+                        )
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Heartbeat sync error: ${e.message}")
+                }
+            }
+        }
     }
 
     /**
@@ -428,7 +466,7 @@ class CloudSyncManager @Inject constructor(
                 "totalStreams" to totalStreams,
                 "streamCount" to totalStreams,
                 "likedCount" to likedCount,
-                "appVersion" to "11.5.6",
+                "appVersion" to getAppVersionName(),
                 "deviceModel" to "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim(),
                 "createdAt" to user.createdAt,
                 "lastSyncedAt" to System.currentTimeMillis()
@@ -448,7 +486,7 @@ class CloudSyncManager @Inject constructor(
                 "totalStreams" to totalStreams,
                 "streamCount" to totalStreams,
                 "likedCount" to likedCount,
-                "appVersion" to "11.5.6",
+                "appVersion" to getAppVersionName(),
                 "device" to "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim(),
                 "status" to "Active Now",
                 "createdAt" to user.createdAt,
@@ -1015,7 +1053,37 @@ class CloudSyncManager @Inject constructor(
     /**
      * Sends background telemetry heartbeat / sync to the website admin registry (sielo.site/api/admin/users)
      */
-    private fun sendAdminUserTelemetry(user: UserProfile, streamCount: Int, likedCount: Int) {
+    fun sendAdminUserTelemetry(
+        user: UserProfile,
+        streamCount: Int,
+        likedCount: Int,
+        isPlaying: Boolean = false,
+        currentTrack: String? = null,
+        currentArtist: String? = null
+    ) {
+        val appVersion = getAppVersionName()
+        val now = System.currentTimeMillis()
+        val userKey = resolveUserKey(user)
+        val status = if (isPlaying) "Listening Now" else "Active Now"
+
+        // Update Firestore root document so REST queries receive real-time heartbeat & playback state
+        scope.launch(Dispatchers.IO) {
+            try {
+                ensureAuthenticated()
+                val userRef = firestore.collection(COLLECTION_USERS).document(userKey)
+                val updateMap = hashMapOf<String, Any>(
+                    "status" to status,
+                    "isPlaying" to isPlaying,
+                    "currentTrack" to (currentTrack ?: ""),
+                    "currentArtist" to (currentArtist ?: ""),
+                    "appVersion" to appVersion,
+                    "lastHeartbeat" to now,
+                    "lastSyncedAt" to now
+                )
+                userRef.set(updateMap, SetOptions.merge())
+            } catch (_: Exception) {}
+        }
+
         try {
             val client = OkHttpClient.Builder()
                 .connectTimeout(5, TimeUnit.SECONDS)
@@ -1023,7 +1091,7 @@ class CloudSyncManager @Inject constructor(
                 .build()
 
             val jsonBody = JSONObject().apply {
-                put("id", resolveUserKey(user))
+                put("id", userKey)
                 put("name", user.name)
                 put("email", user.email)
                 put("username", user.username ?: "")
@@ -1031,10 +1099,15 @@ class CloudSyncManager @Inject constructor(
                 put("provider", user.provider.name)
                 put("streamCount", streamCount)
                 put("likedCount", likedCount)
-                put("status", "Active Now")
-                put("appVersion", "11.5.6")
+                put("status", status)
+                put("isPlaying", isPlaying)
+                put("currentTrack", currentTrack ?: "")
+                put("currentArtist", currentArtist ?: "")
+                put("appVersion", appVersion)
                 put("device", "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim())
                 put("createdAt", user.createdAt)
+                put("lastHeartbeat", now)
+                put("lastSyncedAt", now)
             }
 
             val requestBody = jsonBody.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
@@ -1044,7 +1117,7 @@ class CloudSyncManager @Inject constructor(
                 .build()
 
             client.newCall(request).execute().close()
-            Log.d(TAG, "Dispatched user telemetry for ${user.email} (streams=$streamCount)")
+            Log.d(TAG, "Dispatched user telemetry for ${user.email} (playing=$isPlaying, track=$currentTrack)")
         } catch (e: Exception) {
             Log.d(TAG, "Admin telemetry notice: ${e.message}")
         }
