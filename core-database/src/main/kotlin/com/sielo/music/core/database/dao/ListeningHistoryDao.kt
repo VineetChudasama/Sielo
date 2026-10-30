@@ -119,7 +119,15 @@ interface ListeningHistoryDao {
     @Query("SELECT COUNT(*) FROM listening_history WHERE timestampMs >= :sinceMs AND durationPlayedMs >= 5000")
     fun getTotalStreamCount(sinceMs: Long): Flow<Int>
 
-    @Query("UPDATE listening_history SET durationPlayedMs = 15000 WHERE durationPlayedMs >= 200000")
+    @Query("""
+        UPDATE listening_history 
+        SET durationPlayedMs = CASE 
+            WHEN songDurationMs > 0 AND durationPlayedMs > songDurationMs THEN songDurationMs
+            WHEN durationPlayedMs > 14400000 THEN 14400000
+            ELSE durationPlayedMs 
+        END
+        WHERE (songDurationMs > 0 AND durationPlayedMs > songDurationMs) OR durationPlayedMs > 14400000
+    """)
     suspend fun sanitizeLegacyRecords()
 
     @Query("DELETE FROM listening_history WHERE durationPlayedMs < 5000")

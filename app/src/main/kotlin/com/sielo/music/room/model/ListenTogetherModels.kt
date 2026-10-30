@@ -29,7 +29,8 @@ data class RoomChatMessage(
 data class RoomQueueItem(
     val track: SieloTrack,
     val addedBy: String,
-    val addedAt: Long = System.currentTimeMillis()
+    val addedAt: Long = System.currentTimeMillis(),
+    val id: String = "${track.id}_${addedAt}"
 )
 
 @Serializable
@@ -81,6 +82,24 @@ sealed class RoomEvent {
     @SerialName("queue_add")
     data class AddToQueue(
         val item: RoomQueueItem
+    ) : RoomEvent()
+
+    @Serializable
+    @SerialName("queue_add_batch")
+    data class AddBatchToQueue(
+        val items: List<RoomQueueItem>,
+        val playlistTitle: String,
+        val addedBy: String
+    ) : RoomEvent()
+
+    @Serializable
+    @SerialName("queue_reorder")
+    data class ReorderQueue(
+        val fromIndex: Int,
+        val toIndex: Int,
+        val reorderedQueue: List<RoomQueueItem>,
+        val triggeredBy: String,
+        val sequenceNumber: Long = 0L
     ) : RoomEvent()
 
     @Serializable

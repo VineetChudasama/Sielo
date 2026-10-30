@@ -23,6 +23,14 @@ android {
         val youtubeApiKey = properties.getProperty("YOUTUBE_API_KEY") ?: ""
         val escapedKey = if (youtubeApiKey.startsWith("\"")) youtubeApiKey else "\"${youtubeApiKey}\""
         buildConfigField("String", "YOUTUBE_API_KEY", escapedKey)
+
+        val spotifyClientId = properties.getProperty("SPOTIFY_CLIENT_ID") ?: ""
+        val escapedSpotifyId = if (spotifyClientId.startsWith("\"")) spotifyClientId else "\"${spotifyClientId}\""
+        buildConfigField("String", "SPOTIFY_CLIENT_ID", escapedSpotifyId)
+
+        val spotifyClientSecret = properties.getProperty("SPOTIFY_CLIENT_SECRET") ?: ""
+        val escapedSpotifySecret = if (spotifyClientSecret.startsWith("\"")) spotifyClientSecret else "\"${spotifyClientSecret}\""
+        buildConfigField("String", "SPOTIFY_CLIENT_SECRET", escapedSpotifySecret)
     }
     
     buildFeatures {
@@ -54,6 +62,3 @@ dependencies {
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
 }
-
-
-

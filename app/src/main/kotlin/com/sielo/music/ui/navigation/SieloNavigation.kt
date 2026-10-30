@@ -35,9 +35,9 @@ sealed class Screen(
 
     data object ListenTogether : Screen(
         route = "listen_together",
-        title = "Listen Together",
-        selectedIcon = Icons.Filled.Headphones,
-        unselectedIcon = Icons.Outlined.Headphones
+        title = "Echo",
+        selectedIcon = com.sielo.music.ui.components.OrbitImageVector,
+        unselectedIcon = com.sielo.music.ui.components.OrbitImageVector
     )
 
     data object Stats : Screen(

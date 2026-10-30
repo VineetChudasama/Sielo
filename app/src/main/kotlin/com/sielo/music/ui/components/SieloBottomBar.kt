@@ -1,7 +1,17 @@
 package com.sielo.music.ui.components
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -50,8 +60,8 @@ import com.sielo.music.ui.theme.PaletteSlateBlue
 import kotlin.math.roundToInt
 
 private val NavAnimationSpec = tween<Float>(
-    durationMillis = 350,
-    easing = CubicBezierEasing(0.25f, 0.1f, 0.25f, 1.0f)
+    durationMillis = 340,
+    easing = CubicBezierEasing(0.20f, 0.0f, 0.0f, 1.0f)
 )
 
 @Composable
@@ -129,6 +139,13 @@ fun SieloBottomBar(
         targetValue = targetEffectStrength,
         animationSpec = NavAnimationSpec,
         label = "effectStrength"
+    )
+
+    val targetEchoProgress = if (selectedIndex == 2) 1.0f else 0.0f
+    val echoProgress by animateFloatAsState(
+        targetValue = targetEchoProgress,
+        animationSpec = NavAnimationSpec,
+        label = "echoProgress"
     )
 
     Box(
@@ -366,10 +383,30 @@ fun SieloBottomBar(
             )
 
             // ==========================================
-            // ACTIVE ELEMENT: Glossy Glass Circular Disc
+            // ACTIVE ELEMENT: Glossy Glass Circular Disc (Fluid Orbit Morph)
             // ==========================================
-            val glossyRadiusPx = with(density) { 24.dp.toPx() }
+            val discRadiusDp = 24.dp + (1.8.dp * echoProgress)
+            val glossyRadiusPx = with(density) { discRadiusDp.toPx() }
             val circleCenter = Offset(activeX, activeCenterYPx)
+
+            // 0. Celestial Orbit Ambient Halo (Smoothly blooms/fades with echoProgress)
+            val haloStrength = echoProgress * effectStrength
+            if (haloStrength > 0.01f) {
+                val haloRadius = glossyRadiusPx + with(density) { (8.dp * echoProgress).toPx() }
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            Color(0xFF38B6BA).copy(alpha = 0.38f * haloStrength),
+                            Color(0xFFFCD34D).copy(alpha = 0.20f * haloStrength),
+                            Color.Transparent
+                        ),
+                        center = circleCenter,
+                        radius = haloRadius
+                    ),
+                    radius = haloRadius,
+                    center = circleCenter
+                )
+            }
 
             // 1. Soft Ambient Depth Shadow
             drawCircle(
@@ -378,15 +415,15 @@ fun SieloBottomBar(
                 center = circleCenter + Offset(0f, with(density) { 2.dp.toPx() })
             )
 
-            // 2. Translucent Glass Body with subtle inner depth
+            // 2. Translucent Glass Body (Silky color interpolation between standard glass & celestial cosmic teal)
+            val discColor0 = lerp(Color(0x38FFFFFF), Color(0x4038B6BA), echoProgress)
+            val discColor1 = lerp(PaletteSlateBlue.copy(alpha = 0.55f), Color(0xFF1B3648), echoProgress)
+            val discColor2 = lerp(PaletteOxfordBlue.copy(alpha = 0.85f), PaletteOxfordBlue, echoProgress)
+            val discColor3 = lerp(Color(0xE60D1B2A), Color(0xF008131D), echoProgress)
+
             drawCircle(
                 brush = Brush.radialGradient(
-                    colors = listOf(
-                        Color(0x38FFFFFF),
-                        PaletteSlateBlue.copy(alpha = 0.55f),
-                        PaletteOxfordBlue.copy(alpha = 0.85f),
-                        Color(0xE60D1B2A)
-                    ),
+                    colors = listOf(discColor0, discColor1, discColor2, discColor3),
                     center = circleCenter - Offset(glossyRadiusPx * 0.25f, glossyRadiusPx * 0.35f),
                     radius = glossyRadiusPx * 1.35f
                 ),
@@ -431,28 +468,29 @@ fun SieloBottomBar(
                 style = Stroke(width = with(density) { 1.dp.toPx() })
             )
 
-            // 5. Outer Illuminated Glass Rim with Top Bright Glint & Bottom Bounce Light
+            // 5. Outer Illuminated Glass Rim with Interpolated Gradient
+            val rimColor0 = lerp(PaletteSand.copy(alpha = 0.90f), PaletteSand, echoProgress)
+            val rimColor1 = lerp(PaletteSlateBlue.copy(alpha = 0.45f), Color(0xFFFCD34D), echoProgress)
+            val rimColor2 = lerp(Color(0x33415A77), Color(0xFF38B6BA).copy(alpha = 0.75f), echoProgress)
+            val rimColor3 = lerp(Color(0x66D4C4A8), Color(0xFF00E5FF).copy(alpha = 0.85f), echoProgress)
+            val rimStrokeWidth = with(density) { (1.4.dp + 0.3.dp * echoProgress).toPx() }
+
             drawCircle(
                 brush = Brush.verticalGradient(
-                    colors = listOf(
-                        PaletteSand.copy(alpha = 0.90f),
-                        PaletteSlateBlue.copy(alpha = 0.45f),
-                        Color(0x33415A77),
-                        Color(0x66D4C4A8)
-                    ),
+                    colors = listOf(rimColor0, rimColor1, rimColor2, rimColor3),
                     startY = activeCenterYPx - glossyRadiusPx,
                     endY = activeCenterYPx + glossyRadiusPx
                 ),
                 radius = glossyRadiusPx,
                 center = circleCenter,
-                style = Stroke(width = with(density) { 1.4.dp.toPx() })
+                style = Stroke(width = rimStrokeWidth)
             )
         }
 
         // Active Icon (centered directly inside the organic light layer shape)
         if (animatedCenterX > 0f) {
             val activeScreen = items[selectedIndex]
-            val activeIconBoxSizeDp = 48.dp
+            val activeIconBoxSizeDp = 52.dp
             Box(
                 modifier = Modifier
                     .offset {
@@ -464,17 +502,31 @@ fun SieloBottomBar(
                     .size(activeIconBoxSizeDp),
                 contentAlignment = Alignment.Center
             ) {
-                Crossfade(
+                AnimatedContent(
                     targetState = activeScreen,
-                    animationSpec = tween(durationMillis = 200),
+                    transitionSpec = {
+                        (fadeIn(animationSpec = tween(220, delayMillis = 50, easing = LinearOutSlowInEasing)) +
+                         scaleIn(initialScale = 0.76f, animationSpec = tween(240, delayMillis = 40, easing = FastOutSlowInEasing)))
+                            .togetherWith(
+                                fadeOut(animationSpec = tween(130, easing = FastOutLinearInEasing)) +
+                                scaleOut(targetScale = 0.76f, animationSpec = tween(130, easing = FastOutLinearInEasing))
+                            )
+                    },
                     label = "activeButtonIcon"
                 ) { targetScreen ->
-                    Icon(
-                        imageVector = targetScreen.selectedIcon,
-                        contentDescription = targetScreen.title,
-                        tint = PaletteCream,
-                        modifier = Modifier.size(26.dp)
-                    )
+                    if (targetScreen == Screen.ListenTogether) {
+                        EchoNavIcon(
+                            isActive = true,
+                            modifier = Modifier.size(38.dp)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = targetScreen.selectedIcon,
+                            contentDescription = targetScreen.title,
+                            tint = PaletteCream,
+                            modifier = Modifier.size(26.dp)
+                        )
+                    }
                 }
             }
         }
@@ -491,7 +543,11 @@ fun SieloBottomBar(
 
                 val inactiveIconAlpha by animateFloatAsState(
                     targetValue = if (isSelected) 0f else 1f,
-                    animationSpec = NavAnimationSpec,
+                    animationSpec = if (isSelected) {
+                        tween(durationMillis = 180, delayMillis = 70, easing = FastOutSlowInEasing)
+                    } else {
+                        tween(durationMillis = 240, delayMillis = 50, easing = LinearOutSlowInEasing)
+                    },
                     label = "inactiveIconAlpha_$index"
                 )
 
@@ -540,12 +596,19 @@ fun SieloBottomBar(
                             .graphicsLayer { alpha = inactiveIconAlpha },
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = screen.unselectedIcon,
-                            contentDescription = screen.title,
-                            tint = PaletteSageGreen,
-                            modifier = Modifier.size(22.dp)
-                        )
+                        if (screen == Screen.ListenTogether) {
+                            EchoNavIcon(
+                                isActive = false,
+                                modifier = Modifier.size(30.dp)
+                            )
+                        } else {
+                            Icon(
+                                imageVector = screen.unselectedIcon,
+                                contentDescription = screen.title,
+                                tint = PaletteSageGreen,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
                     }
                 }
             }

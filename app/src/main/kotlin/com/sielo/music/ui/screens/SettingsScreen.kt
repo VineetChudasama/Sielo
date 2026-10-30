@@ -1414,8 +1414,8 @@ private fun NotificationsSubScreen(
             )
             SettingsDivider()
             SettingsToggleRow(
-                title = "Listen Together Invitations",
-                description = "Alerts when peers invite you into shared listening rooms",
+                title = "Echo Invitations",
+                description = "Alerts when peers invite you into shared Echo listening rooms",
                 icon = Icons.Default.Headphones,
                 isChecked = notifListenTogether,
                 onCheckedChange = { viewModel.toggleNotificationsListenTogether() }

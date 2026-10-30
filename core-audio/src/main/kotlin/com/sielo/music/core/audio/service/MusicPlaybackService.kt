@@ -25,7 +25,10 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
+import androidx.media3.session.CommandButton
+import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.SessionResult
+import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.sielo.music.core.audio.PlayerManager
@@ -51,6 +54,9 @@ class MusicPlaybackService : MediaSessionService() {
     companion object {
         var skipNextListener: (() -> Unit)? = null
         var skipPreviousListener: (() -> Unit)? = null
+        var updateNotificationLayoutListener: (() -> Unit)? = null
+        const val CUSTOM_COMMAND_TOGGLE_FAVORITE = "com.sielo.music.command.TOGGLE_FAVORITE"
+        const val CUSTOM_COMMAND_TOGGLE_LOOP = "com.sielo.music.command.TOGGLE_LOOP"
         private var simpleCache: SimpleCache? = null
 
         @Synchronized
@@ -202,6 +208,11 @@ class MusicPlaybackService : MediaSessionService() {
 
                     override fun onPlaybackStateChanged(playbackState: Int) {
                         android.util.Log.d("MusicPlaybackService", "Service Playback State changed: $playbackState (isPlaying=$isPlaying)")
+                        updateNotificationCustomLayout()
+                    }
+
+                    override fun onRepeatModeChanged(repeatMode: Int) {
+                        updateNotificationCustomLayout()
                     }
                 })
                 com.sielo.music.core.audio.AudioEffectsManager.onAudioSessionIdChanged(audioSessionId)
@@ -285,6 +296,101 @@ class MusicPlaybackService : MediaSessionService() {
         }
 
         mediaSession = sessionBuilder.build()
+        setMediaNotificationProvider(SieloMediaNotificationProvider())
+        updateNotificationLayoutListener = {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                updateNotificationCustomLayout()
+            }
+        }
+        updateNotificationCustomLayout()
+    }
+
+    private fun buildLikeButton(isFav: Boolean, enabled: Boolean): CommandButton {
+        return CommandButton.Builder(CommandButton.ICON_UNDEFINED)
+            .setSessionCommand(SessionCommand(CUSTOM_COMMAND_TOGGLE_FAVORITE, Bundle.EMPTY))
+            .setIconResId(
+                if (isFav) androidx.media3.session.R.drawable.media3_icon_heart_filled
+                else androidx.media3.session.R.drawable.media3_icon_heart_unfilled
+            )
+            .setDisplayName(if (isFav) "Unlike" else "Like")
+            .setEnabled(enabled)
+            .build()
+    }
+
+    private fun buildLoopButton(isLooping: Boolean): CommandButton {
+        return CommandButton.Builder(CommandButton.ICON_UNDEFINED)
+            .setSessionCommand(SessionCommand(CUSTOM_COMMAND_TOGGLE_LOOP, Bundle.EMPTY))
+            .setIconResId(
+                if (isLooping) androidx.media3.session.R.drawable.media3_icon_repeat_one
+                else androidx.media3.session.R.drawable.media3_icon_repeat_off
+            )
+            .setDisplayName(if (isLooping) "Disable loop" else "Enable loop")
+            .setEnabled(true)
+            .build()
+    }
+
+    fun updateNotificationCustomLayout() {
+        val session = mediaSession ?: return
+        try {
+            val pm = playerManager.get()
+            val curTrack = pm.playbackState.value.currentTrack
+            val isLooping = pm.playbackState.value.isLooping
+            val isFav = curTrack != null && pm.isCurrentTrackFavorite.value
+
+            val likeBtn = buildLikeButton(isFav, enabled = curTrack != null)
+            val loopBtn = buildLoopButton(isLooping)
+
+            session.setCustomLayout(listOf(likeBtn, loopBtn))
+            onUpdateNotification(session)
+        } catch (_: Exception) {}
+    }
+
+    private inner class SieloMediaNotificationProvider : DefaultMediaNotificationProvider(this@MusicPlaybackService) {
+        override fun getMediaButtons(
+            session: MediaSession,
+            playerCommands: Player.Commands,
+            customLayout: ImmutableList<CommandButton>,
+            showWhenCompact: Boolean
+        ): ImmutableList<CommandButton> {
+            val defaultButtons = super.getMediaButtons(session, playerCommands, customLayout, showWhenCompact)
+            val builder = ImmutableList.builder<CommandButton>()
+
+            // 1. Like song button on the very left (beside previous song button)
+            val likeBtn = customLayout.firstOrNull { it.sessionCommand?.customAction == CUSTOM_COMMAND_TOGGLE_FAVORITE }
+                ?: buildLikeButton(isFav = false, enabled = true)
+            builder.add(likeBtn)
+
+            // 2. Previous song button
+            val prevBtn = defaultButtons.firstOrNull {
+                it.playerCommand == Player.COMMAND_SEEK_TO_PREVIOUS ||
+                it.playerCommand == Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM
+            }
+            if (prevBtn != null) {
+                builder.add(prevBtn)
+            }
+
+            // 3. Play / Pause button
+            val playPauseBtn = defaultButtons.firstOrNull { it.playerCommand == Player.COMMAND_PLAY_PAUSE }
+            if (playPauseBtn != null) {
+                builder.add(playPauseBtn)
+            }
+
+            // 4. Next song button
+            val nextBtn = defaultButtons.firstOrNull {
+                it.playerCommand == Player.COMMAND_SEEK_TO_NEXT ||
+                it.playerCommand == Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM
+            }
+            if (nextBtn != null) {
+                builder.add(nextBtn)
+            }
+
+            // 5. Loop button on the right (beside play next button)
+            val loopBtn = customLayout.firstOrNull { it.sessionCommand?.customAction == CUSTOM_COMMAND_TOGGLE_LOOP }
+                ?: buildLoopButton(isLooping = false)
+            builder.add(loopBtn)
+
+            return builder.build()
+        }
     }
 
     private fun triggerSkipNext() {
@@ -335,14 +441,29 @@ class MusicPlaybackService : MediaSessionService() {
         ): MediaSession.ConnectionResult {
             val connectionResult = super.onConnect(session, controller)
             val availableSessionCommands = connectionResult.availableSessionCommands.buildUpon()
+                .add(SessionCommand(CUSTOM_COMMAND_TOGGLE_FAVORITE, Bundle.EMPTY))
+                .add(SessionCommand(CUSTOM_COMMAND_TOGGLE_LOOP, Bundle.EMPTY))
+                .build()
             val availablePlayerCommands = connectionResult.availablePlayerCommands.buildUpon()
                 .add(Player.COMMAND_SEEK_TO_NEXT)
                 .add(Player.COMMAND_SEEK_TO_PREVIOUS)
                 .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
                 .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
                 .build()
+
+            try {
+                val pm = playerManager.get()
+                val curTrack = pm.playbackState.value.currentTrack
+                val isLooping = pm.playbackState.value.isLooping
+                val isFav = curTrack != null && pm.isCurrentTrackFavorite.value
+                session.setCustomLayout(listOf(
+                    buildLikeButton(isFav, enabled = curTrack != null),
+                    buildLoopButton(isLooping)
+                ))
+            } catch (_: Exception) {}
+
             return MediaSession.ConnectionResult.accept(
-                availableSessionCommands.build(),
+                availableSessionCommands,
                 availablePlayerCommands
             )
         }
@@ -383,7 +504,19 @@ class MusicPlaybackService : MediaSessionService() {
             customCommand: SessionCommand,
             args: Bundle
         ): ListenableFuture<SessionResult> {
-            return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+            when (customCommand.customAction) {
+                CUSTOM_COMMAND_TOGGLE_FAVORITE -> {
+                    playerManager.get().toggleCurrentTrackFavorite()
+                    updateNotificationCustomLayout()
+                    return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+                }
+                CUSTOM_COMMAND_TOGGLE_LOOP -> {
+                    playerManager.get().toggleLoop()
+                    updateNotificationCustomLayout()
+                    return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+                }
+            }
+            return super.onCustomCommand(session, controller, customCommand, args)
         }
     }
 }

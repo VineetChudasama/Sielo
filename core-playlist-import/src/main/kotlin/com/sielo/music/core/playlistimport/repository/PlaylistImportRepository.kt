@@ -1,6 +1,7 @@
 package com.sielo.music.core.playlistimport.repository
 
 import com.sielo.music.core.network.innertube.InnerTubeClient
+import com.sielo.music.core.network.innertube.TrackMatchValidator
 import com.sielo.music.core.network.models.SieloTrack
 import com.sielo.music.core.playlistimport.model.ImportResult
 import com.sielo.music.core.playlistimport.model.ImportSource
@@ -8,6 +9,14 @@ import com.sielo.music.core.playlistimport.model.ImportedTrackCandidate
 import com.sielo.music.core.playlistimport.spotify.ManualPasteParser
 import com.sielo.music.core.playlistimport.youtube.YouTubePlaylistApiService
 import com.sielo.music.core.playlistimport.BuildConfig
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import java.util.Collections
+import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -66,57 +75,65 @@ class PlaylistImportRepository @Inject constructor(
         albumName: String,
         playlistCreator: PlaylistCreator,
         onProgress: (Int, Int) -> Unit
-    ): ImportResult {
-        val resolvedTracks = mutableListOf<SieloTrack>()
-        val unimportedTracks = mutableListOf<ImportedTrackCandidate>()
-        var progress = 0
+    ): ImportResult = coroutineScope {
+        val resolvedTracksWithIndex = arrayOfNulls<SieloTrack>(candidates.size)
+        val unimportedTracks = Collections.synchronizedList(mutableListOf<ImportedTrackCandidate>())
+        val progressCounter = AtomicInteger(0)
+        val semaphore = Semaphore(5)
 
-        for (candidate in candidates) {
-            val query = if (candidate.artistGuess.isNotBlank()) {
-                "${candidate.title} ${candidate.artistGuess}"
-            } else {
-                candidate.title
-            }
+        val jobs = candidates.mapIndexed { index, candidate ->
+            launch(Dispatchers.IO) {
+                semaphore.withPermit {
+                    val query = if (candidate.artistGuess.isNotBlank()) {
+                        "${candidate.title} ${candidate.artistGuess}"
+                    } else {
+                        candidate.title
+                    }
 
-            try {
-                val results = innerTubeClient.search(query)
-                val isRequestedCover = com.sielo.music.core.network.innertube.TrackMatchValidator.isCoverOrKaraokeTrack(
-                    candidate.title,
-                    candidate.artistGuess
-                )
+                    try {
+                        val results = innerTubeClient.search(query)
+                        val isRequestedCover = TrackMatchValidator.isCoverOrKaraokeTrack(
+                            candidate.title,
+                            candidate.artistGuess
+                        )
 
-                // 1. If user did NOT ask for a cover/karaoke, strictly prefer non-cover tracks
-                // where the artist matches the requested artist.
-                val match = if (!isRequestedCover) {
-                    results.firstOrNull { res ->
-                        !com.sielo.music.core.network.innertube.TrackMatchValidator.isCoverOrKaraokeTrack(res.title, res.artist) &&
-                        com.sielo.music.core.network.innertube.TrackMatchValidator.isSongByOrFeaturingArtist(res.title, res.artist, candidate.artistGuess) &&
-                        com.sielo.music.core.network.innertube.TrackMatchValidator.isFuzzyMatch(candidate.title, res.title, candidate.artistGuess, res.artist)
-                    } ?: results.firstOrNull { res ->
-                        !com.sielo.music.core.network.innertube.TrackMatchValidator.isCoverOrKaraokeTrack(res.title, res.artist) &&
-                        com.sielo.music.core.network.innertube.TrackMatchValidator.isSongByOrFeaturingArtist(res.title, res.artist, candidate.artistGuess)
-                    } ?: results.firstOrNull { res ->
-                        !com.sielo.music.core.network.innertube.TrackMatchValidator.isCoverOrKaraokeTrack(res.title, res.artist) &&
-                        com.sielo.music.core.network.innertube.TrackMatchValidator.isFuzzyMatch(candidate.title, res.title)
-                    } ?: results.firstOrNull { res ->
-                        !com.sielo.music.core.network.innertube.TrackMatchValidator.isCoverOrKaraokeTrack(res.title, res.artist)
-                    } ?: results.firstOrNull()
-                } else {
-                    results.firstOrNull()
+                        // If user did NOT ask for a cover/karaoke, strictly prefer non-cover tracks
+                        // where the artist matches the requested artist.
+                        val match = if (!isRequestedCover) {
+                            results.firstOrNull { res ->
+                                !TrackMatchValidator.isCoverOrKaraokeTrack(res.title, res.artist) &&
+                                TrackMatchValidator.isSongByOrFeaturingArtist(res.title, res.artist, candidate.artistGuess) &&
+                                TrackMatchValidator.isFuzzyMatch(candidate.title, res.title, candidate.artistGuess, res.artist)
+                            } ?: results.firstOrNull { res ->
+                                !TrackMatchValidator.isCoverOrKaraokeTrack(res.title, res.artist) &&
+                                TrackMatchValidator.isSongByOrFeaturingArtist(res.title, res.artist, candidate.artistGuess)
+                            } ?: results.firstOrNull { res ->
+                                !TrackMatchValidator.isCoverOrKaraokeTrack(res.title, res.artist) &&
+                                TrackMatchValidator.isFuzzyMatch(candidate.title, res.title)
+                            } ?: results.firstOrNull { res ->
+                                !TrackMatchValidator.isCoverOrKaraokeTrack(res.title, res.artist)
+                            } ?: results.firstOrNull()
+                        } else {
+                            results.firstOrNull()
+                        }
+
+                        if (match != null) {
+                            resolvedTracksWithIndex[index] = match
+                        } else {
+                            unimportedTracks.add(candidate)
+                        }
+                    } catch (e: Exception) {
+                        unimportedTracks.add(candidate)
+                    } finally {
+                        val currentProgress = progressCounter.incrementAndGet()
+                        onProgress(currentProgress, candidates.size)
+                    }
                 }
-
-                if (match != null) {
-                    resolvedTracks.add(match)
-                } else {
-                    unimportedTracks.add(candidate)
-                }
-            } catch (e: Exception) {
-                unimportedTracks.add(candidate)
             }
-
-            progress++
-            onProgress(progress, candidates.size)
         }
+        jobs.joinAll()
+
+        val resolvedTracks = resolvedTracksWithIndex.filterNotNull()
 
         if (resolvedTracks.isEmpty()) {
             throw Exception("Could not resolve any tracks on Sielo from the imported source.")
@@ -124,12 +141,12 @@ class PlaylistImportRepository @Inject constructor(
 
         val albumId = playlistCreator.createPlaylist(albumName, resolvedTracks)
 
-        return ImportResult(
+        ImportResult(
             albumId = albumId,
             totalCandidates = candidates.size,
             importedCount = resolvedTracks.size,
             skippedCount = unimportedTracks.size,
-            unimportedTracks = unimportedTracks
+            unimportedTracks = unimportedTracks.toList()
         )
     }
 
@@ -178,7 +195,7 @@ class PlaylistImportRepository @Inject constructor(
     }
 
     private fun extractYouTubePlaylistId(url: String): String? {
-        val trimmed = url.trim()
+        val trimmed = url.trim().trim('"', '\'')
         // 1. Direct query parameter: ?list=... or &list=... (works for youtube.com, music.youtube.com, etc.)
         val listRegex = Regex("[?&]list=([^#\\&\\?]+)")
         val match = listRegex.find(trimmed)?.groupValues?.get(1)?.trim()

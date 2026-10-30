@@ -41,6 +41,8 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="sielo" android:host="room" />
+                <data android:scheme="sielo" android:host="echo" />
+                <data android:scheme="sielo" android:host="orbit" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
@@ -53,7 +55,11 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="https" android:host="sielo.app" android:pathPrefix="/room" />
+                <data android:scheme="https" android:host="sielo.app" android:pathPrefix="/echo" />
+                <data android:scheme="https" android:host="sielo.app" android:pathPrefix="/orbit" />
                 <data android:scheme="http" android:host="sielo.app" android:pathPrefix="/room" />
+                <data android:scheme="http" android:host="sielo.app" android:pathPrefix="/echo" />
+                <data android:scheme="http" android:host="sielo.app" android:pathPrefix="/orbit" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
@@ -87,6 +93,8 @@
                 <data android:scheme="sielo" android:host="song" />
                 <data android:scheme="sielo" android:host="album" />
                 <data android:scheme="sielo" android:host="room" />
+                <data android:scheme="sielo" android:host="echo" />
+                <data android:scheme="sielo" android:host="orbit" />
                 <data android:scheme="sielo" android:host="listen" />
                 <data android:scheme="sielo" android:host="artist" />
             </intent-filter>

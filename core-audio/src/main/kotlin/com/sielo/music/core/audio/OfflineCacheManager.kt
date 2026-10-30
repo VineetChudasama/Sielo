@@ -98,8 +98,23 @@ object OfflineCacheManager {
             if (tempFile.length() > 1024L) {
                 if (audioFile.exists()) audioFile.delete()
                 tempFile.renameTo(audioFile)
-                // Save metadata
+                // Save metadata & cache artwork thumbnail locally for offline backdrop
                 metaFile.writeText(json.encodeToString(track))
+                val artUrl = track.thumbnailUrl
+                if (!artUrl.isNullOrBlank()) {
+                    try {
+                        val artFile = File(dir, "${track.id}.jpg")
+                        if (!artFile.exists()) {
+                            val artReq = Request.Builder().url(artUrl).build()
+                            val artResp = client.newCall(artReq).execute()
+                            if (artResp.isSuccessful) {
+                                artResp.body?.bytes()?.let { artBytes ->
+                                    artFile.writeBytes(artBytes)
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
                 notifyCacheChanged()
                 return@withContext audioFile.toURI().toString()
             } else {

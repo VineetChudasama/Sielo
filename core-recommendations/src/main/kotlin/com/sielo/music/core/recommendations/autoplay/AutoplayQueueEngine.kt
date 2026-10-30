@@ -68,11 +68,13 @@ class AutoplayQueueEngine @Inject constructor(
 
         // 4. Allocate slots: 60% Pool A, 25% Pool B, 15% Pool C (rounding / backfilling as needed)
         val seedLanguage = SongClassifier.detectLanguage(seedSong)
+        val seedVibe = SongClassifier.detectVibe(seedSong)
         val candidateSlots = allocatePoolSlots(poolA, poolB, poolC, batchSize, seedSong, hardExcluded, today)
         val selectedCandidates = candidateSlots
             .filter { CandidatePoolBuilder.isCleanStudioTrack(it.title, it.artist) }
             .filterNot { CandidatePoolBuilder.isTitleTooSimilar(it.title, seedSong.title) }
             .filter { SongClassifier.detectLanguage(it) == seedLanguage }
+            .filter { SongClassifier.isVibeCompatible(seedVibe, SongClassifier.detectVibe(it)) }
 
         val finalCandidates = if (selectedCandidates.size < batchSize) {
             val fallback = CuratedArtistClusters.defaultFallbackTracks(seedSong)
@@ -80,6 +82,7 @@ class AutoplayQueueEngine @Inject constructor(
                 .filter { CandidatePoolBuilder.isCleanStudioTrack(it.title, it.artist) }
                 .filterNot { CandidatePoolBuilder.isTitleTooSimilar(it.title, seedSong.title) }
                 .filter { SongClassifier.detectLanguage(it) == seedLanguage }
+                .filter { SongClassifier.isVibeCompatible(seedVibe, SongClassifier.detectVibe(it)) }
             val fallbackIneligibles = recommendationHistoryDao.getIneligibleSongIds(fallback.map { it.id }, today).toSet()
             val cleanFallback = fallback.filter { it.id !in fallbackIneligibles }
             (selectedCandidates + cleanFallback).distinctBy { it.id }.take(batchSize)

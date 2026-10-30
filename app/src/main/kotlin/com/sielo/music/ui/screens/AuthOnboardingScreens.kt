@@ -203,7 +203,15 @@ fun AuthDialog(
 
     val googleSignInClient = remember(gso) { GoogleSignIn.getClient(context, gso) }
 
-    val googleLauncher = rememberLauncherForActivityResult(
+    val basicGso = remember {
+        GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+            .requestEmail()
+            .requestProfile()
+            .build()
+    }
+    val basicGoogleSignInClient = remember(basicGso) { GoogleSignIn.getClient(context, basicGso) }
+
+    val basicGoogleLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
         val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
@@ -215,37 +223,51 @@ fun AuthDialog(
                 val photoUrl = account.photoUrl?.toString()
                 val existing = userManager.getUserByEmail(email)
                 if (!existing?.username.isNullOrBlank()) {
-                    userManager.signInWithGoogle(name, email, photoUrl, account.idToken, existing?.username)
+                    userManager.signInWithGoogle(name, email, photoUrl, null, existing?.username)
                     onDismiss()
                 } else {
-                    pendingGoogleLogin = PendingGoogleLogin(name, email, photoUrl, account.idToken)
+                    pendingGoogleLogin = PendingGoogleLogin(name, email, photoUrl, null)
                     showGoogleUsernameDialog = true
                 }
             }
+        } catch (ex: Exception) {
+            if (ex is ApiException && (ex.statusCode == 12501 || ex.statusCode == 12502)) {
+                // User explicitly cancelled account chooser
+            } else {
+                showSha1InfoDialog = true
+            }
+        }
+    }
+
+    val handleGoogleAccount: (com.google.android.gms.auth.api.signin.GoogleSignInAccount) -> Unit = { account ->
+        val name = account.displayName ?: "Google User"
+        val email = account.email ?: "user@gmail.com"
+        val photoUrl = account.photoUrl?.toString()
+        val existing = userManager.getUserByEmail(email)
+        userManager.signInWithGoogle(name, email, photoUrl, account.idToken, existing?.username)
+        onDismiss()
+    }
+
+    val googleLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
+        try {
+            val account = task.getResult(ApiException::class.java)
+            if (account != null) {
+                handleGoogleAccount(account)
+            }
         } catch (e: Exception) {
             if (e is ApiException && (e.statusCode == 12501 || e.statusCode == 12502)) {
-                // User explicitly cancelled account chooser
-            } else if (e is ApiException && e.statusCode == 10) {
-                // DEVELOPER_ERROR (10): Release keystore SHA-1 not registered in Firebase Console
+                // User explicitly dismissed or cancelled the Google account chooser popup
+                return@rememberLauncherForActivityResult
+            }
+
+            if (e is ApiException && e.statusCode == 10) {
                 showSha1InfoDialog = true
             } else {
-                val lastAccount = GoogleSignIn.getLastSignedInAccount(context)
-                if (lastAccount != null) {
-                    val name = lastAccount.displayName ?: "Google User"
-                    val email = lastAccount.email ?: "user@gmail.com"
-                    val photoUrl = lastAccount.photoUrl?.toString()
-                    val existing = userManager.getUserByEmail(email)
-                    if (!existing?.username.isNullOrBlank()) {
-                        userManager.signInWithGoogle(name, email, photoUrl, lastAccount.idToken, existing?.username)
-                        onDismiss()
-                    } else {
-                        pendingGoogleLogin = PendingGoogleLogin(name, email, photoUrl, lastAccount.idToken)
-                        showGoogleUsernameDialog = true
-                    }
-                } else {
-                    val msg = if (e is ApiException) "Google Sign-In failed (${e.statusCode})" else "Google Sign-In failed"
-                    android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
-                }
+                val msg = if (e is ApiException) "Google Sign-In failed (${e.statusCode})" else "Google Sign-In failed: ${e.message}"
+                android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -324,10 +346,11 @@ fun AuthDialog(
                     Button(
                         onClick = {
                             try {
+                                // Sign out first so Google always displays the native Account Chooser popup
                                 googleSignInClient.signOut().addOnCompleteListener {
                                     googleLauncher.launch(googleSignInClient.signInIntent)
                                 }
-                            } catch (_: Exception) {
+                            } catch (e: Exception) {
                                 googleLauncher.launch(googleSignInClient.signInIntent)
                             }
                         },

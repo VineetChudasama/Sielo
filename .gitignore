@@ -17,3 +17,5 @@ captures/
 
 *.jks
 sielo-release.jks
+
+*.idsig

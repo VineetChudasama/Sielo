@@ -2844,14 +2844,26 @@ class InnerTubeClient @Inject constructor(
         null
     }
 
+    private fun kotlinx.serialization.json.JsonElement?.textOrNull(): String? {
+        return try {
+            if (this != null && this !is kotlinx.serialization.json.JsonNull) this.jsonPrimitive.content else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun getYouTubePlaylistSongs(playlistId: String): List<SieloTrack> {
         return try {
-            val cleanId = playlistId.substringAfter("list=").substringBefore("&").trim()
+            val cleanId = playlistId.substringAfter("list=").substringBefore("&").substringBefore("#").trim()
             val browseId = if (cleanId.startsWith("VL") || cleanId.startsWith("MPREb_") || cleanId.startsWith("FE")) {
                 cleanId
             } else {
                 "VL$cleanId"
             }
+
+            val tracks = mutableListOf<SieloTrack>()
+
+            // 1. Try YouTube Music (WEB_REMIX)
             val requestBody = """
                 {
                     "context": {
@@ -2875,84 +2887,180 @@ class InnerTubeClient @Inject constructor(
                 .build()
 
             val response = client.newCall(request).execute()
-            val bodyString = response.body?.string() ?: return emptyList()
-            val root = json.parseToJsonElement(bodyString).jsonObject
+            val bodyString = response.body?.string().orEmpty()
+            val continuationTokens = mutableListOf<String>()
 
-            val contents = root["contents"]?.jsonObject
-            val tabs = contents?.get("singleColumnBrowseResultsRenderer")?.jsonObject
-                ?.get("tabs")?.jsonArray
-                ?: contents?.get("twoColumnBrowseResultsRenderer")?.jsonObject
+            if (bodyString.isNotBlank()) {
+                val root = json.parseToJsonElement(bodyString).jsonObject
+                val contents = root["contents"]?.jsonObject
+                val tabs = contents?.get("singleColumnBrowseResultsRenderer")?.jsonObject
                     ?.get("tabs")?.jsonArray
+                    ?: contents?.get("twoColumnBrowseResultsRenderer")?.jsonObject
+                        ?.get("tabs")?.jsonArray
 
-            val tracks = mutableListOf<SieloTrack>()
-
-            // 1. Gather all possible section lists
-            val allSectionLists = mutableListOf<kotlinx.serialization.json.JsonArray>()
-            tabs?.forEach { tab ->
-                val tabContent = tab.jsonObject["tabRenderer"]?.jsonObject?.get("content")?.jsonObject
-                tabContent?.get("sectionListRenderer")?.jsonObject?.get("contents")?.jsonArray?.let {
-                    allSectionLists.add(it)
-                }
-            }
-            contents?.get("twoColumnBrowseResultsRenderer")?.jsonObject
-                ?.get("secondaryContents")?.jsonObject
-                ?.get("sectionListRenderer")?.jsonObject
-                ?.get("contents")?.jsonArray?.let {
-                    allSectionLists.add(it)
-                }
-            contents?.get("singleColumnBrowseResultsRenderer")?.jsonObject
-                ?.get("tabs")?.jsonArray?.forEach { tab ->
+                // Gather all possible section lists
+                val allSectionLists = mutableListOf<kotlinx.serialization.json.JsonArray>()
+                tabs?.forEach { tab ->
                     val tabContent = tab.jsonObject["tabRenderer"]?.jsonObject?.get("content")?.jsonObject
                     tabContent?.get("sectionListRenderer")?.jsonObject?.get("contents")?.jsonArray?.let {
                         allSectionLists.add(it)
                     }
                 }
+                contents?.get("twoColumnBrowseResultsRenderer")?.jsonObject
+                    ?.get("secondaryContents")?.jsonObject
+                    ?.get("sectionListRenderer")?.jsonObject
+                    ?.get("contents")?.jsonArray?.let {
+                        allSectionLists.add(it)
+                    }
+                contents?.get("singleColumnBrowseResultsRenderer")?.jsonObject
+                    ?.get("tabs")?.jsonArray?.forEach { tab ->
+                        val tabContent = tab.jsonObject["tabRenderer"]?.jsonObject?.get("content")?.jsonObject
+                        tabContent?.get("sectionListRenderer")?.jsonObject?.get("contents")?.jsonArray?.let {
+                            allSectionLists.add(it)
+                        }
+                    }
 
-            // 2. Extract items from all shelves across all gathered section lists
-            allSectionLists.forEach { sl ->
-                sl.forEach { section ->
-                    val shelf = section.jsonObject["musicPlaylistShelfRenderer"]?.jsonObject
-                        ?: section.jsonObject["musicShelfRenderer"]?.jsonObject
-                    shelf?.get("contents")?.jsonArray?.forEach { item ->
-                        val responsiveItem = item.jsonObject["musicResponsiveListItemRenderer"]?.jsonObject ?: return@forEach
-                        parseResponsiveItem(responsiveItem, isAlbumOrPlaylist = true)?.let { tracks.add(it) }
+                // Extract items and continuation tokens across all section lists
+                allSectionLists.forEach { sl ->
+                    sl.forEach { section ->
+                        val shelf = section.jsonObject["musicPlaylistShelfRenderer"]?.jsonObject
+                            ?: section.jsonObject["musicShelfRenderer"]?.jsonObject
+                        shelf?.get("contents")?.jsonArray?.forEach { item ->
+                            val obj = item.jsonObject
+                            val responsiveItem = obj["musicResponsiveListItemRenderer"]?.jsonObject
+                            if (responsiveItem != null) {
+                                parseResponsiveItem(responsiveItem, isAlbumOrPlaylist = true)?.let { tracks.add(it) }
+                            }
+                            val cont = obj["continuationItemRenderer"]?.jsonObject
+                                ?.get("continuationEndpoint")?.jsonObject
+                                ?.get("continuationCommand")?.jsonObject
+                                ?.get("token").textOrNull()
+                            if (!cont.isNullOrBlank()) continuationTokens.add(cont)
+                        }
+                        shelf?.get("continuations")?.jsonArray?.forEach { c ->
+                            val tok = c.jsonObject["nextContinuationData"]?.jsonObject?.get("continuation").textOrNull()
+                            if (!tok.isNullOrBlank()) continuationTokens.add(tok)
+                        }
+                    }
+                }
+
+                // Fallback direct shelf in tab contents
+                tabs?.forEach { tab ->
+                    val tabContent = tab.jsonObject["tabRenderer"]?.jsonObject?.get("content")?.jsonObject
+                    val directShelf = tabContent?.get("musicPlaylistShelfRenderer")?.jsonObject
+                        ?: tabContent?.get("musicShelfRenderer")?.jsonObject
+                    directShelf?.get("contents")?.jsonArray?.forEach { item ->
+                        val obj = item.jsonObject
+                        val responsiveItem = obj["musicResponsiveListItemRenderer"]?.jsonObject
+                        if (responsiveItem != null) {
+                            parseResponsiveItem(responsiveItem, isAlbumOrPlaylist = true)?.let { tracks.add(it) }
+                        }
+                        val cont = obj["continuationItemRenderer"]?.jsonObject
+                            ?.get("continuationEndpoint")?.jsonObject
+                            ?.get("continuationCommand")?.jsonObject
+                            ?.get("token").textOrNull()
+                        if (!cont.isNullOrBlank()) continuationTokens.add(cont)
+                    }
+                }
+
+                // Follow WEB_REMIX continuation tokens for large playlists (300+ songs)
+                var currentContToken = continuationTokens.firstOrNull()
+                var pagesFetched = 0
+                while (!currentContToken.isNullOrBlank() && pagesFetched < 50) {
+                    pagesFetched++
+                    var nextToken: String? = null
+                    try {
+                        val contBody = """
+                            {
+                                "context": {
+                                    "client": {
+                                        "clientName": "WEB_REMIX",
+                                        "clientVersion": "1.20260114.01.00",
+                                        "hl": "en",
+                                        "gl": "US"
+                                    }
+                                },
+                                "continuation": "$currentContToken"
+                            }
+                        """.trimIndent()
+                        val contReq = Request.Builder()
+                            .url("https://music.youtube.com/youtubei/v1/browse")
+                            .post(contBody.toRequestBody(JSON_MEDIA))
+                            .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
+                            .addHeader("Origin", "https://music.youtube.com")
+                            .addHeader("Referer", "https://music.youtube.com/")
+                            .build()
+                        val contResp = client.newCall(contReq).execute()
+                        val contStr = contResp.body?.string().orEmpty()
+                        if (contStr.isNotBlank()) {
+                            val contRoot = json.parseToJsonElement(contStr).jsonObject
+                            val actions = contRoot["onResponseReceivedActions"]?.jsonArray
+                            actions?.forEach { a ->
+                                val contItems = a.jsonObject["appendContinuationItemsAction"]?.jsonObject?.get("continuationItems")?.jsonArray
+                                contItems?.forEach { itm ->
+                                    val rItem = itm.jsonObject["musicResponsiveListItemRenderer"]?.jsonObject
+                                    if (rItem != null) {
+                                        parseResponsiveItem(rItem, isAlbumOrPlaylist = true)?.let { tracks.add(it) }
+                                    }
+                                    val nTok = itm.jsonObject["continuationItemRenderer"]?.jsonObject
+                                        ?.get("continuationEndpoint")?.jsonObject
+                                        ?.get("continuationCommand")?.jsonObject
+                                        ?.get("token").textOrNull()
+                                    if (!nTok.isNullOrBlank()) nextToken = nTok
+                                }
+                            }
+                            val contContents = contRoot["continuationContents"]?.jsonObject
+                            val shelfCont = contContents?.get("musicPlaylistShelfContinuation")?.jsonObject
+                                ?: contContents?.get("musicShelfContinuation")?.jsonObject
+                            shelfCont?.get("contents")?.jsonArray?.forEach { itm ->
+                                val rItem = itm.jsonObject["musicResponsiveListItemRenderer"]?.jsonObject
+                                if (rItem != null) {
+                                    parseResponsiveItem(rItem, isAlbumOrPlaylist = true)?.let { tracks.add(it) }
+                                }
+                            }
+                            if (nextToken == null) {
+                                nextToken = shelfCont?.get("continuations")?.jsonArray?.firstOrNull()?.jsonObject
+                                    ?.get("nextContinuationData")?.jsonObject
+                                    ?.get("continuation").textOrNull()
+                            }
+                        }
+                    } catch (_: Exception) {
+                        break
+                    }
+                    currentContToken = nextToken
+                }
+
+                // If tracks is empty, check canonical playlist ID
+                if (tracks.isEmpty()) {
+                    val canonicalPlaylistId = root["microformat"]?.jsonObject
+                        ?.get("microformatDataRenderer")?.jsonObject
+                        ?.get("urlCanonical").textOrNull()
+                        ?.substringAfterLast("=", "")
+                        ?.takeIf { it.isNotBlank() }
+                        ?: root["header"]?.jsonObject
+                            ?.get("musicDetailHeaderRenderer")?.jsonObject
+                            ?.get("menu")?.jsonObject
+                            ?.get("menuRenderer")?.jsonObject
+                            ?.get("topLevelButtons")?.jsonArray?.firstOrNull()?.jsonObject
+                            ?.get("buttonRenderer")?.jsonObject
+                            ?.get("navigationEndpoint")?.jsonObject
+                            ?.get("watchPlaylistEndpoint")?.jsonObject
+                            ?.get("playlistId").textOrNull()
+
+                    if (!canonicalPlaylistId.isNullOrBlank() && canonicalPlaylistId != cleanId && !cleanId.endsWith(canonicalPlaylistId)) {
+                        val resolvedTracks = getYouTubePlaylistSongs("VL$canonicalPlaylistId")
+                        if (resolvedTracks.isNotEmpty()) {
+                            return resolvedTracks
+                        }
                     }
                 }
             }
 
-            // 3. Fallback direct shelf in tab contents
-            tabs?.forEach { tab ->
-                val tabContent = tab.jsonObject["tabRenderer"]?.jsonObject?.get("content")?.jsonObject
-                val directShelf = tabContent?.get("musicPlaylistShelfRenderer")?.jsonObject
-                    ?: tabContent?.get("musicShelfRenderer")?.jsonObject
-                directShelf?.get("contents")?.jsonArray?.forEach { item ->
-                    val responsiveItem = item.jsonObject["musicResponsiveListItemRenderer"]?.jsonObject ?: return@forEach
-                    parseResponsiveItem(responsiveItem, isAlbumOrPlaylist = true)?.let { tracks.add(it) }
-                }
-            }
-
-            // Velune album extraction: If tracks is empty (or browseId was MPREb_), extract canonical playlistId
+            // 2. Fallback to YouTube Web (WEB client) if WEB_REMIX returned empty (standard YouTube playlists, non-music-indexed playlists)
             if (tracks.isEmpty()) {
-                val canonicalPlaylistId = root["microformat"]?.jsonObject
-                    ?.get("microformatDataRenderer")?.jsonObject
-                    ?.get("urlCanonical")?.jsonPrimitive?.content
-                    ?.substringAfterLast("=", "")
-                    ?.takeIf { it.isNotBlank() }
-                    ?: root["header"]?.jsonObject
-                        ?.get("musicDetailHeaderRenderer")?.jsonObject
-                        ?.get("menu")?.jsonObject
-                        ?.get("menuRenderer")?.jsonObject
-                        ?.get("topLevelButtons")?.jsonArray?.firstOrNull()?.jsonObject
-                        ?.get("buttonRenderer")?.jsonObject
-                        ?.get("navigationEndpoint")?.jsonObject
-                        ?.get("watchPlaylistEndpoint")?.jsonObject
-                        ?.get("playlistId")?.jsonPrimitive?.content
-
-                if (!canonicalPlaylistId.isNullOrBlank() && canonicalPlaylistId != cleanId && !cleanId.endsWith(canonicalPlaylistId)) {
-                    val resolvedTracks = getYouTubePlaylistSongs("VL$canonicalPlaylistId")
-                    if (resolvedTracks.isNotEmpty()) {
-                        return resolvedTracks
-                    }
+                val webTracks = fetchYouTubeWebPlaylist(cleanId)
+                if (webTracks.isNotEmpty()) {
+                    return webTracks
                 }
             }
 
@@ -2961,6 +3069,242 @@ class InnerTubeClient @Inject constructor(
             e.printStackTrace()
             emptyList()
         }
+    }
+
+    private fun fetchYouTubeWebPlaylist(cleanId: String): List<SieloTrack> {
+        val tracks = mutableListOf<SieloTrack>()
+        try {
+            val browseId = if (cleanId.startsWith("VL") || cleanId.startsWith("MPREb_") || cleanId.startsWith("FE")) {
+                cleanId
+            } else {
+                "VL$cleanId"
+            }
+            val requestBody = """
+                {
+                    "context": {
+                        "client": {
+                            "clientName": "WEB",
+                            "clientVersion": "2.20240105.01.00",
+                            "hl": "en",
+                            "gl": "US"
+                        }
+                    },
+                    "browseId": "$browseId"
+                }
+            """.trimIndent()
+
+            val request = Request.Builder()
+                .url("https://www.youtube.com/youtubei/v1/browse")
+                .post(requestBody.toRequestBody(JSON_MEDIA))
+                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
+                .addHeader("Origin", "https://www.youtube.com")
+                .addHeader("Referer", "https://www.youtube.com/")
+                .build()
+
+            val response = client.newCall(request).execute()
+            val bodyString = response.body?.string().orEmpty()
+            if (bodyString.isBlank()) return emptyList()
+
+            val root = json.parseToJsonElement(bodyString).jsonObject
+            var contToken = extractWebContinuationToken(root)
+
+            // Extract all lockupViewModel and playlistVideoRenderer items
+            extractWebPlaylistItems(root, tracks)
+
+            // Follow continuation tokens on YouTube Web
+            var pages = 0
+            while (!contToken.isNullOrBlank() && pages < 50) {
+                pages++
+                var nextCont: String? = null
+                try {
+                    val contBody = """
+                        {
+                            "context": {
+                                "client": {
+                                    "clientName": "WEB",
+                                    "clientVersion": "2.20240105.01.00",
+                                    "hl": "en",
+                                    "gl": "US"
+                                }
+                            },
+                            "continuation": "$contToken"
+                        }
+                    """.trimIndent()
+                    val contReq = Request.Builder()
+                        .url("https://www.youtube.com/youtubei/v1/browse")
+                        .post(contBody.toRequestBody(JSON_MEDIA))
+                        .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                        .addHeader("Origin", "https://www.youtube.com")
+                        .addHeader("Referer", "https://www.youtube.com/")
+                        .build()
+
+                    val contResp = client.newCall(contReq).execute()
+                    val contStr = contResp.body?.string().orEmpty()
+                    if (contStr.isNotBlank()) {
+                        val contRoot = json.parseToJsonElement(contStr).jsonObject
+                        val actions = contRoot["onResponseReceivedActions"]?.jsonArray
+                        actions?.forEach { a ->
+                            val cItems = a.jsonObject["appendContinuationItemsAction"]?.jsonObject?.get("continuationItems")?.jsonArray
+                            cItems?.forEach { item ->
+                                val obj = item.jsonObject
+                                parseLockupViewModel(obj)?.let { tracks.add(it) }
+                                obj["playlistVideoRenderer"]?.jsonObject?.let { parsePlaylistVideoRenderer(it)?.let { t -> tracks.add(t) } }
+                                val tok = obj["continuationItemViewModel"]?.jsonObject
+                                    ?.get("continuationCommand")?.jsonObject
+                                    ?.get("innertubeCommand")?.jsonObject
+                                    ?.get("continuationCommand")?.jsonObject
+                                    ?.get("token").textOrNull()
+                                    ?: obj["continuationItemRenderer"]?.jsonObject
+                                        ?.get("continuationEndpoint")?.jsonObject
+                                        ?.get("continuationCommand")?.jsonObject
+                                        ?.get("token").textOrNull()
+                                if (!tok.isNullOrBlank()) nextCont = tok
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                    break
+                }
+                contToken = nextCont
+            }
+
+            return tracks.distinctBy { it.id }
+        } catch (_: Exception) {
+            return tracks.distinctBy { it.id }
+        }
+    }
+
+    private fun parseLockupViewModel(item: kotlinx.serialization.json.JsonObject): SieloTrack? {
+        val lockup = item["lockupViewModel"]?.jsonObject ?: item
+        val vid = lockup["contentId"].textOrNull()
+            ?: lockup["rendererContext"]?.jsonObject
+                ?.get("commandContext")?.jsonObject
+                ?.get("onTap")?.jsonObject
+                ?.get("innertubeCommand")?.jsonObject
+                ?.get("watchEndpoint")?.jsonObject
+                ?.get("videoId").textOrNull()
+            ?: return null
+
+        val meta = lockup["metadata"]?.jsonObject?.get("lockupMetadataViewModel")?.jsonObject
+        var title = meta?.get("title")?.jsonObject?.get("content").textOrNull()
+
+        val rows = meta?.get("metadata")?.jsonObject?.get("contentMetadataViewModel")?.jsonObject?.get("metadataRows")?.jsonArray
+        var artist = ""
+        if (rows != null && rows.size > 1) {
+            val parts = rows.getOrNull(1)?.jsonObject?.get("metadataParts")?.jsonArray
+            artist = parts?.firstOrNull()?.jsonObject?.get("text")?.jsonObject?.get("content").textOrNull().orEmpty()
+        }
+        if (title.isNullOrBlank()) {
+            val label = lockup["rendererContext"]?.jsonObject?.get("accessibilityContext")?.jsonObject?.get("label").textOrNull().orEmpty()
+            if (label.contains(" - ")) {
+                val split = label.split(" - ", limit = 2)
+                title = split[0].trim()
+                if (artist.isBlank() && split.size > 1) artist = split[1].trim()
+            } else {
+                title = label
+            }
+        }
+        if (title.isNullOrBlank()) return null
+        if (artist.isBlank()) artist = "YouTube"
+
+        var durationSec = 0L
+        val overlays = lockup["contentImage"]?.jsonObject?.get("thumbnailViewModel")?.jsonObject?.get("overlays")?.jsonArray
+        overlays?.forEach { ov ->
+            ov.jsonObject["thumbnailBottomOverlayViewModel"]?.jsonObject?.get("badges")?.jsonArray?.forEach { b ->
+                val txt = b.jsonObject["thumbnailBadgeViewModel"]?.jsonObject?.get("text").textOrNull()
+                if (txt != null && txt.contains(":")) {
+                    durationSec = parseDurationToSeconds(txt)
+                }
+            }
+        }
+
+        val thumbSources = lockup["contentImage"]?.jsonObject?.get("thumbnailViewModel")?.jsonObject?.get("image")?.jsonObject?.get("sources")?.jsonArray
+        val thumbUrl = thumbSources?.lastOrNull()?.jsonObject?.get("url").textOrNull()
+            ?: "https://i.ytimg.com/vi/$vid/hqdefault.jpg"
+
+        return SieloTrack(
+            id = vid,
+            title = title,
+            artist = artist,
+            album = "YouTube Playlist",
+            durationSeconds = durationSec,
+            thumbnailUrl = thumbUrl
+        )
+    }
+
+    private fun parsePlaylistVideoRenderer(pvr: kotlinx.serialization.json.JsonObject): SieloTrack? {
+        val vid = pvr["videoId"].textOrNull() ?: return null
+        val title = pvr["title"]?.jsonObject?.get("runs")?.jsonArray?.firstOrNull()?.jsonObject?.get("text").textOrNull()
+            ?: pvr["title"]?.jsonObject?.get("simpleText").textOrNull()
+            ?: return null
+        val artist = pvr["shortBylineText"]?.jsonObject?.get("runs")?.jsonArray?.firstOrNull()?.jsonObject?.get("text").textOrNull().orEmpty()
+        val durText = pvr["lengthSeconds"].textOrNull()
+        val durSec = durText?.toLongOrNull() ?: 0L
+        val thumbs = pvr["thumbnail"]?.jsonObject?.get("thumbnails")?.jsonArray
+        val thumbUrl = thumbs?.lastOrNull()?.jsonObject?.get("url").textOrNull()
+            ?: "https://i.ytimg.com/vi/$vid/hqdefault.jpg"
+        return SieloTrack(
+            id = vid,
+            title = title,
+            artist = if (artist.isNotBlank()) artist else "YouTube",
+            album = "YouTube Playlist",
+            durationSeconds = durSec,
+            thumbnailUrl = thumbUrl
+        )
+    }
+
+    private fun extractWebPlaylistItems(element: kotlinx.serialization.json.JsonElement, outList: MutableList<SieloTrack>) {
+        when (element) {
+            is kotlinx.serialization.json.JsonObject -> {
+                if (element.containsKey("lockupViewModel")) {
+                    parseLockupViewModel(element)?.let { outList.add(it) }
+                }
+                if (element.containsKey("playlistVideoRenderer")) {
+                    element["playlistVideoRenderer"]?.jsonObject?.let { parsePlaylistVideoRenderer(it)?.let { t -> outList.add(t) } }
+                }
+                for (v in element.values) {
+                    extractWebPlaylistItems(v, outList)
+                }
+            }
+            is kotlinx.serialization.json.JsonArray -> {
+                for (it in element) {
+                    extractWebPlaylistItems(it, outList)
+                }
+            }
+            else -> {}
+        }
+    }
+
+    private fun extractWebContinuationToken(element: kotlinx.serialization.json.JsonElement): String? {
+        when (element) {
+            is kotlinx.serialization.json.JsonObject -> {
+                val tok1 = element["continuationItemViewModel"]?.jsonObject
+                    ?.get("continuationCommand")?.jsonObject
+                    ?.get("innertubeCommand")?.jsonObject
+                    ?.get("continuationCommand")?.jsonObject
+                    ?.get("token").textOrNull()
+                if (!tok1.isNullOrBlank()) return tok1
+
+                val tok2 = element["continuationItemRenderer"]?.jsonObject
+                    ?.get("continuationEndpoint")?.jsonObject
+                    ?.get("continuationCommand")?.jsonObject
+                    ?.get("token").textOrNull()
+                if (!tok2.isNullOrBlank()) return tok2
+
+                for (v in element.values) {
+                    val sub = extractWebContinuationToken(v)
+                    if (sub != null) return sub
+                }
+            }
+            is kotlinx.serialization.json.JsonArray -> {
+                for (it in element) {
+                    val sub = extractWebContinuationToken(it)
+                    if (sub != null) return sub
+                }
+            }
+            else -> {}
+        }
+        return null
     }
 
     private fun parseMusicSearchResults(jsonString: String): List<SieloTrack> {
@@ -3018,10 +3362,12 @@ class InnerTubeClient @Inject constructor(
 
             // Check all text runs in subtitle for forbidden content types (Episode, Video, Podcast, etc.)
             val allSubtitleTexts = secondColRuns?.mapNotNull { it.jsonObject["text"]?.jsonPrimitive?.content?.trim() } ?: emptyList()
-            for (text in allSubtitleTexts) {
-                val lower = text.lowercase()
-                if (FORBIDDEN_SUBTITLES.contains(lower) || lower.startsWith("episode") || lower.startsWith("video")) {
-                    return null
+            if (!isAlbumOrPlaylist) {
+                for (text in allSubtitleTexts) {
+                    val lower = text.lowercase()
+                    if (FORBIDDEN_SUBTITLES.contains(lower) || lower.startsWith("episode") || lower.startsWith("video")) {
+                        return null
+                    }
                 }
             }
 

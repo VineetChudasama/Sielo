@@ -16,18 +16,21 @@ android {
         applicationId = "com.sielo.music"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1156
-        versionName = "11.5.6"
+        versionCode = 1160
+        versionName = "11.6.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
         getByName("debug") {
-            storeFile = file("${rootDir}/sielo-debug.keystore")
-            storePassword = "android"
-            keyAlias = "sielodebugkey"
-            keyPassword = "android"
+            val debugKeystoreFile = file("${rootDir}/sielo-debug.keystore")
+            if (debugKeystoreFile.exists()) {
+                storeFile = debugKeystoreFile
+                storePassword = "android"
+                keyAlias = "sielodebugkey"
+                keyPassword = "android"
+            }
             enableV1Signing = true
             enableV2Signing = true
         }
@@ -140,15 +143,26 @@ dependencies {
     androidTestImplementation(libs.androidx.espresso.core)
 }
 
-tasks.matching { it.name == "assembleDebug" }.configureEach {
+tasks.matching { it.name in setOf("assembleDebug", "assembleRelease") }.configureEach {
+    val isReleaseTask = name == "assembleRelease"
     doLast {
-        val apkFile = file("${layout.buildDirectory.asFile.get()}/outputs/apk/debug/app-debug.apk")
-        if (apkFile.exists()) {
-            val rootApk = file("${rootDir}/${android.defaultConfig.versionName}.apk")
-            val rootApkPrefixed = file("${rootDir}/Sielo_${android.defaultConfig.versionName}.apk")
-            apkFile.copyTo(rootApk, overwrite = true)
-            apkFile.copyTo(rootApkPrefixed, overwrite = true)
-            println("APK successfully copied to: ${rootApk.absolutePath} and ${rootApkPrefixed.absolutePath}")
+        val buildDir = layout.buildDirectory.asFile.get()
+        if (isReleaseTask) {
+            val apkFile = file("$buildDir/outputs/apk/release/app-release.apk").takeIf { it.exists() }
+            if (apkFile != null) {
+                val releaseRootApk = file("${rootDir}/Sielo_${android.defaultConfig.versionName}_Release.apk")
+                apkFile.copyTo(releaseRootApk, overwrite = true)
+                println("Release APK successfully copied to: ${releaseRootApk.absolutePath}")
+            }
+        } else {
+            val apkFile = file("$buildDir/outputs/apk/debug/app-debug.apk").takeIf { it.exists() }
+            if (apkFile != null) {
+                val rootApk = file("${rootDir}/${android.defaultConfig.versionName}.apk")
+                val rootApkPrefixed = file("${rootDir}/Sielo_${android.defaultConfig.versionName}.apk")
+                apkFile.copyTo(rootApk, overwrite = true)
+                apkFile.copyTo(rootApkPrefixed, overwrite = true)
+                println("Debug update APK successfully copied to: ${rootApk.absolutePath} and ${rootApkPrefixed.absolutePath}")
+            }
         }
     }
 }

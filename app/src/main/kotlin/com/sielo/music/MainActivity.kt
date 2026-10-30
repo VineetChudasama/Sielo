@@ -265,7 +265,7 @@ class MainActivity : ComponentActivity() {
                                             }
 
                                             // 3. Listen Together Deep Link: /listen/{roomId} or /room/{roomId} or /join/{roomId}
-                                            firstSegment == "listen" || firstSegment == "room" || firstSegment == "join" || uriStr.contains("listen") || uriStr.contains("room") -> {
+                                            firstSegment == "echo" || firstSegment == "listen" || firstSegment == "room" || firstSegment == "join" || firstSegment == "orbit" || uriStr.contains("echo") || uriStr.contains("listen") || uriStr.contains("room") || uriStr.contains("orbit") -> {
                                                 val roomKey = uri.getQueryParameter("key").orEmpty()
                                                 val success = listenTogetherViewModel.joinRoom(uriStr, roomKey, listenTogetherViewModel.getSavedUserName())
                                                 if (success) {

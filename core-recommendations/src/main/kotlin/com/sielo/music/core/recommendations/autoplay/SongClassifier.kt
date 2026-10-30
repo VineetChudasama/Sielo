@@ -226,6 +226,25 @@ object SongClassifier {
         return SongLanguage.ENGLISH
     }
 
+    fun isVibeCompatible(seedVibe: SongVibe, candidateVibe: SongVibe): Boolean {
+        if (seedVibe == candidateVibe) return true
+        return when (seedVibe) {
+            SongVibe.ROMANTIC, SongVibe.SMOOTH_CALM, SongVibe.LOFI -> {
+                // Soft-toned & love songs: strictly prevent hard-toned rap, hip-hop, or high-energy party EDM
+                candidateVibe != SongVibe.RAP_HIPHOP && candidateVibe != SongVibe.ENERGETIC_PARTY
+            }
+            SongVibe.RAP_HIPHOP -> {
+                // Hard rap & hip-hop: do not inject slow acoustic calm or love ballads into high-energy flows
+                candidateVibe != SongVibe.SMOOTH_CALM && candidateVibe != SongVibe.ROMANTIC
+            }
+            SongVibe.ENERGETIC_PARTY -> {
+                // Energetic party & EDM: keep tempo up, do not inject slow calm acoustic or sad lofi
+                candidateVibe != SongVibe.SMOOTH_CALM && candidateVibe != SongVibe.LOFI
+            }
+            SongVibe.POP -> true
+        }
+    }
+
     fun detectVibe(track: SieloTrack): SongVibe {
         val title = track.title.lowercase(Locale.ROOT)
         val artist = track.artist.lowercase(Locale.ROOT)

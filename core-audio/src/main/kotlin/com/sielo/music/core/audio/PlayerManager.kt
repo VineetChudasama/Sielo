@@ -1,1745 +1,2087 @@
-package com.sielo.music.core.audio
-
-import android.content.ComponentName
-import android.content.Context
-import android.util.Log
-import androidx.annotation.OptIn
-import androidx.core.net.toUri
-import androidx.media3.common.MediaItem
-import androidx.media3.common.MediaMetadata
-import androidx.media3.common.Player
-import androidx.media3.common.util.UnstableApi
-import androidx.media3.session.MediaController
-import androidx.media3.session.SessionToken
-import com.google.common.util.concurrent.MoreExecutors
-import com.sielo.music.core.audio.model.PlaybackState
-import com.sielo.music.core.audio.service.MusicPlaybackService
-import com.sielo.music.core.database.dao.FavoriteTrackDao
-import com.sielo.music.core.database.dao.ListeningHistoryDao
-import com.sielo.music.core.database.dao.RecommendationHistoryDao
-import com.sielo.music.core.database.entity.ListeningEventEntity
-import com.sielo.music.core.network.innertube.InnerTubeClient
-import com.sielo.music.core.network.innertube.JioSaavnSongArtworkResolver
-import com.sielo.music.core.network.models.SieloTrack
-import com.sielo.music.core.recommendations.autoplay.AutoplayQueueEngine
-import com.sielo.music.core.recommendations.autoplay.AutoplaySession
-import com.sielo.music.core.recommendations.autoplay.CuratedArtistClusters
-import com.sielo.music.core.recommendations.autoplay.SongClassifier
-import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
-import javax.inject.Inject
-import javax.inject.Singleton
-
-import androidx.core.content.ContextCompat
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
-import java.net.URI
-
-enum class QueueScope {
-    OPEN,        // Standard queue: autoplay and general recommendations enabled
-    ALBUM_ONLY,  // Album playback: strict queue containing songs from this album only
-    ARTIST_ONLY  // Artist radio playback: queue consisting of songs of this artist only
-}
-
-@OptIn(UnstableApi::class)
-@Singleton
-class PlayerManager @Inject constructor(
-    @ApplicationContext private val context: Context,
-    private val innerTubeClient: InnerTubeClient,
-    private val listeningHistoryDao: ListeningHistoryDao,
-    private val favoriteTrackDao: FavoriteTrackDao,
-    private val recommendationHistoryDao: RecommendationHistoryDao,
-    private val autoplayQueueEngine: AutoplayQueueEngine,
-    private val autoplaySession: AutoplaySession,
-    private val listeningEventDispatcher: com.sielo.music.core.recommendations.events.ListeningEventDispatcher
-) {
-    private val json = Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true }
-    private val _playbackState = MutableStateFlow(PlaybackState())
-    val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
-
-    private val songsPlayedToday = mutableSetOf<String>()
-
-    @Volatile
-    var currentlyLoadingTrackId: String? = null
-        private set
-
-    private var currentQueueScope: QueueScope = QueueScope.OPEN
-    private var scopeArtistName: String? = null
-
-    fun playAlbum(track: SieloTrack, queue: List<SieloTrack>) {
-        currentQueueScope = QueueScope.ALBUM_ONLY
-        scopeArtistName = null
-        autoplayJob?.cancel()
-        playTrack(track, queue, resetScope = false)
-    }
-
-    fun playArtistRadio(track: SieloTrack, queue: List<SieloTrack>, artistName: String) {
-        currentQueueScope = QueueScope.ARTIST_ONLY
-        scopeArtistName = artistName
-        autoplayJob?.cancel()
-        playTrack(track, queue, resetScope = false)
-    }
-
-    private var mediaController: MediaController? = null
-    private val scope = CoroutineScope(Dispatchers.Main + Job())
-    private var progressTrackerJob: Job? = null
-    private var currentEventId: Long? = null
-    private var currentTrackAccumulatedPlayedMs: Long = 0L
-    private var hasRecordedPlayThreshold: Boolean = false
-    private var currentTrackingTrack: SieloTrack? = null
-    private var lastTrackingTimestamp: Long = 0L
-    private var lastDbFlushTimestamp: Long = 0L
-    private var autoplayJob: Job? = null
-    private var prefetchJob: Job? = null
-    private val autoplayMutex = Mutex()
-    private var originalQueue: List<SieloTrack>? = null
-
-    // Behavioral recommendation tracking on songs in real-time
-    private val penalizedSongIds = mutableSetOf<String>()
-    private val favoredSongIds = mutableSetOf<String>()
-    private val favoredArtists = mutableMapOf<String, Int>()
-    private val repeatPlayCount = mutableMapOf<String, Int>()
-
-    var isPrivateListeningEnabled: Boolean = false
-        set(value) {
-            field = value
-            listeningEventDispatcher.isPrivateListeningEnabled = value
-        }
-    var isAutoplayEnabled: Boolean = true
-
-    var onTrackPlayedTasteListener: ((artist: String, albumOrGenre: String?) -> Unit)? = null
-    var userTasteSeedsProvider: (() -> List<String>)? = null
-
-    companion object {
-        private const val PREFS_NAME = "sielo_player_state"
-        private const val KEY_TRACK = "last_track"
-        private const val KEY_QUEUE = "last_queue"
-        private const val KEY_QUEUE_INDEX = "last_queue_index"
-        private const val KEY_POSITION_MS = "last_position_ms"
-        private const val KEY_DURATION_MS = "last_duration_ms"
-        private const val KEY_SHUFFLE = "last_shuffle"
-    }
-
-    init {
-        MusicPlaybackService.skipNextListener = { skipNext() }
-        MusicPlaybackService.skipPreviousListener = { skipPrevious() }
-        restorePlaybackState()
-        scope.launch {
-            getController()
-            withContext(Dispatchers.IO) {
-                try {
-                    listeningHistoryDao.sanitizeLegacyRecords()
-                    listeningHistoryDao.purgeSubThresholdRecords()
-                } catch (_: Exception) {}
-            }
-        }
-    }
-
-    private fun restorePlaybackState() {
-        try {
-            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val trackJson = prefs.getString(KEY_TRACK, null)
-            val queueJson = prefs.getString(KEY_QUEUE, null)
-            val queueIndex = prefs.getInt(KEY_QUEUE_INDEX, 0)
-            val positionMs = prefs.getLong(KEY_POSITION_MS, 0L)
-            val durationMs = prefs.getLong(KEY_DURATION_MS, 0L)
-            val isShuffle = prefs.getBoolean(KEY_SHUFFLE, false)
-
-            if (!trackJson.isNullOrBlank()) {
-                val track = json.decodeFromString<SieloTrack>(trackJson)
-                val queue = if (!queueJson.isNullOrBlank()) {
-                    try {
-                        json.decodeFromString<List<SieloTrack>>(queueJson)
-                    } catch (_: Exception) {
-                        listOf(track)
-                    }
-                } else {
-                    listOf(track)
-                }
-
-                _playbackState.update {
-                    it.copy(
-                        currentTrack = track,
-                        queue = queue,
-                        queueIndex = queueIndex.coerceIn(0, (queue.size - 1).coerceAtLeast(0)),
-                        currentPositionMs = positionMs,
-                        durationMs = if (durationMs > 0L) durationMs else (track.durationSeconds * 1000L),
-                        isPlaying = false,
-                        isBuffering = false,
-                        isShuffle = isShuffle
-                    )
-                }
-
-                if (track.thumbnailUrl.isNullOrBlank()) {
-                    reloadCurrentTrackArtwork()
-                }
-
-                val remainingUpcoming = queue.size - 1 - queueIndex
-                if (remainingUpcoming < 20) {
-                    triggerAutoplayGeneration(track, isReseed = true)
-                }
-            }
-        } catch (e: Exception) {
-            android.util.Log.e("SieloAudio", "Error restoring playback state: ${e.message}", e)
-        }
-    }
-
-    fun reloadCurrentTrackArtwork() {
-        scope.launch(Dispatchers.IO) {
-            val cur = _playbackState.value.currentTrack ?: return@launch
-            try {
-                val newArt = JioSaavnSongArtworkResolver.resolveSongArtwork(cur.title, cur.artist)
-                if (!newArt.isNullOrBlank() && newArt != cur.thumbnailUrl) {
-                    val updated = cur.copy(thumbnailUrl = newArt)
-                    _playbackState.update { it.copy(currentTrack = updated) }
-                    savePlaybackState(
-                        updated,
-                        _playbackState.value.queue,
-                        _playbackState.value.queueIndex,
-                        _playbackState.value.currentPositionMs,
-                        _playbackState.value.durationMs
-                    )
-                }
-            } catch (_: Exception) {}
-        }
-    }
-
-    fun saveCurrentPlaybackPosition(forceSync: Boolean = false) {
-        try {
-            val ctrl = mediaController
-            val pos = ctrl?.currentPosition ?: _playbackState.value.currentPositionMs
-            val dur = ctrl?.duration?.coerceAtLeast(0L) ?: _playbackState.value.durationMs
-            if (pos > 0L) {
-                val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                val editor = prefs.edit()
-                    .putLong(KEY_POSITION_MS, pos)
-                    .putLong(KEY_DURATION_MS, dur)
-                if (forceSync) {
-                    editor.commit()
-                } else {
-                    editor.apply()
-                }
-                _playbackState.update { it.copy(currentPositionMs = pos, durationMs = dur) }
-            }
-        } catch (_: Exception) {}
-    }
-
-    private fun savePlaybackState(
-        track: SieloTrack?,
-        queue: List<SieloTrack>,
-        queueIndex: Int,
-        positionMs: Long,
-        durationMs: Long
-    ) {
-        try {
-            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            prefs.edit().apply {
-                if (track != null) {
-                    putString(KEY_TRACK, json.encodeToString(track))
-                    putString(KEY_QUEUE, json.encodeToString(queue))
-                    putInt(KEY_QUEUE_INDEX, queueIndex)
-                    putLong(KEY_POSITION_MS, positionMs)
-                    putLong(KEY_DURATION_MS, durationMs)
-                    putBoolean(KEY_SHUFFLE, _playbackState.value.isShuffle)
-                }
-                apply()
-            }
-        } catch (e: Exception) {
-            android.util.Log.e("SieloAudio", "Error saving playback state: ${e.message}", e)
-        }
-    }
-
-    private fun savePositionOnly(positionMs: Long, durationMs: Long) {
-        try {
-            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            prefs.edit()
-                .putLong(KEY_POSITION_MS, positionMs)
-                .putLong(KEY_DURATION_MS, durationMs)
-                .apply()
-        } catch (_: Exception) {}
-    }
-
-    /**
-     * Exports a lightweight serializable snapshot of the current playback state and queue for cloud sync.
-     */
-    fun getPlaybackSnapshot(): Map<String, Any>? {
-        val state = _playbackState.value
-        val track = state.currentTrack ?: return null
-        return try {
-            val trackJson = json.encodeToString(track)
-            val queueJson = json.encodeToString(state.queue.take(50)) // preserve current queue window
-            mapOf(
-                "track" to trackJson,
-                "queue" to queueJson,
-                "queueIndex" to state.queueIndex,
-                "positionMs" to state.currentPositionMs,
-                "durationMs" to state.durationMs,
-                "isShuffle" to state.isShuffle,
-                "updatedAt" to System.currentTimeMillis()
-            )
-        } catch (e: Exception) {
-            Log.w("SieloAudio", "Failed to build playback snapshot: ${e.message}")
-            null
-        }
-    }
-
-    /**
-     * Restores playback state from cloud snapshot into local storage and memory.
-     * Guarantees isPlaying remains false so playback does NOT auto-start unexpectedly on login.
-     */
-    fun restoreFromCloudSnapshot(snapshot: Map<String, Any>) {
-        try {
-            val trackJson = snapshot["track"] as? String
-            val queueJson = snapshot["queue"] as? String
-            val queueIndex = (snapshot["queueIndex"] as? Number)?.toInt() ?: 0
-            val positionMs = (snapshot["positionMs"] as? Number)?.toLong() ?: 0L
-            val durationMs = (snapshot["durationMs"] as? Number)?.toLong() ?: 0L
-            val isShuffle = snapshot["isShuffle"] as? Boolean ?: false
-
-            if (!trackJson.isNullOrBlank()) {
-                val track = json.decodeFromString<SieloTrack>(trackJson)
-                val queue = if (!queueJson.isNullOrBlank()) {
-                    try {
-                        json.decodeFromString<List<SieloTrack>>(queueJson)
-                    } catch (_: Exception) {
-                        listOf(track)
-                    }
-                } else {
-                    listOf(track)
-                }
-
-                savePlaybackState(track, queue, queueIndex, positionMs, durationMs)
-
-                _playbackState.update {
-                    it.copy(
-                        currentTrack = track,
-                        queue = queue,
-                        queueIndex = queueIndex.coerceIn(0, (queue.size - 1).coerceAtLeast(0)),
-                        currentPositionMs = positionMs,
-                        durationMs = if (durationMs > 0L) durationMs else (track.durationSeconds * 1000L),
-                        isPlaying = false,
-                        isBuffering = false,
-                        isShuffle = isShuffle
-                    )
-                }
-                Log.i("SieloAudio", "Restored playback state from cloud snapshot: ${track.title} by ${track.artist}")
-            }
-        } catch (e: Exception) {
-            Log.e("SieloAudio", "Error restoring playback state from cloud: ${e.message}", e)
-        }
-    }
-
-    private suspend fun getController(): MediaController? = suspendCancellableCoroutine { cont ->
-        val current = mediaController
-        if (current != null) {
-            cont.resume(current) {}
-            return@suspendCancellableCoroutine
-        }
-        val sessionToken = SessionToken(context, ComponentName(context, MusicPlaybackService::class.java))
-        val future = MediaController.Builder(context, sessionToken).buildAsync()
-        future.addListener({
-            try {
-                val ctrl = future.get()
-                mediaController = ctrl
-                setupPlayerListeners()
-                if (cont.isActive) {
-                    cont.resume(ctrl) {}
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("SieloAudio", "Failed to connect MediaController: ${e.message}", e)
-                if (cont.isActive) {
-                    cont.resume(null) {}
-                }
-            }
-        }, ContextCompat.getMainExecutor(context))
-    }
-
-    private fun setupPlayerListeners() {
-        mediaController?.repeatMode = if (_playbackState.value.isLooping) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
-        mediaController?.addListener(object : Player.Listener {
-            override fun onPositionDiscontinuity(
-                oldPosition: Player.PositionInfo,
-                newPosition: Player.PositionInfo,
-                reason: Int
-            ) {
-                if (_playbackState.value.isLooping && (reason == Player.DISCONTINUITY_REASON_AUTO_TRANSITION || newPosition.positionMs < oldPosition.positionMs)) {
-                    if (hasRecordedPlayThreshold) {
-                        flushCurrentListeningDuration()
-                        val cur = _playbackState.value.currentTrack
-                        if (cur != null) {
-                            recordTrackCompleted(cur)
-                        }
-                    }
-                    currentTrackAccumulatedPlayedMs = 0L
-                    hasRecordedPlayThreshold = false
-                    currentEventId = null
-                    lastTrackingTimestamp = System.currentTimeMillis()
-                    lastDbFlushTimestamp = System.currentTimeMillis()
-                    _playbackState.update { it.copy(currentPositionMs = 0L) }
-                }
-            }
-
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                val currentMediaId = mediaController?.currentMediaItem?.mediaId
-                val currentTrackId = _playbackState.value.currentTrack?.id
-                if (currentMediaId != null && currentTrackId != null && currentMediaId != currentTrackId) {
-                    return
-                }
-                _playbackState.update { it.copy(isPlaying = isPlaying, isBuffering = false) }
-                if (isPlaying) {
-                    startProgressTracking()
-                } else {
-                    stopProgressTracking()
-                    flushCurrentListeningDuration()
-                    mediaController?.let {
-                        savePositionOnly(it.currentPosition, it.duration.coerceAtLeast(0L))
-                    }
-                }
-            }
-
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                val currentMediaId = mediaController?.currentMediaItem?.mediaId
-                val currentTrackId = _playbackState.value.currentTrack?.id
-                if (currentMediaId != null && currentTrackId != null && currentMediaId != currentTrackId) {
-                    return
-                }
-                val isBuffering = playbackState == Player.STATE_BUFFERING
-                val dur = mediaController?.duration?.coerceAtLeast(0L) ?: 0L
-                _playbackState.update { 
-                    it.copy(
-                        isBuffering = isBuffering,
-                        durationMs = if (dur > 0L) dur else it.durationMs
-                    )
-                }
-
-                if (playbackState == Player.STATE_READY && dur > 0L) {
-                    val cur = _playbackState.value.currentTrack
-                    if (cur != null) {
-                        scope.launch(Dispatchers.IO) {
-                            try {
-                                listeningHistoryDao.updateSongDurationBySongId(cur.id, dur)
-                            } catch (_: Exception) {}
-                        }
-                    }
-                }
-
-                if (playbackState == Player.STATE_ENDED) {
-                    if (hasRecordedPlayThreshold) {
-                        flushCurrentListeningDuration()
-                        val cur = _playbackState.value.currentTrack
-                        if (cur != null) {
-                            recordTrackCompleted(cur)
-                        }
-                    }
-                    if (_playbackState.value.isLooping) {
-                        // Loop: restart the current track from the beginning
-                        val ctrl = mediaController
-                        if (ctrl != null) {
-                            ctrl.seekTo(0L)
-                            ctrl.play()
-                            currentTrackAccumulatedPlayedMs = 0L
-                            hasRecordedPlayThreshold = false
-                            currentEventId = null
-                            lastTrackingTimestamp = System.currentTimeMillis()
-                            lastDbFlushTimestamp = System.currentTimeMillis()
-                            _playbackState.update { it.copy(currentPositionMs = 0L) }
-                        }
-                    } else {
-                        skipNext()
-                    }
-                }
-            }
-
-            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                if (mediaItem == null) return
-                if (_playbackState.value.isLooping) {
-                    Log.d("SieloPlayer", "onMediaItemTransition ignored because looping is active")
-                    return
-                }
-                val mediaId = mediaItem.mediaId
-                val currentState = _playbackState.value
-                val cur = currentState.currentTrack
-                if (mediaId == cur?.id) return
-
-                val queue = currentState.queue
-                val targetIndex = queue.indexOfFirst { it.id == mediaId }
-                if (targetIndex != -1) {
-                    val nextTrack = queue[targetIndex]
-                    Log.d("SieloPlayer", "Seamless onMediaItemTransition to: ${nextTrack.title} (reason=$reason)")
-
-                    val today = java.time.LocalDate.now(java.time.ZoneId.systemDefault()).toString()
-                    songsPlayedToday.add(nextTrack.id)
-                    scope.launch(Dispatchers.IO) {
-                        try {
-                            recommendationHistoryDao.markRecommended(listOf(nextTrack.id), today)
-                        } catch (_: Exception) {}
-                    }
-
-                    if (hasRecordedPlayThreshold) {
-                        flushCurrentListeningDuration()
-                        if (cur != null) {
-                            recordTrackCompleted(cur)
-                        }
-                    }
-
-                    currentTrackAccumulatedPlayedMs = 0L
-                    hasRecordedPlayThreshold = false
-                    currentEventId = null
-                    currentTrackingTrack = nextTrack
-                    lastTrackingTimestamp = System.currentTimeMillis()
-                    lastDbFlushTimestamp = System.currentTimeMillis()
-
-                    val expectedDurationMs = if (nextTrack.durationSeconds > 0) nextTrack.durationSeconds * 1000L else 0L
-                    listeningEventDispatcher.recordPlayStarted(nextTrack, currentQueueScope.name.lowercase())
-                    _playbackState.update {
-                        it.copy(
-                            currentTrack = nextTrack,
-                            queueIndex = targetIndex,
-                            currentPositionMs = 0L,
-                            durationMs = expectedDurationMs,
-                            isPlaying = true,
-                            isBuffering = false
-                        )
-                    }
-
-                    savePlaybackState(nextTrack, queue, targetIndex, 0L, expectedDurationMs)
-
-                    // Prune played items from ExoPlayer so current item is index 0
-                    mediaController?.let { ctrl ->
-                        if (ctrl.currentMediaItemIndex > 0) {
-                            try {
-                                ctrl.removeMediaItems(0, ctrl.currentMediaItemIndex)
-                            } catch (_: Exception) {}
-                        }
-                    }
-
-                    // Replenish dynamic queue if running low
-                    val remainingUpcoming = queue.size - 1 - targetIndex
-                    if (remainingUpcoming < 20) {
-                        if (currentQueueScope == QueueScope.OPEN) {
-                            triggerAutoplayGeneration(nextTrack, isReseed = false)
-                        } else if (currentQueueScope == QueueScope.ARTIST_ONLY && !scopeArtistName.isNullOrBlank()) {
-                            triggerArtistAutoplayGeneration(nextTrack, scopeArtistName!!)
-                        }
-                    }
-
-                    // Preload next upcoming track into ExoPlayer
-                    preloadNextTrack(targetIndex, queue)
-                }
-            }
-
-            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                val curTrack = _playbackState.value.currentTrack
-                val schemeHost = try {
-                    val uri = mediaController?.currentMediaItem?.localConfiguration?.uri
-                    if (uri != null) "${uri.scheme}://${uri.host}" else "unknown"
-                } catch (_: Exception) { "unknown" }
-
-                Log.e("SieloPlayer", "Player Error on trackId=${curTrack?.id} (host=$schemeHost): ${error.errorCodeName} - ${error.message}")
-                _playbackState.update { it.copy(isBuffering = false, isPlaying = false) }
-                stopProgressTracking()
-                flushCurrentListeningDuration()
-
-                if (curTrack != null && !retryAttemptedForCurrentTrack) {
-                    retryAttemptedForCurrentTrack = true
-                    Log.i("SieloPlayer", "Retrying trackId=${curTrack.id} once with fresh stream URL resolution...")
-                    playTrack(curTrack, _playbackState.value.queue, seekToMs = _playbackState.value.currentPositionMs, autoPlay = true)
-                } else {
-                    retryAttemptedForCurrentTrack = false
-                }
-            }
-        })
-    }
-
-    private var playbackGeneration: Long = 0L
-    private var retryAttemptedForCurrentTrack = false
-
-    fun playTrack(
-        track: SieloTrack,
-        queue: List<SieloTrack> = listOf(track),
-        seekToMs: Long = 0L,
-        autoPlay: Boolean = true,
-        resetScope: Boolean = true
-    ) {
-        if (resetScope) {
-            currentQueueScope = QueueScope.OPEN
-            scopeArtistName = null
-        }
-
-        val isCached = OfflineCacheManager.isCached(context, track.id)
-        if (!com.sielo.music.core.network.NetworkHelper.isOnline(context) && !isCached) {
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                android.widget.Toast.makeText(
-                    context,
-                    "No internet connection. This song is not cached for offline replay.",
-                    android.widget.Toast.LENGTH_SHORT
-                ).show()
-            }
-            return
-        }
-
-        val generation = ++playbackGeneration
-        currentlyLoadingTrackId = track.id
-
-        scope.launch {
-            // Pause previous playback immediately so old audio stops,
-            // but DO NOT clear media items or stop player yet to prevent the notification tab from vanishing!
-            val ctrl = mediaController ?: getController()
-            if (ctrl != null) {
-                try {
-                    ctrl.pause()
-                } catch (_: Exception) {}
-            }
-
-            if (generation != playbackGeneration) {
-                Log.d("SieloPlayer", "Playback request $generation superseded by $playbackGeneration before stream resolution.")
-                return@launch
-            }
-
-            // Flush previous tracking
-            flushCurrentListeningDuration()
-            currentTrackAccumulatedPlayedMs = 0L
-            lastTrackingTimestamp = System.currentTimeMillis()
-            lastDbFlushTimestamp = System.currentTimeMillis()
-
-            val isResumingCurrent = (track.id == _playbackState.value.currentTrack?.id)
-            val effectiveSeekToMs = if (seekToMs > 0L) {
-                seekToMs
-            } else if (isResumingCurrent && !autoPlay && _playbackState.value.currentPositionMs > 0L) {
-                _playbackState.value.currentPositionMs
-            } else {
-                0L
-            }
-
-            val today = java.time.LocalDate.now(java.time.ZoneId.systemDefault()).toString()
-            songsPlayedToday.add(track.id)
-            scope.launch(Dispatchers.IO) {
-                try {
-                    recommendationHistoryDao.markRecommended(listOf(track.id), today)
-                } catch (_: Exception) {}
-            }
-
-            val currentQueue = _playbackState.value.queue
-            val prevIndex = _playbackState.value.queueIndex
-            val isSameQueue = currentQueue.size == queue.size && currentQueue.zip(queue).all { it.first.id == it.second.id }
-
-            val originalIdx = queue.indexOf(track).coerceAtLeast(0)
-            originalQueue = queue
-            val activeQueue = if (resetScope && currentQueueScope == QueueScope.OPEN) {
-                listOf(track)
-            } else if (isSameQueue) {
-                // Keep the exact same queue order — never re-shuffle upcoming tracks
-                queue
-            } else if (_playbackState.value.isShuffle && queue.size > 1) {
-                val pastTracks = queue.take(originalIdx)
-                val playNextCount = _playbackState.value.playNextCount.coerceAtLeast(0)
-                val playNextStart = (originalIdx + 1).coerceAtMost(queue.size)
-                val playNextEnd = (originalIdx + 1 + playNextCount).coerceAtMost(queue.size)
-                val playNextTracks = queue.subList(playNextStart, playNextEnd)
-                val dynamicTracks = queue.drop(playNextEnd).shuffled()
-                pastTracks + listOf(track) + playNextTracks + dynamicTracks
-            } else {
-                queue
-            }
-            val index = activeQueue.indexOf(track).coerceAtLeast(0)
-            val expectedDurationMs = if (track.durationSeconds > 0) track.durationSeconds * 1000L else 0L
-
-            val newPlayNextCount = if (!isSameQueue) 0 else {
-                if (index > prevIndex) {
-                    kotlin.math.max(0, _playbackState.value.playNextCount - (index - prevIndex))
-                } else {
-                    _playbackState.value.playNextCount
-                }
-            }
-
-            // Immediately set currentTrack to the target new track so UI updates instantly
-            _playbackState.update {
-                it.copy(
-                    currentTrack = track,
-                    queue = activeQueue,
-                    queueIndex = index,
-                    currentPositionMs = effectiveSeekToMs,
-                    durationMs = expectedDurationMs,
-                    isBuffering = true,
-                    isPlaying = autoPlay,
-                    playNextCount = newPlayNextCount
-                )
-            }
-
-            // Save durable metadata only (NEVER save temporary CDN URLs)
-            savePlaybackState(track, activeQueue, index, effectiveSeekToMs, expectedDurationMs)
-
-            // Track autoplay session state & trigger background queue generation
-            val isKnownAutoplayTrack = autoplaySession.isTrackInGeneratedQueue(track.id)
-            if (isKnownAutoplayTrack) {
-                autoplaySession.onTrackPlaying(track)
-            }
-
-            if (currentQueueScope == QueueScope.OPEN) {
-                val shouldReseed = resetScope || !isKnownAutoplayTrack || (activeQueue.size <= 1 || autoplaySession.currentSeed.value?.id != track.id)
-                val remainingUpcoming = activeQueue.size - 1 - index
-                if (shouldReseed || remainingUpcoming < 20) {
-                    triggerAutoplayGeneration(track, isReseed = shouldReseed)
-                }
-            } else if (currentQueueScope == QueueScope.ARTIST_ONLY && !scopeArtistName.isNullOrBlank()) {
-                val remainingUpcoming = activeQueue.size - 1 - index
-                if (remainingUpcoming < 20) {
-                    triggerArtistAutoplayGeneration(track, scopeArtistName!!)
-                }
-            }
-
-            if (hasRecordedPlayThreshold) {
-                flushCurrentListeningDuration()
-            }
-            currentTrackAccumulatedPlayedMs = 0L
-            hasRecordedPlayThreshold = false
-            currentEventId = null
-            currentTrackingTrack = track
-            lastTrackingTimestamp = System.currentTimeMillis()
-            lastDbFlushTimestamp = System.currentTimeMillis()
-
-            Log.d("SieloPlayer", "Stream resolution started: trackId=${track.id}, title='${track.title}', generation=$generation")
-
-            // Check offline cache first for instant, network-free playback
-            val localOfflineUri = OfflineCacheManager.getLocalTrackUri(context, track.id)
-            val remoteUrl = if (localOfflineUri != null) {
-                Log.d("SieloPlayer", "Using offline cached audio for trackId=${track.id}: $localOfflineUri")
-                localOfflineUri
-            } else {
-                try {
-                    innerTubeClient.getStreamUrl(track.id, track.title, track.artist)
-                } catch (e: Exception) {
-                    Log.w("SieloPlayer", "Failed stream resolution (device may be offline): ${e.message}")
-                    null
-                }
-            }
-
-            if (generation != playbackGeneration) {
-                Log.d("SieloPlayer", "Stream resolution for generation $generation completed but superseded by $playbackGeneration. Aborting.")
-                return@launch
-            }
-
-            if (!remoteUrl.isNullOrBlank()) {
-                if (!remoteUrl.startsWith("file:")) {
-                    OfflineCacheManager.autoCacheTrack(context, track, remoteUrl)
-                }
-                val schemeHost = try {
-                    val uri = URI(remoteUrl)
-                    "${uri.scheme}://${uri.host}"
-                } catch (_: Exception) { "https://googlevideo.com" }
-
-                Log.d("SieloPlayer", "Stream resolved for ${track.id}: $schemeHost/...")
-
-                val mediaMetadata = MediaMetadata.Builder()
-                    .setTitle(track.title)
-                    .setArtist(track.artist)
-                    .setAlbumTitle(track.album)
-                    .setArtworkUri(track.thumbnailUrl?.toUri())
-                    .build()
-
-                val mediaItem = MediaItem.Builder()
-                    .setMediaId(track.id)
-                    .setUri(remoteUrl)
-                    .setMediaMetadata(mediaMetadata)
-                    .build()
-
-                try {
-                    val activeCtrl = mediaController ?: getController()
-                    if (generation != playbackGeneration) {
-                        Log.d("SieloPlayer", "MediaItem built for $generation but request superseded by $playbackGeneration. Aborting.")
-                        return@launch
-                    }
-
-                    if (activeCtrl != null) {
-                        activeCtrl.run {
-                            repeatMode = if (_playbackState.value.isLooping) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
-                            if (effectiveSeekToMs > 0L) {
-                                setMediaItem(mediaItem, effectiveSeekToMs)
-                            } else {
-                                setMediaItem(mediaItem, true)
-                            }
-                            prepare()
-                        }
-
-                        if (generation != playbackGeneration) {
-                            Log.d("SieloPlayer", "MediaItem committed for $generation but request superseded by $playbackGeneration. Aborting.")
-                            return@launch
-                        }
-
-                        _playbackState.update {
-                            it.copy(
-                                currentTrack = track,
-                                isBuffering = false,
-                                isPlaying = autoPlay
-                            )
-                        }
-
-                        if (autoPlay) {
-                            activeCtrl.play()
-                            listeningEventDispatcher.recordPlayStarted(track, currentQueueScope.name.lowercase())
-                        } else {
-                            activeCtrl.pause()
-                        }
-
-                        retryAttemptedForCurrentTrack = false
-                        currentlyLoadingTrackId = null
-                        Log.d("SieloPlayer", "MediaItem committed and playback started for trackId=${track.id}, generation=$generation")
-
-                        // Preload the next upcoming track directly into ExoPlayer for seamless gapless playback (<1s gap)
-                        preloadNextTrack(index, activeQueue)
-                    } else {
-                        currentlyLoadingTrackId = null
-                        Log.e("SieloPlayer", "MediaController is null, cannot start playback.")
-                        _playbackState.update { it.copy(isBuffering = false, isPlaying = false) }
-                    }
-                } catch (e: Exception) {
-                    currentlyLoadingTrackId = null
-                    Log.e("SieloPlayer", "Error committing MediaItem: ${e.message}", e)
-                    _playbackState.update { it.copy(isBuffering = false, isPlaying = false) }
-                }
-            } else {
-                currentlyLoadingTrackId = null
-                Log.w("SieloPlayer", "Failed to resolve stream URL for trackId=${track.id}")
-                _playbackState.update { it.copy(isBuffering = false, isPlaying = false) }
-            }
-        }
-    }
-
-    private var preloadJob: Job? = null
-
-    private fun preloadNextTrack(currentIndex: Int, queue: List<SieloTrack>) {
-        preloadJob?.cancel()
-        if (_playbackState.value.isLooping) return
-        if (queue.isEmpty()) return
-        val nextIndex = currentIndex + 1
-        if (nextIndex !in queue.indices) return
-        val nextTrack = queue[nextIndex]
-
-        preloadJob = scope.launch(Dispatchers.IO) {
-            delay(1000L) // Wait briefly for current track to start cleanly
-            if (!isActive) return@launch
-            try {
-                val localOfflineUri = OfflineCacheManager.getLocalTrackUri(context, nextTrack.id)
-                val streamUrl = localOfflineUri ?: try {
-                    innerTubeClient.getStreamUrl(nextTrack.id, nextTrack.title, nextTrack.artist)
-                } catch (_: Exception) { null }
-
-                if (!streamUrl.isNullOrBlank() && isActive) {
-                    if (!streamUrl.startsWith("file:")) {
-                        OfflineCacheManager.autoCacheTrack(context, nextTrack, streamUrl)
-                    }
-                    withContext(Dispatchers.Main) {
-                        val ctrl = mediaController ?: return@withContext
-                        // Ensure player has not moved to another track
-                        if (_playbackState.value.queueIndex != currentIndex) return@withContext
-
-                        val alreadyQueued = (0 until ctrl.mediaItemCount).any { idx ->
-                            ctrl.getMediaItemAt(idx).mediaId == nextTrack.id
-                        }
-                        if (!alreadyQueued) {
-                            val mediaMetadata = MediaMetadata.Builder()
-                                .setTitle(nextTrack.title)
-                                .setArtist(nextTrack.artist)
-                                .setAlbumTitle(nextTrack.album)
-                                .setArtworkUri(nextTrack.thumbnailUrl?.toUri())
-                                .build()
-
-                            val nextMediaItem = MediaItem.Builder()
-                                .setMediaId(nextTrack.id)
-                                .setUri(streamUrl)
-                                .setMediaMetadata(mediaMetadata)
-                                .build()
-
-                            // If player has items beyond current, remove them first
-                            val currentItemIdx = ctrl.currentMediaItemIndex
-                            if (ctrl.mediaItemCount > currentItemIdx + 1) {
-                                ctrl.removeMediaItems(currentItemIdx + 1, ctrl.mediaItemCount)
-                            }
-                            ctrl.addMediaItem(nextMediaItem)
-                            Log.d("SieloPlayer", "Successfully preloaded next track into ExoPlayer: ${nextTrack.title}")
-                        }
-                    }
-                }
-
-                // Prefetch one more track URL in background cache
-                val secondNextIndex = nextIndex + 1
-                if (secondNextIndex in queue.indices && isActive) {
-                    val secondTrack = queue[secondNextIndex]
-                    try {
-                        innerTubeClient.getStreamUrl(secondTrack.id, secondTrack.title, secondTrack.artist)
-                    } catch (_: Exception) {}
-                }
-            } catch (e: Exception) {
-                Log.w("SieloPlayer", "Error preloading next track ${nextTrack.id}: ${e.message}")
-            }
-        }
-    }
-
-    private fun triggerAutoplayGeneration(
-        seedTrack: SieloTrack,
-        isReseed: Boolean,
-        autoPlayFirst: Boolean = false
-    ) {
-        if (!isAutoplayEnabled) return
-        autoplayJob?.cancel()
-        autoplayJob = scope.launch(Dispatchers.IO) {
-            autoplayMutex.withLock {
-                try {
-                    val today = java.time.LocalDate.now(java.time.ZoneId.systemDefault()).toString()
-                    val startOfDayMs = java.time.LocalDate.now(java.time.ZoneId.systemDefault())
-                        .atStartOfDay(java.time.ZoneId.systemDefault())
-                        .toInstant()
-                        .toEpochMilli()
-                    val playedTodayFromDb = try {
-                        listeningHistoryDao.getSongIdsPlayedSince(startOfDayMs).toSet()
-                    } catch (_: Exception) {
-                        emptySet()
-                    }
-                    val allPlayedToday = (playedTodayFromDb + autoplaySession.getPlayedSongIds() + songsPlayedToday + seedTrack.id).toSet()
-
-                    // Top songs and artists from listening history (past 30 days) to rank queue with similar songs
-                    val thirtyDaysAgoMs = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000L
-                    val topArtistsHistory = try {
-                        listeningHistoryDao.getTopArtistsSnapshot(thirtyDaysAgoMs, limit = 25)
-                    } catch (_: Exception) {
-                        emptyList()
-                    }
-                    val topSongsHistory = try {
-                        listeningHistoryDao.getTopSongsSnapshot(thirtyDaysAgoMs, limit = 60)
-                    } catch (_: Exception) {
-                        emptyList()
-                    }
-                    val historicalPlayedSongIds = topSongsHistory.map { it.songId }.toSet()
-
-                    val artistPlayFrequency = mutableMapOf<String, Int>()
-                    topArtistsHistory.forEach {
-                        val aName = extractPrimaryArtist(it.artistName).lowercase()
-                        artistPlayFrequency[aName] = (artistPlayFrequency[aName] ?: 0) + it.playCount
-                    }
-
-                    val similarToTopArtists = mutableSetOf<String>()
-                    topArtistsHistory.take(10).forEach { topArt ->
-                        val similarList = CuratedArtistClusters.getSimilarArtists(topArt.artistName, seedTrack)
-                        similarList.forEach { sim ->
-                            similarToTopArtists.add(extractPrimaryArtist(sim).lowercase())
-                        }
-                    }
-
-                    val hardExclusions = allPlayedToday + historicalPlayedSongIds
-
-                    val batch = if (isReseed) {
-                        val reseedContext = autoplaySession.startOrReseedSession(seedTrack)
-                        autoplayQueueEngine.generateBatch(
-                            seedSong = reseedContext.seedSong,
-                            excludedSongIds = hardExclusions + reseedContext.excludedSongIds,
-                            reentryCandidates = reseedContext.reentryCandidates
-                        )
-                    } else {
-                        autoplayQueueEngine.generateBatch(
-                            seedSong = seedTrack,
-                            excludedSongIds = hardExclusions,
-                            reentryCandidates = emptyList()
-                        )
-                    }
-
-                    if (batch.isNotEmpty()) {
-                        autoplaySession.appendBatch(batch)
-                        withContext(Dispatchers.Main) {
-                            var trackToAutoPlay: SieloTrack? = null
-                            var newQueueSnapshot: List<SieloTrack> = emptyList()
-                            _playbackState.update { state ->
-                                val existingIds = state.queue.map { it.id }.toSet()
-                                val currentTrack = state.currentTrack ?: seedTrack
-                                val currentTitle = currentTrack.title.trim()
-                                val currentArtist = currentTrack.artist.trim()
-                                val seedTitle = seedTrack.title.trim()
-                                val newTracks = batch.filter { bTrack ->
-                                    bTrack.id !in existingIds &&
-                                    bTrack.id != currentTrack.id &&
-                                    bTrack.id !in penalizedSongIds &&
-                                    bTrack.id !in hardExclusions &&
-                                    !(bTrack.title.trim().equals(currentTitle, ignoreCase = true) &&
-                                      bTrack.artist.trim().equals(currentArtist, ignoreCase = true)) &&
-                                    !isTitleSimilar(bTrack.title, currentTitle) &&
-                                    !isTitleSimilar(bTrack.title, seedTitle)
-                                }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
-
-                                // Boost and rank tracks based on similarity to songs/artists the user listens to most frequently
-                                val userTasteSeeds = userTasteSeedsProvider?.invoke()?.map { it.trim().lowercase() } ?: emptyList()
-                                val seedVibe = SongClassifier.detectVibe(seedTrack)
-                                val seedLang = SongClassifier.detectLanguage(seedTrack)
-
-                                val affinitySorted = newTracks.sortedByDescending { bTrack ->
-                                    var boost = 0
-                                    val aKey = extractPrimaryArtist(bTrack.artist).lowercase()
-
-                                    // 1. Direct artist frequency from listening history (songs heard frequently)
-                                    val playFreq = artistPlayFrequency[aKey] ?: 0
-                                    boost += (playFreq * 15).coerceAtMost(150)
-
-                                    // 2. Similarity to user's top played artists (cluster match)
-                                    if (aKey in similarToTopArtists) {
-                                        boost += 45
-                                    }
-
-                                    // 3. Behavioral and in-memory repeat listening
-                                    if (bTrack.id in favoredSongIds) boost += 30
-                                    boost += repeatPlayCount.getOrDefault(bTrack.id, 0) * 20
-                                    boost += favoredArtists.getOrDefault(aKey, 0) * 5
-
-                                    // 4. Taste preferences
-                                    if (userTasteSeeds.any { aKey.contains(it) || it.contains(aKey) }) {
-                                        boost += 40
-                                    }
-
-                                    // 5. Vibe & language affinity with seed
-                                    if (SongClassifier.detectLanguage(bTrack) == seedLang) boost += 20
-                                    if (SongClassifier.detectVibe(bTrack) == seedVibe) boost += 15
-
-                                    boost
-                                }
-
-                                val finalNewTracks = if (state.isShuffle) affinitySorted.shuffled() else affinitySorted
-                                val updatedQueue = if (state.queue.isEmpty()) listOf(seedTrack) + finalNewTracks else state.queue + finalNewTracks
-                                newQueueSnapshot = updatedQueue
-                                if (autoPlayFirst && finalNewTracks.isNotEmpty()) {
-                                    trackToAutoPlay = finalNewTracks.first()
-                                }
-                                savePlaybackState(
-                                    state.currentTrack,
-                                    updatedQueue,
-                                    state.queueIndex,
-                                    state.currentPositionMs,
-                                    state.durationMs
-                                )
-                                state.copy(queue = updatedQueue)
-                            }
-
-                            if (trackToAutoPlay != null) {
-                                playTrack(trackToAutoPlay!!, newQueueSnapshot, resetScope = false)
-                            } else {
-                                val state = _playbackState.value
-                                preloadNextTrack(state.queueIndex, state.queue)
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.e("SieloAudio", "Error in triggerAutoplayGeneration: ${e.message}", e)
-                }
-            }
-        }
-    }
-
-    private fun triggerArtistAutoplayGeneration(
-        seedTrack: SieloTrack,
-        artistName: String,
-        autoPlayFirst: Boolean = false
-    ) {
-        autoplayJob?.cancel()
-        autoplayJob = scope.launch(Dispatchers.IO) {
-            autoplayMutex.withLock {
-                try {
-                    val currentQueue = _playbackState.value.queue
-                    val existingIds = currentQueue.map { it.id }.toSet()
-                    val existingKeys = currentQueue.map { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }.toSet()
-
-                    val startOfDayMs = java.time.LocalDate.now(java.time.ZoneId.systemDefault())
-                        .atStartOfDay(java.time.ZoneId.systemDefault())
-                        .toInstant()
-                        .toEpochMilli()
-                    val playedTodayFromDb = try {
-                        listeningHistoryDao.getSongIdsPlayedSince(startOfDayMs).toSet()
-                    } catch (_: Exception) {
-                        emptySet()
-                    }
-                    val allPlayedToday = (playedTodayFromDb + autoplaySession.getPlayedSongIds() + songsPlayedToday + seedTrack.id).toSet()
-
-                    val artistDetails = try {
-                        innerTubeClient.getArtistDetails(artistName)
-                    } catch (_: Exception) { null }
-
-                    val candidates = mutableListOf<SieloTrack>()
-                    if (artistDetails != null) {
-                        candidates.addAll(artistDetails.topSongs)
-                        artistDetails.pastAlbums.forEach { candidates.addAll(it.tracks) }
-                        artistDetails.singles.forEach { candidates.addAll(it.tracks) }
-                    }
-                    if (candidates.size < 15) {
-                        val searchResults = try {
-                            innerTubeClient.search(artistName)
-                        } catch (_: Exception) { emptyList() }
-                        candidates.addAll(searchResults)
-                    }
-
-                    val normalizedArtist = extractPrimaryArtist(artistName).lowercase()
-                    val filteredArtistTracks = candidates.filter { bTrack ->
-                        val bArtist = extractPrimaryArtist(bTrack.artist).lowercase()
-                        val isArtistMatch = bArtist.contains(normalizedArtist) ||
-                                normalizedArtist.contains(bArtist) ||
-                                bTrack.artist.contains(artistName, ignoreCase = true)
-                        isArtistMatch &&
-                            bTrack.id !in existingIds &&
-                            bTrack.id !in penalizedSongIds &&
-                            bTrack.id !in allPlayedToday &&
-                            "${bTrack.title.trim().lowercase()}|${bTrack.artist.trim().lowercase()}" !in existingKeys
-                    }.distinctBy { it.id }
-                     .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
-
-                    var trackToAutoPlay: SieloTrack? = null
-                    var newQueueSnapshot: List<SieloTrack> = currentQueue
-
-                    if (filteredArtistTracks.isNotEmpty()) {
-                        val finalNewTracks = if (_playbackState.value.isShuffle) filteredArtistTracks.shuffled() else filteredArtistTracks
-                        val updatedQueue = if (currentQueue.isEmpty()) listOf(seedTrack) + finalNewTracks else currentQueue + finalNewTracks
-                        newQueueSnapshot = updatedQueue
-                        if (autoPlayFirst) {
-                            trackToAutoPlay = finalNewTracks.first()
-                        }
-                        _playbackState.update { state ->
-                            savePlaybackState(
-                                state.currentTrack,
-                                updatedQueue,
-                                state.queueIndex,
-                                state.currentPositionMs,
-                                state.durationMs
-                            )
-                            state.copy(queue = updatedQueue)
-                        }
-                    } else if (autoPlayFirst && currentQueue.isNotEmpty()) {
-                        trackToAutoPlay = currentQueue.first()
-                    }
-
-                    if (trackToAutoPlay != null) {
-                        playTrack(trackToAutoPlay!!, newQueueSnapshot, resetScope = false)
-                    } else {
-                        val state = _playbackState.value
-                        preloadNextTrack(state.queueIndex, state.queue)
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.e("SieloAudio", "Error in triggerArtistAutoplayGeneration: ${e.message}", e)
-                }
-            }
-        }
-    }
-
-    private fun extractPrimaryArtist(rawArtist: String): String {
-        if (rawArtist.isBlank()) return "Unknown Artist"
-        val cleaned = rawArtist.split(Regex("(?i)\\s*(?:,|&|\\bfeat\\.?\\b|\\bft\\.?\\b|/|;|\\bx\\b|\\bwith\\b)\\s*")).firstOrNull()?.trim()
-        return if (!cleaned.isNullOrBlank()) cleaned else rawArtist.trim()
-    }
-
-    private fun recordPlayThresholdReached(track: SieloTrack) {
-        val today = java.time.LocalDate.now(java.time.ZoneId.systemDefault()).toString()
-        songsPlayedToday.add(track.id)
-        if (isPrivateListeningEnabled) {
-            currentEventId = null
-            return
-        }
-        listeningEventDispatcher.recordProgressCheckpoint(
-            track = track,
-            positionMs = currentTrackAccumulatedPlayedMs,
-            source = currentQueueScope.name.lowercase()
-        )
-        scope.launch(Dispatchers.IO) {
-            try {
-                recommendationHistoryDao.markRecommended(listOf(track.id), today)
-                val primaryArtist = extractPrimaryArtist(track.artist)
-                onTrackPlayedTasteListener?.invoke(primaryArtist, track.album)
-                val expectedDurationMs = if (track.durationSeconds > 0) track.durationSeconds * 1000L else 0L
-                val eventId = listeningHistoryDao.insertEvent(
-                    ListeningEventEntity(
-                        songId = track.id,
-                        songTitle = track.title,
-                        artistName = primaryArtist,
-                        albumName = track.album,
-                        thumbnailUrl = track.thumbnailUrl,
-                        durationPlayedMs = currentTrackAccumulatedPlayedMs,
-                        songDurationMs = expectedDurationMs
-                    )
-                )
-                currentEventId = eventId
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-    }
-
-    private fun recordTrackCompleted(track: SieloTrack) {
-        if (isPrivateListeningEnabled) return
-        favoredSongIds.add(track.id)
-        val primaryArtist = extractPrimaryArtist(track.artist)
-        if (primaryArtist.isNotBlank()) {
-            val currentFav = favoredArtists.getOrDefault(primaryArtist.lowercase(), 0)
-            favoredArtists[primaryArtist.lowercase()] = currentFav + 1
-        }
-        val count = repeatPlayCount.getOrDefault(track.id, 0)
-        repeatPlayCount[track.id] = count + 1
-        listeningEventDispatcher.recordPlayCompleted(
-            track = track,
-            durationMs = currentTrackAccumulatedPlayedMs,
-            source = currentQueueScope.name.lowercase()
-        )
-    }
-
-    private fun getPlayThresholdMs(track: SieloTrack? = currentTrackingTrack ?: _playbackState.value.currentTrack): Long {
-        val mediaDur = mediaController?.duration?.takeIf { it > 0L } ?: _playbackState.value.durationMs.takeIf { it > 0L }
-        val trackDur = track?.durationSeconds?.takeIf { it > 0 }?.toLong()?.times(1000L)
-        val expectedDur = mediaDur ?: trackDur ?: 0L
-        return if (expectedDur > 0L) {
-            (expectedDur * 0.15f).toLong().coerceAtLeast(5_000L)
-        } else {
-            20_000L
-        }
-    }
-
-    private fun flushCurrentListeningDuration() {
-        if (isPrivateListeningEnabled || !hasRecordedPlayThreshold) return
-        val eventId = currentEventId ?: return
-        val durationMs = currentTrackAccumulatedPlayedMs
-        if (durationMs >= 35_000L) {
-            val cur = _playbackState.value.currentTrack
-            if (cur != null) {
-                favoredSongIds.add(cur.id)
-                val primaryArtist = extractPrimaryArtist(cur.artist)
-                if (primaryArtist.isNotBlank()) {
-                    val currentFav = favoredArtists.getOrDefault(primaryArtist.lowercase(), 0)
-                    favoredArtists[primaryArtist.lowercase()] = currentFav + 1
-                }
-            }
-        }
-        val thresholdMs = getPlayThresholdMs()
-        if (durationMs >= thresholdMs) {
-            scope.launch(Dispatchers.IO) {
-                try {
-                    listeningHistoryDao.updateDurationPlayed(eventId, durationMs)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-        }
-    }
-
-    fun togglePlayPause() {
-        val ctrl = mediaController
-        val currentTrack = _playbackState.value.currentTrack
-        if (ctrl != null && ctrl.currentMediaItem != null && ctrl.currentMediaItem?.mediaId == currentTrack?.id) {
-            if (ctrl.isPlaying) {
-                ctrl.pause()
-                savePositionOnly(ctrl.currentPosition, ctrl.duration.coerceAtLeast(0L))
-            } else {
-                ctrl.play()
-            }
-        } else if (currentTrack != null) {
-            playTrack(currentTrack, _playbackState.value.queue, seekToMs = _playbackState.value.currentPositionMs)
-        }
-    }
-
-    fun play() {
-        val ctrl = mediaController
-        val currentTrack = _playbackState.value.currentTrack
-        if (ctrl != null && ctrl.currentMediaItem != null && ctrl.currentMediaItem?.mediaId == currentTrack?.id) {
-            if (!ctrl.isPlaying) {
-                ctrl.play()
-            }
-        } else if (currentTrack != null) {
-            playTrack(currentTrack, _playbackState.value.queue, seekToMs = _playbackState.value.currentPositionMs, autoPlay = true)
-        }
-    }
-
-    fun pause() {
-        val ctrl = mediaController
-        if (ctrl != null) {
-            if (ctrl.isPlaying) {
-                ctrl.pause()
-                savePositionOnly(ctrl.currentPosition, ctrl.duration.coerceAtLeast(0L))
-            }
-        }
-    }
-
-    fun toggleMute() {
-        val currentlyMuted = _playbackState.value.isMuted
-        val newMuted = !currentlyMuted
-        mediaController?.let {
-            if (newMuted) {
-                it.volume = 0f
-            } else {
-                it.volume = 1f
-            }
-            _playbackState.update { s -> s.copy(isMuted = newMuted) }
-        }
-    }
-
-    fun seekTo(positionMs: Long) {
-        val ctrl = mediaController
-        if (ctrl != null && ctrl.currentMediaItem != null) {
-            ctrl.seekTo(positionMs)
-            _playbackState.update { it.copy(currentPositionMs = positionMs) }
-            savePositionOnly(positionMs, ctrl.duration.coerceAtLeast(0L))
-        } else {
-            _playbackState.update { it.copy(currentPositionMs = positionMs) }
-        }
-    }
-
-    fun setPlaybackSpeed(speed: Float) {
-        try {
-            mediaController?.setPlaybackSpeed(speed)
-        } catch (_: Exception) {}
-    }
-
-    fun skipNext() {
-        val currentState = _playbackState.value
-        val current = currentState.currentTrack
-        val playedMs = currentTrackAccumulatedPlayedMs
-
-        // Immediately pause active playback
-        try {
-            mediaController?.pause()
-        } catch (_: Exception) {}
-
-        if (current != null) {
-            listeningEventDispatcher.recordSkipped(
-                track = current,
-                positionMs = playedMs,
-                source = currentQueueScope.name.lowercase()
-            )
-        }
-
-        // Behavioral analysis on the song: Did user quickly skip this song?
-        if (current != null && playedMs < 25_000L) {
-            // Track skipped in less than 25 seconds -> penalize this specific song only (never the artist)
-            penalizedSongIds.add(current.id)
-            // Real-time dynamic queue adaptation: prune only this song from upcoming queue, preserving other songs by the artist
-            pruneUpcomingQueue()
-        }
-
-        val updatedState = _playbackState.value
-        val queue = updatedState.queue
-        if (queue.isEmpty()) return
-
-        var nextIndex = updatedState.queueIndex + 1
-        val curTrack = updatedState.currentTrack
-        while (nextIndex in queue.indices && curTrack != null) {
-            val candidate = queue[nextIndex]
-            val isSame = candidate.id == curTrack.id ||
-                (candidate.title.trim().equals(curTrack.title.trim(), ignoreCase = true) &&
-                 candidate.artist.trim().equals(curTrack.artist.trim(), ignoreCase = true)) ||
-                candidate.id in penalizedSongIds
-            if (isSame) {
-                nextIndex++
-            } else {
-                break
-            }
-        }
-        if (nextIndex in queue.indices) {
-            val candidate = queue[nextIndex]
-            val ctrl = mediaController
-            val currentItemIdx = ctrl?.currentMediaItemIndex ?: -1
-            if (ctrl != null && currentItemIdx >= 0 && ctrl.mediaItemCount > currentItemIdx + 1 && ctrl.getMediaItemAt(currentItemIdx + 1).mediaId == candidate.id) {
-                // Next track is already preloaded in ExoPlayer! Seek to next media item for instantaneous transition (<1s gap)
-                ctrl.seekToNextMediaItem()
-                ctrl.play()
-            } else {
-                try {
-                    ctrl?.pause()
-                } catch (_: Exception) {}
-                playTrack(candidate, queue, resetScope = false)
-            }
-        } else {
-            if (currentQueueScope == QueueScope.ALBUM_ONLY) {
-                // Loop album queue to first track
-                if (queue.isNotEmpty()) {
-                    playTrack(queue.first(), queue, resetScope = false)
-                }
-            } else if (currentQueueScope == QueueScope.ARTIST_ONLY && !scopeArtistName.isNullOrBlank()) {
-                if (curTrack != null) {
-                    triggerArtistAutoplayGeneration(curTrack, scopeArtistName!!, autoPlayFirst = true)
-                } else if (queue.isNotEmpty()) {
-                    playTrack(queue.first(), queue, resetScope = false)
-                }
-            } else {
-                if (curTrack != null) {
-                    triggerAutoplayGeneration(curTrack, isReseed = false, autoPlayFirst = true)
-                } else if (queue.isNotEmpty()) {
-                    playTrack(queue.first(), queue, resetScope = false)
-                }
-            }
-        }
-    }
-
-    private fun pruneUpcomingQueue() {
-        _playbackState.update { state ->
-            val currentIndex = state.queueIndex
-            if (currentIndex !in state.queue.indices) return@update state
-
-            val pastAndCurrent = state.queue.take(currentIndex + 1)
-            val upcoming = state.queue.drop(currentIndex + 1)
-
-            // Prune only the penalized song itself, preserving other songs by the same artist
-            val filteredUpcoming = upcoming.filterNot { candidate ->
-                candidate.id in penalizedSongIds
-            }
-
-            val newQueue = pastAndCurrent + filteredUpcoming
-            state.copy(queue = newQueue)
-        }
-    }
-
-    fun skipPrevious() {
-        val currentState = _playbackState.value
-        val currentPosition = mediaController?.currentPosition ?: currentState.currentPositionMs
-
-        // Stop audio immediately
-        try {
-            mediaController?.pause()
-        } catch (_: Exception) {}
-
-        // If song has played for more than 3 seconds, restart it from 0:00
-        if (currentPosition > 3000L) {
-            seekTo(0L)
-            play()
-            return
-        }
-
-        val cur = currentState.currentTrack
-        if (cur != null) {
-            listeningEventDispatcher.recordSkipped(
-                track = cur,
-                positionMs = currentPosition,
-                source = currentQueueScope.name.lowercase()
-            )
-        }
-
-        val prevIndex = currentState.queueIndex - 1
-        if (prevIndex in currentState.queue.indices) {
-            playTrack(currentState.queue[prevIndex], currentState.queue, resetScope = false)
-        } else if (currentState.queue.isNotEmpty()) {
-            playTrack(currentState.queue.first(), currentState.queue, seekToMs = 0L, resetScope = false)
-        }
-    }
-
-    fun appendToQueue(tracks: List<SieloTrack>) {
-        if (tracks.isEmpty()) return
-        scope.launch {
-            val currentState = _playbackState.value
-            if (currentState.currentTrack == null || currentState.queue.isEmpty()) {
-                playTrack(tracks.first(), tracks)
-            } else {
-                val existingIds = currentState.queue.map { it.id }.toSet()
-                val currentTrack = currentState.currentTrack
-                val currentTitle = currentTrack?.title?.trim()
-                val currentArtist = currentTrack?.artist?.trim()
-                val newTracks = tracks.filter { bTrack ->
-                    bTrack.id !in existingIds &&
-                    (currentTrack == null || bTrack.id != currentTrack.id) &&
-                    !(currentTitle != null && currentArtist != null &&
-                      bTrack.title.trim().equals(currentTitle, ignoreCase = true) &&
-                      bTrack.artist.trim().equals(currentArtist, ignoreCase = true)) &&
-                    (currentTitle == null || !isTitleSimilar(bTrack.title, currentTitle))
-                }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
-                if (newTracks.isEmpty()) return@launch
-                val updatedQueue = currentState.queue + newTracks
-                _playbackState.update { it.copy(queue = updatedQueue) }
-                savePlaybackState(
-                    currentState.currentTrack,
-                    updatedQueue,
-                    currentState.queueIndex,
-                    currentState.currentPositionMs,
-                    currentState.durationMs
-                )
-            }
-        }
-    }
-
-    fun appendToQueue(track: SieloTrack) {
-        appendToQueue(listOf(track))
-    }
-
-    fun playNext(track: SieloTrack) {
-        scope.launch {
-            val currentState = _playbackState.value
-            if (currentState.currentTrack == null || currentState.queue.isEmpty()) {
-                playTrack(track, listOf(track))
-            } else {
-                val queue = currentState.queue
-                val currentTrack = currentState.currentTrack
-                val currentIdx = if (currentTrack != null) {
-                    queue.indexOfFirst { it.id == currentTrack.id }.takeIf { it >= 0 } ?: currentState.queueIndex
-                } else {
-                    currentState.queueIndex
-                }
-                val newQueue = queue.toMutableList()
-                val insertIdx = (currentIdx + 1 + currentState.playNextCount).coerceAtMost(newQueue.size)
-                newQueue.add(insertIdx, track)
-
-                // Also keep originalQueue in sync so disabling shuffle does not discard playNext tracks
-                originalQueue?.let { orig ->
-                    val origMutable = orig.toMutableList()
-                    val origIdx = if (currentTrack != null) orig.indexOfFirst { it.id == currentTrack.id }.takeIf { it >= 0 } ?: currentIdx else currentIdx
-                    val origInsertIdx = (origIdx + 1 + currentState.playNextCount).coerceIn(0, origMutable.size)
-                    origMutable.add(origInsertIdx, track)
-                    originalQueue = origMutable
-                }
-
-                _playbackState.update { it.copy(queue = newQueue, queueIndex = currentIdx, playNextCount = it.playNextCount + 1) }
-                savePlaybackState(
-                    currentTrack,
-                    newQueue,
-                    currentIdx,
-                    currentState.currentPositionMs,
-                    currentState.durationMs
-                )
-            }
-        }
-    }
-
-    fun removeTrackFromQueue(track: SieloTrack) {
-        scope.launch {
-            val currentState = _playbackState.value
-            val currentQueue = currentState.queue
-            val currentIdx = currentState.queueIndex
-
-            // Prioritize finding in upcoming tracks first, else anywhere except currentTrack
-            val removeIdx = currentQueue.indices.firstOrNull { it > currentIdx && currentQueue[it].id == track.id }
-                ?: currentQueue.indices.firstOrNull { it != currentIdx && currentQueue[it].id == track.id }
-                ?: return@launch
-
-            val newQueue = currentQueue.toMutableList().apply { removeAt(removeIdx) }
-            val newIndex = if (removeIdx < currentIdx) (currentIdx - 1).coerceAtLeast(0) else currentIdx
-            
-            val newPlayNextCount = if (removeIdx > currentIdx && removeIdx <= currentIdx + currentState.playNextCount) {
-                kotlin.math.max(0, currentState.playNextCount - 1)
-            } else {
-                currentState.playNextCount
-            }
-
-            _playbackState.update { it.copy(queue = newQueue, queueIndex = newIndex, playNextCount = newPlayNextCount) }
-            savePlaybackState(
-                currentState.currentTrack,
-                newQueue,
-                newIndex,
-                currentState.currentPositionMs,
-                currentState.durationMs
-            )
-        }
-    }
-
-    fun moveUpcomingTrack(fromUpcomingIndex: Int, toUpcomingIndex: Int) {
-        scope.launch {
-            val currentState = _playbackState.value
-            val currentQueue = currentState.queue.toMutableList()
-            val currentIdx = currentState.queueIndex
-            val fromQueueIdx = currentIdx + 1 + fromUpcomingIndex
-            val toQueueIdx = currentIdx + 1 + toUpcomingIndex
-
-            if (fromQueueIdx in (currentIdx + 1)..currentQueue.lastIndex &&
-                toQueueIdx in (currentIdx + 1)..currentQueue.lastIndex &&
-                fromQueueIdx != toQueueIdx
-            ) {
-                val movedItem = currentQueue.removeAt(fromQueueIdx)
-                currentQueue.add(toQueueIdx, movedItem)
-                _playbackState.update { it.copy(queue = currentQueue) }
-                savePlaybackState(
-                    currentState.currentTrack,
-                    currentQueue,
-                    currentState.queueIndex,
-                    currentState.currentPositionMs,
-                    currentState.durationMs
-                )
-            }
-        }
-    }
-
-    private fun isTitleSimilar(cand: String, base: String): Boolean {
-        val cClean = cand.lowercase()
-            .replace(Regex("""[\(\[\{].*?[\)\]\}]"""), "")
-            .replace(Regex("""[^\w\s]"""), " ")
-            .trim()
-        val bClean = base.lowercase()
-            .replace(Regex("""[\(\[\{].*?[\)\]\}]"""), "")
-            .replace(Regex("""[^\w\s]"""), " ")
-            .trim()
-        if (cClean.isBlank() || bClean.isBlank()) return false
-        if (cClean == bClean) return true
-        if (bClean.length >= 3 && cClean.contains(bClean)) return true
-        if (cClean.length >= 3 && bClean.contains(cClean)) return true
-        return false
-    }
-
-    fun triggerAutoplayIfLow(seedTrack: SieloTrack? = _playbackState.value.currentTrack) {
-        val targetTrack = seedTrack ?: return
-        val state = _playbackState.value
-        val remainingUpcoming = state.queue.size - 1 - state.queueIndex
-        if (remainingUpcoming < 20) {
-            triggerAutoplayGeneration(targetTrack, isReseed = false)
-        }
-    }
-
-    fun toggleShuffle() {
-        val currentState = _playbackState.value
-        val newShuffle = !currentState.isShuffle
-        if (newShuffle) {
-            originalQueue = currentState.queue
-            val queue = currentState.queue
-            if (queue.isEmpty()) return
-            val currentTrack = currentState.currentTrack
-            val currentIdx = if (currentTrack != null) {
-                queue.indexOfFirst { it.id == currentTrack.id }.takeIf { it >= 0 } ?: currentState.queueIndex
-            } else {
-                currentState.queueIndex
-            }
-            if (currentIdx in queue.indices) {
-                val trackAtIdx = queue[currentIdx]
-                val pastTracks = queue.take(currentIdx)
-                val playNextCount = currentState.playNextCount.coerceAtLeast(0)
-                val playNextStart = (currentIdx + 1).coerceAtMost(queue.size)
-                val playNextEnd = (currentIdx + 1 + playNextCount).coerceAtMost(queue.size)
-                val playNextTracks = queue.subList(playNextStart, playNextEnd)
-                val dynamicTracks = queue.drop(playNextEnd).shuffled()
-                val shuffledQueue = pastTracks + listOf(trackAtIdx) + playNextTracks + dynamicTracks
-                val newIdx = pastTracks.size
-                _playbackState.update { it.copy(isShuffle = true, queue = shuffledQueue, queueIndex = newIdx) }
-                savePlaybackState(trackAtIdx, shuffledQueue, newIdx, currentState.currentPositionMs, currentState.durationMs)
-            }
-        } else {
-            val currentTrack = currentState.currentTrack
-            val restoredQueue = originalQueue ?: currentState.queue
-            val newIdx = if (currentTrack != null) {
-                restoredQueue.indexOfFirst { it.id == currentTrack.id }.takeIf { it >= 0 } ?: currentState.queueIndex
-            } else currentState.queueIndex
-            _playbackState.update { it.copy(isShuffle = false, queue = restoredQueue, queueIndex = newIdx) }
-            savePlaybackState(currentTrack, restoredQueue, newIdx, currentState.currentPositionMs, currentState.durationMs)
-        }
-    }
-
-    fun shuffleQueue() {
-        val currentState = _playbackState.value
-        val queue = currentState.queue
-        if (queue.isEmpty()) return
-        val currentTrack = currentState.currentTrack
-        val currentIdx = if (currentTrack != null) {
-            queue.indexOfFirst { it.id == currentTrack.id }.takeIf { it >= 0 } ?: currentState.queueIndex
-        } else {
-            currentState.queueIndex
-        }
-        if (currentIdx in queue.indices) {
-            val trackAtIdx = queue[currentIdx]
-            val pastTracks = queue.take(currentIdx)
-            val playNextCount = currentState.playNextCount.coerceAtLeast(0)
-            val playNextStart = (currentIdx + 1).coerceAtMost(queue.size)
-            val playNextEnd = (currentIdx + 1 + playNextCount).coerceAtMost(queue.size)
-            val playNextTracks = queue.subList(playNextStart, playNextEnd)
-            val currentTitleClean = trackAtIdx.title.trim()
-            val currentArtistClean = trackAtIdx.artist.trim()
-            val dynamicTracks = queue.drop(playNextEnd).filter { qTrack ->
-                qTrack.id != trackAtIdx.id &&
-                !(qTrack.title.trim().equals(currentTitleClean, ignoreCase = true) &&
-                  qTrack.artist.trim().equals(currentArtistClean, ignoreCase = true))
-            }.shuffled()
-            val shuffledQueue = pastTracks + listOf(trackAtIdx) + playNextTracks + dynamicTracks
-            val newIdx = pastTracks.size
-            _playbackState.update { it.copy(queue = shuffledQueue, queueIndex = newIdx) }
-            savePlaybackState(trackAtIdx, shuffledQueue, newIdx, currentState.currentPositionMs, currentState.durationMs)
-        }
-    }
-
-    fun toggleLoop() {
-        val newLooping = !_playbackState.value.isLooping
-        _playbackState.update { it.copy(isLooping = newLooping) }
-        mediaController?.let { ctrl ->
-            ctrl.repeatMode = if (newLooping) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
-            if (newLooping) {
-                preloadJob?.cancel()
-                val currentIdx = ctrl.currentMediaItemIndex
-                if (ctrl.mediaItemCount > currentIdx + 1) {
-                    try {
-                        ctrl.removeMediaItems(currentIdx + 1, ctrl.mediaItemCount)
-                    } catch (_: Exception) {}
-                }
-            } else {
-                preloadNextTrack(_playbackState.value.queueIndex, _playbackState.value.queue)
-            }
-        }
-    }
-
-    private fun startProgressTracking() {
-        progressTrackerJob?.cancel()
-        lastTrackingTimestamp = System.currentTimeMillis()
-        progressTrackerJob = scope.launch {
-            while (isActive) {
-                val isPlaying = mediaController?.isPlaying == true
-                val current = mediaController?.currentPosition ?: 0L
-                val dur = mediaController?.duration?.coerceAtLeast(0L) ?: 0L
-                _playbackState.update { it.copy(currentPositionMs = current, durationMs = dur) }
-
-                if (isPlaying) {
-                    val now = System.currentTimeMillis()
-                    val delta = (now - lastTrackingTimestamp).coerceIn(0L, 1000L)
-                    currentTrackAccumulatedPlayedMs += delta
-                    lastTrackingTimestamp = now
-
-                    // Count as 1 play only when 15% of the song has been played
-                    val thresholdMs = getPlayThresholdMs()
-                    if (!hasRecordedPlayThreshold && currentTrackAccumulatedPlayedMs >= thresholdMs) {
-                        hasRecordedPlayThreshold = true
-                        val trackToRecord = currentTrackingTrack ?: _playbackState.value.currentTrack
-                        if (trackToRecord != null) {
-                            recordPlayThresholdReached(trackToRecord)
-                        }
-                    }
-
-                    // Periodic DB & Prefs sync every 2 seconds
-                    if (now - lastDbFlushTimestamp >= 2000L) {
-                        lastDbFlushTimestamp = now
-                        if (hasRecordedPlayThreshold) {
-                            flushCurrentListeningDuration()
-                        }
-                        savePositionOnly(current, dur)
-                    }
-                } else {
-                    lastTrackingTimestamp = System.currentTimeMillis()
-                }
-
-                delay(50)
-            }
-        }
-    }
-
-    private fun stopProgressTracking() {
-        progressTrackerJob?.cancel()
-    }
-
-    fun resetPlayer() {
-        stopProgressTracking()
-        try {
-            mediaController?.stop()
-            mediaController?.clearMediaItems()
-        } catch (_: Exception) {}
-        _playbackState.value = PlaybackState()
-        penalizedSongIds.clear()
-        favoredSongIds.clear()
-        favoredArtists.clear()
-        repeatPlayCount.clear()
-        originalQueue = null
-        currentEventId = null
-        currentTrackAccumulatedPlayedMs = 0L
-        hasRecordedPlayThreshold = false
-        currentTrackingTrack = null
-        try {
-            val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
-            prefs.edit().clear().apply()
-        } catch (_: Exception) {}
-    }
-}
+package com.sielo.music.core.audio
+
+import android.content.ComponentName
+import android.content.Context
+import android.util.Log
+import androidx.annotation.OptIn
+import androidx.core.net.toUri
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.session.MediaController
+import androidx.media3.session.SessionToken
+import com.google.common.util.concurrent.MoreExecutors
+import com.sielo.music.core.audio.model.PlaybackState
+import com.sielo.music.core.audio.service.MusicPlaybackService
+import com.sielo.music.core.database.dao.FavoriteTrackDao
+import com.sielo.music.core.database.dao.ListeningHistoryDao
+import com.sielo.music.core.database.dao.RecommendationHistoryDao
+import com.sielo.music.core.database.entity.ListeningEventEntity
+import com.sielo.music.core.network.innertube.InnerTubeClient
+import com.sielo.music.core.network.innertube.JioSaavnSongArtworkResolver
+import com.sielo.music.core.network.models.SieloTrack
+import com.sielo.music.core.recommendations.autoplay.AutoplayQueueEngine
+import com.sielo.music.core.recommendations.autoplay.AutoplaySession
+import com.sielo.music.core.recommendations.autoplay.CuratedArtistClusters
+import com.sielo.music.core.recommendations.autoplay.SongClassifier
+import dagger.hilt.android.qualifiers.ApplicationContext
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.util.LruCache
+import kotlinx.coroutines.async
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.io.ByteArrayOutputStream
+import java.io.File
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import javax.inject.Inject
+import javax.inject.Singleton
+
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import java.net.URI
+
+enum class QueueScope {
+    OPEN,        // Standard queue: autoplay and general recommendations enabled
+    ALBUM_ONLY,  // Album playback: strict queue containing songs from this album only
+    ARTIST_ONLY, // Artist radio playback: queue consisting of songs of this artist only
+    LISTEN_TOGETHER // Shared room queue: strictly user-added songs, autoplay and dynamic recommendations disabled
+}
+
+@OptIn(UnstableApi::class)
+@Singleton
+class PlayerManager @Inject constructor(
+    @ApplicationContext private val context: Context,
+    private val innerTubeClient: InnerTubeClient,
+    private val listeningHistoryDao: ListeningHistoryDao,
+    private val favoriteTrackDao: FavoriteTrackDao,
+    private val recommendationHistoryDao: RecommendationHistoryDao,
+    private val autoplayQueueEngine: AutoplayQueueEngine,
+    private val autoplaySession: AutoplaySession,
+    private val listeningEventDispatcher: com.sielo.music.core.recommendations.events.ListeningEventDispatcher
+) {
+    private val json = Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true }
+    private val _playbackState = MutableStateFlow(PlaybackState())
+    val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
+
+    private val _isCurrentTrackFavorite = MutableStateFlow(false)
+    val isCurrentTrackFavorite: StateFlow<Boolean> = _isCurrentTrackFavorite.asStateFlow()
+
+    fun toggleCurrentTrackFavorite() {
+        val track = _playbackState.value.currentTrack ?: return
+        scope.launch(Dispatchers.IO) {
+            val isFav = favoriteTrackDao.getAllFavoritesList().any { it.id == track.id }
+            if (isFav) {
+                favoriteTrackDao.deleteById(track.id)
+                _isCurrentTrackFavorite.value = false
+            } else {
+                favoriteTrackDao.insertFavorite(
+                    com.sielo.music.core.database.entity.FavoriteTrackEntity(
+                        id = track.id,
+                        title = track.title,
+                        artist = track.artist,
+                        thumbnailUrl = track.thumbnailUrl
+                    )
+                )
+                _isCurrentTrackFavorite.value = true
+            }
+            withContext(Dispatchers.Main) {
+                MusicPlaybackService.updateNotificationLayoutListener?.invoke()
+            }
+        }
+    }
+
+    private fun updateCurrentTrackFavoriteState(track: SieloTrack?) {
+        if (track == null) {
+            _isCurrentTrackFavorite.value = false
+            MusicPlaybackService.updateNotificationLayoutListener?.invoke()
+            return
+        }
+        scope.launch(Dispatchers.IO) {
+            val isFav = favoriteTrackDao.getAllFavoritesList().any { it.id == track.id }
+            _isCurrentTrackFavorite.value = isFav
+            withContext(Dispatchers.Main) {
+                MusicPlaybackService.updateNotificationLayoutListener?.invoke()
+            }
+        }
+    }
+
+    private val songsPlayedToday = mutableSetOf<String>()
+
+    @Volatile
+    var currentlyLoadingTrackId: String? = null
+        private set
+
+    private var currentQueueScope: QueueScope = QueueScope.OPEN
+    private var scopeArtistName: String? = null
+
+    fun playAlbum(track: SieloTrack, queue: List<SieloTrack>) {
+        currentQueueScope = QueueScope.ALBUM_ONLY
+        scopeArtistName = null
+        autoplayJob?.cancel()
+        playTrack(track, queue, resetScope = false)
+    }
+
+    fun playArtistRadio(track: SieloTrack, queue: List<SieloTrack>, artistName: String) {
+        currentQueueScope = QueueScope.ARTIST_ONLY
+        scopeArtistName = artistName
+        autoplayJob?.cancel()
+        playTrack(track, queue, resetScope = false)
+    }
+
+    fun playListenTogether(track: SieloTrack, queue: List<SieloTrack>, seekToMs: Long = 0L, autoPlay: Boolean = true) {
+        currentQueueScope = QueueScope.LISTEN_TOGETHER
+        scopeArtistName = null
+        autoplayJob?.cancel()
+        playTrack(track, queue, seekToMs = seekToMs, autoPlay = autoPlay, resetScope = false)
+    }
+
+    fun updateListenTogetherQueue(queue: List<SieloTrack>) {
+        if (currentQueueScope != QueueScope.LISTEN_TOGETHER) {
+            currentQueueScope = QueueScope.LISTEN_TOGETHER
+            autoplayJob?.cancel()
+        }
+        val current = _playbackState.value.currentTrack
+        val newIdx = if (current != null) queue.indexOfFirst { it.id == current.id }.coerceAtLeast(0) else 0
+        _playbackState.update {
+            it.copy(
+                queue = queue,
+                queueIndex = newIdx
+            )
+        }
+        preloadNextTrack(newIdx, queue)
+    }
+
+    fun setQueueScope(scope: QueueScope, queue: List<SieloTrack>? = null) {
+        currentQueueScope = scope
+        if (scope == QueueScope.LISTEN_TOGETHER) {
+            scopeArtistName = null
+            autoplayJob?.cancel()
+            val ctrl = mediaController
+            val curId = _playbackState.value.currentTrack?.id
+            if (ctrl != null && curId != null) {
+                try {
+                    val count = ctrl.mediaItemCount
+                    for (i in (count - 1) downTo 0) {
+                        if (ctrl.getMediaItemAt(i).mediaId != curId) {
+                            ctrl.removeMediaItem(i)
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+            if (queue != null) {
+                val current = _playbackState.value.currentTrack
+                val newIdx = if (current != null) queue.indexOfFirst { it.id == current.id }.coerceAtLeast(0) else 0
+                _playbackState.update {
+                    it.copy(
+                        queue = queue,
+                        queueIndex = newIdx
+                    )
+                }
+                preloadNextTrack(newIdx, queue)
+            }
+        }
+    }
+
+    fun clearListenTogetherScope() {
+        if (currentQueueScope == QueueScope.LISTEN_TOGETHER) {
+            currentQueueScope = QueueScope.OPEN
+        }
+    }
+
+    private var mediaController: MediaController? = null
+    private val scope = CoroutineScope(Dispatchers.Main + Job())
+    private var progressTrackerJob: Job? = null
+    private var currentEventId: Long? = null
+    private var currentTrackAccumulatedPlayedMs: Long = 0L
+    private var hasRecordedPlayThreshold: Boolean = false
+    private var currentTrackingTrack: SieloTrack? = null
+    private var lastTrackingTimestamp: Long = 0L
+    private var lastDbFlushTimestamp: Long = 0L
+    private var lastPollPositionMs: Long = 0L
+    private var lastLoopCompletionTimestamp: Long = 0L
+    private var lastUserSeekTimestamp: Long = 0L
+    private var autoplayJob: Job? = null
+    private var prefetchJob: Job? = null
+    private val autoplayMutex = Mutex()
+    private var originalQueue: List<SieloTrack>? = null
+
+    private val artworkCache = LruCache<String, ByteArray>(40)
+    private val artworkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
+
+    private suspend fun fetchArtworkBytes(url: String?, trackId: String? = null): ByteArray? = withContext(Dispatchers.IO) {
+        if (!url.isNullOrBlank()) {
+            artworkCache.get(url)?.let { return@withContext it }
+        }
+        if (!trackId.isNullOrBlank()) {
+            artworkCache.get(trackId)?.let { return@withContext it }
+            val offlineArtFile = File(OfflineCacheManager.getDownloadsDir(context), "$trackId.jpg")
+            if (offlineArtFile.exists() && offlineArtFile.length() > 512L) {
+                try {
+                    val rawBytes = offlineArtFile.readBytes()
+                    val prepared = prepareArtworkBytes(rawBytes)
+                    if (prepared != null) {
+                        artworkCache.put(trackId, prepared)
+                        if (!url.isNullOrBlank()) artworkCache.put(url, prepared)
+                        return@withContext prepared
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+        if (url.isNullOrBlank()) return@withContext null
+
+        try {
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
+                .build()
+            val resp = artworkHttpClient.newCall(req).execute()
+            if (resp.isSuccessful) {
+                val rawBytes = resp.body?.bytes()
+                if (rawBytes != null && rawBytes.isNotEmpty()) {
+                    val prepared = prepareArtworkBytes(rawBytes)
+                    if (prepared != null) {
+                        artworkCache.put(url, prepared)
+                        if (!trackId.isNullOrBlank()) artworkCache.put(trackId, prepared)
+                        return@withContext prepared
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("SieloPlayer", "Failed to fetch artwork bytes for $url: ${e.message}")
+        }
+        null
+    }
+
+    private fun prepareArtworkBytes(rawBytes: ByteArray): ByteArray? {
+        return try {
+            val bitmap = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size) ?: return null
+            val maxDim = 640
+            val scaledBitmap = if (bitmap.width > maxDim || bitmap.height > maxDim) {
+                val ratio = bitmap.width.toFloat() / bitmap.height.toFloat()
+                val (targetW, targetH) = if (ratio > 1f) {
+                    maxDim to (maxDim / ratio).toInt().coerceAtLeast(1)
+                } else {
+                    (maxDim * ratio).toInt().coerceAtLeast(1) to maxDim
+                }
+                Bitmap.createScaledBitmap(bitmap, targetW, targetH, true).also {
+                    if (it != bitmap) bitmap.recycle()
+                }
+            } else {
+                bitmap
+            }
+            val stream = ByteArrayOutputStream()
+            scaledBitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)
+            scaledBitmap.recycle()
+            stream.toByteArray()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    // Behavioral recommendation tracking on songs in real-time
+    private val penalizedSongIds = mutableSetOf<String>()
+    private val favoredSongIds = mutableSetOf<String>()
+    private val favoredArtists = mutableMapOf<String, Int>()
+    private val repeatPlayCount = mutableMapOf<String, Int>()
+
+    var isPrivateListeningEnabled: Boolean = false
+        set(value) {
+            field = value
+            listeningEventDispatcher.isPrivateListeningEnabled = value
+        }
+    var isAutoplayEnabled: Boolean = true
+
+    var onTrackPlayedTasteListener: ((artist: String, albumOrGenre: String?) -> Unit)? = null
+    var userTasteSeedsProvider: (() -> List<String>)? = null
+    var onTrackEndedListener: (() -> Boolean)? = null
+    var onSkipNextListener: (() -> Boolean)? = null
+    var onSkipPreviousListener: (() -> Boolean)? = null
+
+    companion object {
+        private const val PREFS_NAME = "sielo_player_state"
+        private const val KEY_TRACK = "last_track"
+        private const val KEY_QUEUE = "last_queue"
+        private const val KEY_QUEUE_INDEX = "last_queue_index"
+        private const val KEY_POSITION_MS = "last_position_ms"
+        private const val KEY_DURATION_MS = "last_duration_ms"
+        private const val KEY_SHUFFLE = "last_shuffle"
+    }
+
+    init {
+        MusicPlaybackService.skipNextListener = { skipNext() }
+        MusicPlaybackService.skipPreviousListener = { skipPrevious() }
+        scope.launch {
+            favoriteTrackDao.getAllFavorites().collect { favList ->
+                val curId = _playbackState.value.currentTrack?.id
+                _isCurrentTrackFavorite.value = curId != null && favList.any { it.id == curId }
+                withContext(Dispatchers.Main) {
+                    MusicPlaybackService.updateNotificationLayoutListener?.invoke()
+                }
+            }
+        }
+        restorePlaybackState()
+        scope.launch {
+            getController()
+            withContext(Dispatchers.IO) {
+                try {
+                    listeningHistoryDao.sanitizeLegacyRecords()
+                    listeningHistoryDao.purgeSubThresholdRecords()
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    private fun restorePlaybackState() {
+        try {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val trackJson = prefs.getString(KEY_TRACK, null)
+            val queueJson = prefs.getString(KEY_QUEUE, null)
+            val queueIndex = prefs.getInt(KEY_QUEUE_INDEX, 0)
+            val positionMs = prefs.getLong(KEY_POSITION_MS, 0L)
+            val durationMs = prefs.getLong(KEY_DURATION_MS, 0L)
+            val isShuffle = prefs.getBoolean(KEY_SHUFFLE, false)
+
+            if (!trackJson.isNullOrBlank()) {
+                val track = json.decodeFromString<SieloTrack>(trackJson)
+                val queue = if (!queueJson.isNullOrBlank()) {
+                    try {
+                        json.decodeFromString<List<SieloTrack>>(queueJson)
+                    } catch (_: Exception) {
+                        listOf(track)
+                    }
+                } else {
+                    listOf(track)
+                }
+
+                _playbackState.update {
+                    it.copy(
+                        currentTrack = track,
+                        queue = queue,
+                        queueIndex = queueIndex.coerceIn(0, (queue.size - 1).coerceAtLeast(0)),
+                        currentPositionMs = positionMs,
+                        durationMs = if (durationMs > 0L) durationMs else (track.durationSeconds * 1000L),
+                        isPlaying = false,
+                        isBuffering = false,
+                        isShuffle = isShuffle
+                    )
+                }
+
+                if (track.thumbnailUrl.isNullOrBlank()) {
+                    reloadCurrentTrackArtwork()
+                }
+
+                val remainingUpcoming = queue.size - 1 - queueIndex
+                if (remainingUpcoming < 20) {
+                    triggerAutoplayGeneration(track, isReseed = true)
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("SieloAudio", "Error restoring playback state: ${e.message}", e)
+        }
+    }
+
+    fun reloadCurrentTrackArtwork() {
+        scope.launch(Dispatchers.IO) {
+            val cur = _playbackState.value.currentTrack ?: return@launch
+            try {
+                val newArt = JioSaavnSongArtworkResolver.resolveSongArtwork(cur.title, cur.artist)
+                if (!newArt.isNullOrBlank() && newArt != cur.thumbnailUrl) {
+                    val updated = cur.copy(thumbnailUrl = newArt)
+                    _playbackState.update { it.copy(currentTrack = updated) }
+                    savePlaybackState(
+                        updated,
+                        _playbackState.value.queue,
+                        _playbackState.value.queueIndex,
+                        _playbackState.value.currentPositionMs,
+                        _playbackState.value.durationMs
+                    )
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun saveCurrentPlaybackPosition(forceSync: Boolean = false) {
+        try {
+            val ctrl = mediaController
+            val pos = ctrl?.currentPosition ?: _playbackState.value.currentPositionMs
+            val dur = ctrl?.duration?.coerceAtLeast(0L) ?: _playbackState.value.durationMs
+            if (pos > 0L) {
+                val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                val editor = prefs.edit()
+                    .putLong(KEY_POSITION_MS, pos)
+                    .putLong(KEY_DURATION_MS, dur)
+                if (forceSync) {
+                    editor.commit()
+                } else {
+                    editor.apply()
+                }
+                _playbackState.update { it.copy(currentPositionMs = pos, durationMs = dur) }
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun savePlaybackState(
+        track: SieloTrack?,
+        queue: List<SieloTrack>,
+        queueIndex: Int,
+        positionMs: Long,
+        durationMs: Long
+    ) {
+        try {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().apply {
+                if (track != null) {
+                    putString(KEY_TRACK, json.encodeToString(track))
+                    putString(KEY_QUEUE, json.encodeToString(queue))
+                    putInt(KEY_QUEUE_INDEX, queueIndex)
+                    putLong(KEY_POSITION_MS, positionMs)
+                    putLong(KEY_DURATION_MS, durationMs)
+                    putBoolean(KEY_SHUFFLE, _playbackState.value.isShuffle)
+                }
+                apply()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("SieloAudio", "Error saving playback state: ${e.message}", e)
+        }
+    }
+
+    private fun savePositionOnly(positionMs: Long, durationMs: Long) {
+        try {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit()
+                .putLong(KEY_POSITION_MS, positionMs)
+                .putLong(KEY_DURATION_MS, durationMs)
+                .apply()
+        } catch (_: Exception) {}
+    }
+
+    /**
+     * Exports a lightweight serializable snapshot of the current playback state and queue for cloud sync.
+     */
+    fun getPlaybackSnapshot(): Map<String, Any>? {
+        val state = _playbackState.value
+        val track = state.currentTrack ?: return null
+        return try {
+            val trackJson = json.encodeToString(track)
+            val queueJson = json.encodeToString(state.queue.take(50)) // preserve current queue window
+            mapOf(
+                "track" to trackJson,
+                "queue" to queueJson,
+                "queueIndex" to state.queueIndex,
+                "positionMs" to state.currentPositionMs,
+                "durationMs" to state.durationMs,
+                "isShuffle" to state.isShuffle,
+                "updatedAt" to System.currentTimeMillis()
+            )
+        } catch (e: Exception) {
+            Log.w("SieloAudio", "Failed to build playback snapshot: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Restores playback state from cloud snapshot into local storage and memory.
+     * Guarantees isPlaying remains false so playback does NOT auto-start unexpectedly on login.
+     */
+    fun restoreFromCloudSnapshot(snapshot: Map<String, Any>) {
+        try {
+            val trackJson = snapshot["track"] as? String
+            val queueJson = snapshot["queue"] as? String
+            val queueIndex = (snapshot["queueIndex"] as? Number)?.toInt() ?: 0
+            val positionMs = (snapshot["positionMs"] as? Number)?.toLong() ?: 0L
+            val durationMs = (snapshot["durationMs"] as? Number)?.toLong() ?: 0L
+            val isShuffle = snapshot["isShuffle"] as? Boolean ?: false
+
+            if (!trackJson.isNullOrBlank()) {
+                val track = json.decodeFromString<SieloTrack>(trackJson)
+                val queue = if (!queueJson.isNullOrBlank()) {
+                    try {
+                        json.decodeFromString<List<SieloTrack>>(queueJson)
+                    } catch (_: Exception) {
+                        listOf(track)
+                    }
+                } else {
+                    listOf(track)
+                }
+
+                savePlaybackState(track, queue, queueIndex, positionMs, durationMs)
+
+                _playbackState.update {
+                    it.copy(
+                        currentTrack = track,
+                        queue = queue,
+                        queueIndex = queueIndex.coerceIn(0, (queue.size - 1).coerceAtLeast(0)),
+                        currentPositionMs = positionMs,
+                        durationMs = if (durationMs > 0L) durationMs else (track.durationSeconds * 1000L),
+                        isPlaying = false,
+                        isBuffering = false,
+                        isShuffle = isShuffle
+                    )
+                }
+                Log.i("SieloAudio", "Restored playback state from cloud snapshot: ${track.title} by ${track.artist}")
+            }
+        } catch (e: Exception) {
+            Log.e("SieloAudio", "Error restoring playback state from cloud: ${e.message}", e)
+        }
+    }
+
+    private suspend fun getController(): MediaController? = suspendCancellableCoroutine { cont ->
+        val current = mediaController
+        if (current != null) {
+            cont.resume(current) {}
+            return@suspendCancellableCoroutine
+        }
+        val sessionToken = SessionToken(context, ComponentName(context, MusicPlaybackService::class.java))
+        val future = MediaController.Builder(context, sessionToken).buildAsync()
+        future.addListener({
+            try {
+                val ctrl = future.get()
+                mediaController = ctrl
+                setupPlayerListeners()
+                if (cont.isActive) {
+                    cont.resume(ctrl) {}
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("SieloAudio", "Failed to connect MediaController: ${e.message}", e)
+                if (cont.isActive) {
+                    cont.resume(null) {}
+                }
+            }
+        }, ContextCompat.getMainExecutor(context))
+    }
+
+    private fun setupPlayerListeners() {
+        mediaController?.repeatMode = if (_playbackState.value.isLooping) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+        mediaController?.addListener(object : Player.Listener {
+            override fun onPositionDiscontinuity(
+                oldPosition: Player.PositionInfo,
+                newPosition: Player.PositionInfo,
+                reason: Int
+            ) {
+                if (_playbackState.value.isLooping &&
+                    reason != Player.DISCONTINUITY_REASON_SEEK &&
+                    (reason == Player.DISCONTINUITY_REASON_AUTO_TRANSITION || newPosition.positionMs < oldPosition.positionMs)
+                ) {
+                    val dur = mediaController?.duration?.takeIf { it > 0L } ?: _playbackState.value.durationMs
+                    handleLoopIterationCompleted(dur)
+                }
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                val currentMediaId = mediaController?.currentMediaItem?.mediaId
+                val currentTrackId = _playbackState.value.currentTrack?.id
+                if (currentMediaId != null && currentTrackId != null && currentMediaId != currentTrackId) {
+                    return
+                }
+                _playbackState.update { it.copy(isPlaying = isPlaying, isBuffering = false) }
+                if (isPlaying) {
+                    startProgressTracking()
+                } else {
+                    stopProgressTracking()
+                    flushCurrentListeningDuration()
+                    mediaController?.let {
+                        savePositionOnly(it.currentPosition, it.duration.coerceAtLeast(0L))
+                    }
+                }
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                val currentMediaId = mediaController?.currentMediaItem?.mediaId
+                val currentTrackId = _playbackState.value.currentTrack?.id
+                if (currentMediaId != null && currentTrackId != null && currentMediaId != currentTrackId) {
+                    return
+                }
+                val isBuffering = playbackState == Player.STATE_BUFFERING
+                val dur = mediaController?.duration?.coerceAtLeast(0L) ?: 0L
+                _playbackState.update { 
+                    it.copy(
+                        isBuffering = isBuffering,
+                        durationMs = if (dur > 0L) dur else it.durationMs
+                    )
+                }
+
+                if (playbackState == Player.STATE_READY && dur > 0L) {
+                    val cur = _playbackState.value.currentTrack
+                    if (cur != null) {
+                        scope.launch(Dispatchers.IO) {
+                            try {
+                                listeningHistoryDao.updateSongDurationBySongId(cur.id, dur)
+                            } catch (_: Exception) {}
+                        }
+                    }
+                }
+
+                if (playbackState == Player.STATE_ENDED) {
+                    if (_playbackState.value.isLooping) {
+                        val dur = mediaController?.duration?.takeIf { it > 0L } ?: _playbackState.value.durationMs
+                        handleLoopIterationCompleted(dur)
+                        val ctrl = mediaController
+                        if (ctrl != null) {
+                            ctrl.seekTo(0L)
+                            ctrl.play()
+                        }
+                    } else {
+                        if (hasRecordedPlayThreshold) {
+                            flushCurrentListeningDuration()
+                            val cur = _playbackState.value.currentTrack
+                            if (cur != null) {
+                                recordTrackCompleted(cur)
+                            }
+                        }
+                        if (onTrackEndedListener?.invoke() == true) {
+                            // Handled by custom room / queue manager (e.g. ListenTogetherManager)
+                        } else {
+                            skipNext()
+                        }
+                    }
+                }
+            }
+
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                if (mediaItem == null) return
+                if (_playbackState.value.isLooping) {
+                    Log.d("SieloPlayer", "onMediaItemTransition ignored because looping is active")
+                    return
+                }
+                val mediaId = mediaItem.mediaId
+                val currentState = _playbackState.value
+                val cur = currentState.currentTrack
+                if (mediaId == cur?.id) return
+
+                val queue = currentState.queue
+                val targetIndex = queue.indexOfFirst { it.id == mediaId }
+                if (targetIndex != -1) {
+                    val nextTrack = queue[targetIndex]
+                    Log.d("SieloPlayer", "Seamless onMediaItemTransition to: ${nextTrack.title} (reason=$reason)")
+
+                    val today = java.time.LocalDate.now(java.time.ZoneId.systemDefault()).toString()
+                    songsPlayedToday.add(nextTrack.id)
+                    scope.launch(Dispatchers.IO) {
+                        try {
+                            recommendationHistoryDao.markRecommended(listOf(nextTrack.id), today)
+                        } catch (_: Exception) {}
+                    }
+
+                    if (hasRecordedPlayThreshold) {
+                        flushCurrentListeningDuration()
+                        if (cur != null) {
+                            recordTrackCompleted(cur)
+                        }
+                    }
+
+                    currentTrackAccumulatedPlayedMs = 0L
+                    hasRecordedPlayThreshold = false
+                    currentEventId = null
+                    currentTrackingTrack = nextTrack
+                    lastTrackingTimestamp = System.currentTimeMillis()
+                    lastDbFlushTimestamp = System.currentTimeMillis()
+
+                    val expectedDurationMs = if (nextTrack.durationSeconds > 0) nextTrack.durationSeconds * 1000L else 0L
+                    listeningEventDispatcher.recordPlayStarted(nextTrack, currentQueueScope.name.lowercase())
+                    val prevIndex = currentState.queueIndex
+                    val newPlayNextCount = if (targetIndex > prevIndex) {
+                        kotlin.math.max(0, currentState.playNextCount - (targetIndex - prevIndex))
+                    } else {
+                        currentState.playNextCount
+                    }
+
+                    _playbackState.update {
+                        it.copy(
+                            currentTrack = nextTrack,
+                            queueIndex = targetIndex,
+                            currentPositionMs = 0L,
+                            durationMs = expectedDurationMs,
+                            isPlaying = true,
+                            isBuffering = false,
+                            playNextCount = newPlayNextCount
+                        )
+                    }
+                    updateCurrentTrackFavoriteState(nextTrack)
+
+                    savePlaybackState(nextTrack, queue, targetIndex, 0L, expectedDurationMs)
+
+                    // Prune played items from ExoPlayer so current item is index 0
+                    mediaController?.let { ctrl ->
+                        if (ctrl.currentMediaItemIndex > 0) {
+                            try {
+                                ctrl.removeMediaItems(0, ctrl.currentMediaItemIndex)
+                            } catch (_: Exception) {}
+                        }
+                    }
+
+                    // Replenish dynamic queue if running low
+                    val remainingUpcoming = queue.size - 1 - targetIndex
+                    if (remainingUpcoming < 20) {
+                        if (currentQueueScope == QueueScope.OPEN) {
+                            triggerAutoplayGeneration(nextTrack, isReseed = false)
+                        } else if (currentQueueScope == QueueScope.ARTIST_ONLY && !scopeArtistName.isNullOrBlank()) {
+                            triggerArtistAutoplayGeneration(nextTrack, scopeArtistName!!)
+                        }
+                    }
+
+                    // Preload next upcoming track into ExoPlayer
+                    preloadNextTrack(targetIndex, queue)
+                }
+            }
+
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                val curTrack = _playbackState.value.currentTrack
+                val schemeHost = try {
+                    val uri = mediaController?.currentMediaItem?.localConfiguration?.uri
+                    if (uri != null) "${uri.scheme}://${uri.host}" else "unknown"
+                } catch (_: Exception) { "unknown" }
+
+                Log.e("SieloPlayer", "Player Error on trackId=${curTrack?.id} (host=$schemeHost): ${error.errorCodeName} - ${error.message}")
+                _playbackState.update { it.copy(isBuffering = false, isPlaying = false) }
+                stopProgressTracking()
+                flushCurrentListeningDuration()
+
+                if (curTrack != null && !retryAttemptedForCurrentTrack) {
+                    retryAttemptedForCurrentTrack = true
+                    Log.i("SieloPlayer", "Retrying trackId=${curTrack.id} once with fresh stream URL resolution...")
+                    playTrack(curTrack, _playbackState.value.queue, seekToMs = _playbackState.value.currentPositionMs, autoPlay = true)
+                } else {
+                    retryAttemptedForCurrentTrack = false
+                }
+            }
+        })
+    }
+
+    private var playbackGeneration: Long = 0L
+    private var retryAttemptedForCurrentTrack = false
+
+    fun playTrack(
+        track: SieloTrack,
+        queue: List<SieloTrack> = listOf(track),
+        seekToMs: Long = 0L,
+        autoPlay: Boolean = true,
+        resetScope: Boolean = true
+    ) {
+        if (resetScope && currentQueueScope != QueueScope.LISTEN_TOGETHER) {
+            currentQueueScope = QueueScope.OPEN
+            scopeArtistName = null
+        }
+
+        val isCached = OfflineCacheManager.isCached(context, track.id)
+        if (!com.sielo.music.core.network.NetworkHelper.isOnline(context) && !isCached) {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                android.widget.Toast.makeText(
+                    context,
+                    "No internet connection. This song is not cached for offline replay.",
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+            }
+            return
+        }
+
+        val generation = ++playbackGeneration
+        currentlyLoadingTrackId = track.id
+
+        scope.launch {
+            // Pause previous playback immediately so old audio stops,
+            // but DO NOT clear media items or stop player yet to prevent the notification tab from vanishing!
+            val ctrl = mediaController ?: getController()
+            if (ctrl != null) {
+                try {
+                    ctrl.pause()
+                } catch (_: Exception) {}
+            }
+
+            if (generation != playbackGeneration) {
+                Log.d("SieloPlayer", "Playback request $generation superseded by $playbackGeneration before stream resolution.")
+                return@launch
+            }
+
+            // Flush previous tracking
+            flushCurrentListeningDuration()
+            currentTrackAccumulatedPlayedMs = 0L
+            lastTrackingTimestamp = System.currentTimeMillis()
+            lastDbFlushTimestamp = System.currentTimeMillis()
+
+            val isResumingCurrent = (track.id == _playbackState.value.currentTrack?.id)
+            val effectiveSeekToMs = if (seekToMs > 0L) {
+                seekToMs
+            } else if (isResumingCurrent && !autoPlay && _playbackState.value.currentPositionMs > 0L) {
+                _playbackState.value.currentPositionMs
+            } else {
+                0L
+            }
+
+            val today = java.time.LocalDate.now(java.time.ZoneId.systemDefault()).toString()
+            songsPlayedToday.add(track.id)
+            scope.launch(Dispatchers.IO) {
+                try {
+                    recommendationHistoryDao.markRecommended(listOf(track.id), today)
+                } catch (_: Exception) {}
+            }
+
+            val currentQueue = _playbackState.value.queue
+            val prevIndex = _playbackState.value.queueIndex
+            val isSameQueue = currentQueue.size == queue.size && currentQueue.zip(queue).all { it.first.id == it.second.id }
+
+            val originalIdx = queue.indexOf(track).coerceAtLeast(0)
+            originalQueue = queue
+            val activeQueue = if (currentQueueScope == QueueScope.LISTEN_TOGETHER) {
+                queue
+            } else if (resetScope && currentQueueScope == QueueScope.OPEN) {
+                listOf(track)
+            } else if (isSameQueue) {
+                // Keep the exact same queue order — never re-shuffle upcoming tracks
+                queue
+            } else if (_playbackState.value.isShuffle && queue.size > 1) {
+                val pastTracks = queue.take(originalIdx)
+                val playNextCount = _playbackState.value.playNextCount.coerceAtLeast(0)
+                val playNextStart = (originalIdx + 1).coerceAtMost(queue.size)
+                val playNextEnd = (originalIdx + 1 + playNextCount).coerceAtMost(queue.size)
+                val playNextTracks = queue.subList(playNextStart, playNextEnd)
+                val dynamicTracks = queue.drop(playNextEnd).shuffled()
+                pastTracks + listOf(track) + playNextTracks + dynamicTracks
+            } else {
+                queue
+            }
+            val index = activeQueue.indexOf(track).coerceAtLeast(0)
+            val expectedDurationMs = if (track.durationSeconds > 0) track.durationSeconds * 1000L else 0L
+
+            val newPlayNextCount = if (!isSameQueue) 0 else {
+                if (index > prevIndex) {
+                    kotlin.math.max(0, _playbackState.value.playNextCount - (index - prevIndex))
+                } else {
+                    _playbackState.value.playNextCount
+                }
+            }
+
+            // Immediately set currentTrack to the target new track so UI updates instantly
+            _playbackState.update {
+                it.copy(
+                    currentTrack = track,
+                    queue = activeQueue,
+                    queueIndex = index,
+                    currentPositionMs = effectiveSeekToMs,
+                    durationMs = expectedDurationMs,
+                    isBuffering = true,
+                    isPlaying = autoPlay,
+                    playNextCount = newPlayNextCount
+                )
+            }
+            updateCurrentTrackFavoriteState(track)
+
+            // Save durable metadata only (NEVER save temporary CDN URLs)
+            savePlaybackState(track, activeQueue, index, effectiveSeekToMs, expectedDurationMs)
+
+            // Track autoplay session state & trigger background queue generation
+            val isKnownAutoplayTrack = autoplaySession.isTrackInGeneratedQueue(track.id)
+            if (isKnownAutoplayTrack) {
+                autoplaySession.onTrackPlaying(track)
+            }
+
+            if (currentQueueScope == QueueScope.OPEN) {
+                val shouldReseed = resetScope || !isKnownAutoplayTrack || (activeQueue.size <= 1 || autoplaySession.currentSeed.value?.id != track.id)
+                val remainingUpcoming = activeQueue.size - 1 - index
+                if (shouldReseed || remainingUpcoming < 20) {
+                    triggerAutoplayGeneration(track, isReseed = shouldReseed)
+                }
+            } else if (currentQueueScope == QueueScope.ARTIST_ONLY && !scopeArtistName.isNullOrBlank()) {
+                val remainingUpcoming = activeQueue.size - 1 - index
+                if (remainingUpcoming < 20) {
+                    triggerArtistAutoplayGeneration(track, scopeArtistName!!)
+                }
+            }
+
+            if (hasRecordedPlayThreshold) {
+                flushCurrentListeningDuration()
+            }
+            currentTrackAccumulatedPlayedMs = 0L
+            hasRecordedPlayThreshold = false
+            currentEventId = null
+            currentTrackingTrack = track
+            lastTrackingTimestamp = System.currentTimeMillis()
+            lastDbFlushTimestamp = System.currentTimeMillis()
+
+            Log.d("SieloPlayer", "Stream resolution started: trackId=${track.id}, title='${track.title}', generation=$generation")
+
+            // Check offline cache first for instant, network-free playback
+            val localOfflineUri = OfflineCacheManager.getLocalTrackUri(context, track.id)
+            val streamUrlDeferred = async(Dispatchers.IO) {
+                if (localOfflineUri != null) {
+                    Log.d("SieloPlayer", "Using offline cached audio for trackId=${track.id}: $localOfflineUri")
+                    localOfflineUri
+                } else {
+                    try {
+                        innerTubeClient.getStreamUrl(track.id, track.title, track.artist)
+                    } catch (e: Exception) {
+                        Log.w("SieloPlayer", "Failed stream resolution (device may be offline): ${e.message}")
+                        null
+                    }
+                }
+            }
+            val artworkBytesDeferred = async(Dispatchers.IO) {
+                fetchArtworkBytes(track.thumbnailUrl, track.id)
+            }
+
+            val remoteUrl = streamUrlDeferred.await()
+            val artworkBytes = artworkBytesDeferred.await()
+
+            if (generation != playbackGeneration) {
+                Log.d("SieloPlayer", "Stream resolution for generation $generation completed but superseded by $playbackGeneration. Aborting.")
+                return@launch
+            }
+
+            if (!remoteUrl.isNullOrBlank()) {
+                if (!remoteUrl.startsWith("file:")) {
+                    OfflineCacheManager.autoCacheTrack(context, track, remoteUrl)
+                }
+                val schemeHost = try {
+                    val uri = URI(remoteUrl)
+                    "${uri.scheme}://${uri.host}"
+                } catch (_: Exception) { "https://googlevideo.com" }
+
+                Log.d("SieloPlayer", "Stream resolved for ${track.id}: $schemeHost/...")
+
+                val mediaMetadata = MediaMetadata.Builder()
+                    .setTitle(track.title)
+                    .setArtist(track.artist)
+                    .setAlbumTitle(track.album)
+                    .setArtworkUri(track.thumbnailUrl?.toUri())
+                    .apply {
+                        if (artworkBytes != null) {
+                            setArtworkData(artworkBytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+                        }
+                    }
+                    .build()
+
+                val mediaItem = MediaItem.Builder()
+                    .setMediaId(track.id)
+                    .setUri(remoteUrl)
+                    .setMediaMetadata(mediaMetadata)
+                    .build()
+
+                try {
+                    val activeCtrl = mediaController ?: getController()
+                    if (generation != playbackGeneration) {
+                        Log.d("SieloPlayer", "MediaItem built for $generation but request superseded by $playbackGeneration. Aborting.")
+                        return@launch
+                    }
+
+                    if (activeCtrl != null) {
+                        activeCtrl.run {
+                            repeatMode = if (_playbackState.value.isLooping) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+                            if (effectiveSeekToMs > 0L) {
+                                setMediaItem(mediaItem, effectiveSeekToMs)
+                            } else {
+                                setMediaItem(mediaItem, true)
+                            }
+                            prepare()
+                        }
+
+                        if (generation != playbackGeneration) {
+                            Log.d("SieloPlayer", "MediaItem committed for $generation but request superseded by $playbackGeneration. Aborting.")
+                            return@launch
+                        }
+
+                        _playbackState.update {
+                            it.copy(
+                                currentTrack = track,
+                                isBuffering = false,
+                                isPlaying = autoPlay
+                            )
+                        }
+
+                        if (autoPlay) {
+                            activeCtrl.play()
+                            listeningEventDispatcher.recordPlayStarted(track, currentQueueScope.name.lowercase())
+                        } else {
+                            activeCtrl.pause()
+                        }
+
+                        retryAttemptedForCurrentTrack = false
+                        currentlyLoadingTrackId = null
+                        Log.d("SieloPlayer", "MediaItem committed and playback started for trackId=${track.id}, generation=$generation")
+
+                        // Preload the next upcoming track directly into ExoPlayer for seamless gapless playback (<1s gap)
+                        preloadNextTrack(index, activeQueue)
+                    } else {
+                        currentlyLoadingTrackId = null
+                        Log.e("SieloPlayer", "MediaController is null, cannot start playback.")
+                        _playbackState.update { it.copy(isBuffering = false, isPlaying = false) }
+                    }
+                } catch (e: Exception) {
+                    currentlyLoadingTrackId = null
+                    Log.e("SieloPlayer", "Error committing MediaItem: ${e.message}", e)
+                    _playbackState.update { it.copy(isBuffering = false, isPlaying = false) }
+                }
+            } else {
+                currentlyLoadingTrackId = null
+                Log.w("SieloPlayer", "Failed to resolve stream URL for trackId=${track.id}")
+                _playbackState.update { it.copy(isBuffering = false, isPlaying = false) }
+            }
+        }
+    }
+
+    private var preloadJob: Job? = null
+
+    private fun preloadNextTrack(currentIndex: Int, queue: List<SieloTrack>) {
+        preloadJob?.cancel()
+        if (_playbackState.value.isLooping) return
+        if (queue.isEmpty()) return
+        val nextIndex = currentIndex + 1
+        if (nextIndex !in queue.indices) return
+        val nextTrack = queue[nextIndex]
+
+        preloadJob = scope.launch(Dispatchers.IO) {
+            delay(1000L) // Wait briefly for current track to start cleanly
+            if (!isActive) return@launch
+            try {
+                val localOfflineUri = OfflineCacheManager.getLocalTrackUri(context, nextTrack.id)
+                val streamUrl = localOfflineUri ?: try {
+                    innerTubeClient.getStreamUrl(nextTrack.id, nextTrack.title, nextTrack.artist)
+                } catch (_: Exception) { null }
+
+                if (!streamUrl.isNullOrBlank() && isActive) {
+                    if (!streamUrl.startsWith("file:")) {
+                        OfflineCacheManager.autoCacheTrack(context, nextTrack, streamUrl)
+                    }
+                    withContext(Dispatchers.Main) {
+                        val ctrl = mediaController ?: return@withContext
+                        // Ensure player has not moved to another track
+                        if (_playbackState.value.queueIndex != currentIndex) return@withContext
+
+                        val alreadyQueued = (0 until ctrl.mediaItemCount).any { idx ->
+                            ctrl.getMediaItemAt(idx).mediaId == nextTrack.id
+                        }
+                        if (!alreadyQueued) {
+                            val artworkBytes = fetchArtworkBytes(nextTrack.thumbnailUrl, nextTrack.id)
+                            val mediaMetadata = MediaMetadata.Builder()
+                                .setTitle(nextTrack.title)
+                                .setArtist(nextTrack.artist)
+                                .setAlbumTitle(nextTrack.album)
+                                .setArtworkUri(nextTrack.thumbnailUrl?.toUri())
+                                .apply {
+                                    if (artworkBytes != null) {
+                                        setArtworkData(artworkBytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+                                    }
+                                }
+                                .build()
+
+                            val nextMediaItem = MediaItem.Builder()
+                                .setMediaId(nextTrack.id)
+                                .setUri(streamUrl)
+                                .setMediaMetadata(mediaMetadata)
+                                .build()
+
+                            // If player has items beyond current, remove them first
+                            val currentItemIdx = ctrl.currentMediaItemIndex
+                            if (ctrl.mediaItemCount > currentItemIdx + 1) {
+                                ctrl.removeMediaItems(currentItemIdx + 1, ctrl.mediaItemCount)
+                            }
+                            ctrl.addMediaItem(nextMediaItem)
+                            Log.d("SieloPlayer", "Successfully preloaded next track into ExoPlayer: ${nextTrack.title}")
+                        }
+                    }
+                }
+
+                // Prefetch one more track URL in background cache
+                val secondNextIndex = nextIndex + 1
+                if (secondNextIndex in queue.indices && isActive) {
+                    val secondTrack = queue[secondNextIndex]
+                    try {
+                        innerTubeClient.getStreamUrl(secondTrack.id, secondTrack.title, secondTrack.artist)
+                    } catch (_: Exception) {}
+                }
+            } catch (e: Exception) {
+                Log.w("SieloPlayer", "Error preloading next track ${nextTrack.id}: ${e.message}")
+            }
+        }
+    }
+
+    private fun triggerAutoplayGeneration(
+        seedTrack: SieloTrack,
+        isReseed: Boolean,
+        autoPlayFirst: Boolean = false
+    ) {
+        if (!isAutoplayEnabled || currentQueueScope == QueueScope.LISTEN_TOGETHER || currentQueueScope == QueueScope.ALBUM_ONLY) return
+        autoplayJob?.cancel()
+        autoplayJob = scope.launch(Dispatchers.IO) {
+            autoplayMutex.withLock {
+                try {
+                    val today = java.time.LocalDate.now(java.time.ZoneId.systemDefault()).toString()
+                    val startOfDayMs = java.time.LocalDate.now(java.time.ZoneId.systemDefault())
+                        .atStartOfDay(java.time.ZoneId.systemDefault())
+                        .toInstant()
+                        .toEpochMilli()
+                    val playedTodayFromDb = try {
+                        listeningHistoryDao.getSongIdsPlayedSince(startOfDayMs).toSet()
+                    } catch (_: Exception) {
+                        emptySet()
+                    }
+                    val allPlayedToday = (playedTodayFromDb + autoplaySession.getPlayedSongIds() + songsPlayedToday + seedTrack.id).toSet()
+
+                    // Top songs and artists from listening history (past 30 days) to rank queue with similar songs
+                    val thirtyDaysAgoMs = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000L
+                    val topArtistsHistory = try {
+                        listeningHistoryDao.getTopArtistsSnapshot(thirtyDaysAgoMs, limit = 25)
+                    } catch (_: Exception) {
+                        emptyList()
+                    }
+                    val topSongsHistory = try {
+                        listeningHistoryDao.getTopSongsSnapshot(thirtyDaysAgoMs, limit = 60)
+                    } catch (_: Exception) {
+                        emptyList()
+                    }
+                    val historicalPlayedSongIds = topSongsHistory.map { it.songId }.toSet()
+
+                    val artistPlayFrequency = mutableMapOf<String, Int>()
+                    topArtistsHistory.forEach {
+                        val aName = extractPrimaryArtist(it.artistName).lowercase()
+                        artistPlayFrequency[aName] = (artistPlayFrequency[aName] ?: 0) + it.playCount
+                    }
+
+                    val similarToTopArtists = mutableSetOf<String>()
+                    topArtistsHistory.take(10).forEach { topArt ->
+                        val similarList = CuratedArtistClusters.getSimilarArtists(topArt.artistName, seedTrack)
+                        similarList.forEach { sim ->
+                            similarToTopArtists.add(extractPrimaryArtist(sim).lowercase())
+                        }
+                    }
+
+                    val hardExclusions = allPlayedToday + historicalPlayedSongIds
+
+                    val batch = if (isReseed) {
+                        val reseedContext = autoplaySession.startOrReseedSession(seedTrack)
+                        autoplayQueueEngine.generateBatch(
+                            seedSong = reseedContext.seedSong,
+                            excludedSongIds = hardExclusions + reseedContext.excludedSongIds,
+                            reentryCandidates = reseedContext.reentryCandidates
+                        )
+                    } else {
+                        autoplayQueueEngine.generateBatch(
+                            seedSong = seedTrack,
+                            excludedSongIds = hardExclusions,
+                            reentryCandidates = emptyList()
+                        )
+                    }
+
+                    if (batch.isNotEmpty()) {
+                        autoplaySession.appendBatch(batch)
+                        withContext(Dispatchers.Main) {
+                            var trackToAutoPlay: SieloTrack? = null
+                            var newQueueSnapshot: List<SieloTrack> = emptyList()
+                            _playbackState.update { state ->
+                                val existingIds = state.queue.map { it.id }.toSet()
+                                val currentTrack = state.currentTrack ?: seedTrack
+                                val currentTitle = currentTrack.title.trim()
+                                val currentArtist = currentTrack.artist.trim()
+                                val seedTitle = seedTrack.title.trim()
+                                val newTracks = batch.filter { bTrack ->
+                                    bTrack.id !in existingIds &&
+                                    bTrack.id != currentTrack.id &&
+                                    bTrack.id !in penalizedSongIds &&
+                                    bTrack.id !in hardExclusions &&
+                                    !(bTrack.title.trim().equals(currentTitle, ignoreCase = true) &&
+                                      bTrack.artist.trim().equals(currentArtist, ignoreCase = true)) &&
+                                    !isTitleSimilar(bTrack.title, currentTitle) &&
+                                    !isTitleSimilar(bTrack.title, seedTitle)
+                                }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+
+                                // Boost and rank tracks based on similarity to songs/artists the user listens to most frequently
+                                val userTasteSeeds = userTasteSeedsProvider?.invoke()?.map { it.trim().lowercase() } ?: emptyList()
+                                val seedVibe = SongClassifier.detectVibe(seedTrack)
+                                val seedLang = SongClassifier.detectLanguage(seedTrack)
+
+                                val affinitySorted = newTracks.sortedByDescending { bTrack ->
+                                    var boost = 0
+                                    val aKey = extractPrimaryArtist(bTrack.artist).lowercase()
+
+                                    // 1. Direct artist frequency from listening history (songs heard frequently)
+                                    val playFreq = artistPlayFrequency[aKey] ?: 0
+                                    boost += (playFreq * 15).coerceAtMost(150)
+
+                                    // 2. Similarity to user's top played artists (cluster match)
+                                    if (aKey in similarToTopArtists) {
+                                        boost += 45
+                                    }
+
+                                    // 3. Behavioral and in-memory repeat listening
+                                    if (bTrack.id in favoredSongIds) boost += 30
+                                    boost += repeatPlayCount.getOrDefault(bTrack.id, 0) * 20
+                                    boost += favoredArtists.getOrDefault(aKey, 0) * 5
+
+                                    // 4. Taste preferences
+                                    if (userTasteSeeds.any { aKey.contains(it) || it.contains(aKey) }) {
+                                        boost += 40
+                                    }
+
+                                    // 5. Vibe & tone affinity with seed (Strictly disallow clashing tones like hard rap in love songs)
+                                    val bLang = SongClassifier.detectLanguage(bTrack)
+                                    val bVibe = SongClassifier.detectVibe(bTrack)
+                                    if (bLang == seedLang) boost += 20
+                                    if (bVibe == seedVibe) {
+                                        boost += 25
+                                    } else if (SongClassifier.isVibeCompatible(seedVibe, bVibe)) {
+                                        boost += 10
+                                    } else {
+                                        // Hard penalty for incompatible tone (e.g. rap/hiphop or party EDM into soft calm/love songs)
+                                        boost -= 150
+                                    }
+
+                                    boost
+                                }
+
+                                val finalNewTracks = if (state.isShuffle) affinitySorted.shuffled() else affinitySorted
+                                val updatedQueue = if (state.queue.isEmpty()) listOf(seedTrack) + finalNewTracks else state.queue + finalNewTracks
+                                newQueueSnapshot = updatedQueue
+                                if (autoPlayFirst && finalNewTracks.isNotEmpty()) {
+                                    trackToAutoPlay = finalNewTracks.first()
+                                }
+                                savePlaybackState(
+                                    state.currentTrack,
+                                    updatedQueue,
+                                    state.queueIndex,
+                                    state.currentPositionMs,
+                                    state.durationMs
+                                )
+                                state.copy(queue = updatedQueue)
+                            }
+
+                            if (trackToAutoPlay != null) {
+                                playTrack(trackToAutoPlay!!, newQueueSnapshot, resetScope = false)
+                            } else {
+                                val state = _playbackState.value
+                                preloadNextTrack(state.queueIndex, state.queue)
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("SieloAudio", "Error in triggerAutoplayGeneration: ${e.message}", e)
+                }
+            }
+        }
+    }
+
+    private fun triggerArtistAutoplayGeneration(
+        seedTrack: SieloTrack,
+        artistName: String,
+        autoPlayFirst: Boolean = false
+    ) {
+        autoplayJob?.cancel()
+        autoplayJob = scope.launch(Dispatchers.IO) {
+            autoplayMutex.withLock {
+                try {
+                    val currentQueue = _playbackState.value.queue
+                    val existingIds = currentQueue.map { it.id }.toSet()
+                    val existingKeys = currentQueue.map { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }.toSet()
+
+                    val startOfDayMs = java.time.LocalDate.now(java.time.ZoneId.systemDefault())
+                        .atStartOfDay(java.time.ZoneId.systemDefault())
+                        .toInstant()
+                        .toEpochMilli()
+                    val playedTodayFromDb = try {
+                        listeningHistoryDao.getSongIdsPlayedSince(startOfDayMs).toSet()
+                    } catch (_: Exception) {
+                        emptySet()
+                    }
+                    val allPlayedToday = (playedTodayFromDb + autoplaySession.getPlayedSongIds() + songsPlayedToday + seedTrack.id).toSet()
+
+                    val artistDetails = try {
+                        innerTubeClient.getArtistDetails(artistName)
+                    } catch (_: Exception) { null }
+
+                    val candidates = mutableListOf<SieloTrack>()
+                    if (artistDetails != null) {
+                        candidates.addAll(artistDetails.topSongs)
+                        artistDetails.pastAlbums.forEach { candidates.addAll(it.tracks) }
+                        artistDetails.singles.forEach { candidates.addAll(it.tracks) }
+                    }
+                    if (candidates.size < 15) {
+                        val searchResults = try {
+                            innerTubeClient.search(artistName)
+                        } catch (_: Exception) { emptyList() }
+                        candidates.addAll(searchResults)
+                    }
+
+                    val normalizedArtist = extractPrimaryArtist(artistName).lowercase()
+                    val filteredArtistTracks = candidates.filter { bTrack ->
+                        val bArtist = extractPrimaryArtist(bTrack.artist).lowercase()
+                        val isArtistMatch = bArtist.contains(normalizedArtist) ||
+                                normalizedArtist.contains(bArtist) ||
+                                bTrack.artist.contains(artistName, ignoreCase = true)
+                        isArtistMatch &&
+                            bTrack.id !in existingIds &&
+                            bTrack.id !in penalizedSongIds &&
+                            bTrack.id !in allPlayedToday &&
+                            "${bTrack.title.trim().lowercase()}|${bTrack.artist.trim().lowercase()}" !in existingKeys
+                    }.distinctBy { it.id }
+                     .distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+
+                    var trackToAutoPlay: SieloTrack? = null
+                    var newQueueSnapshot: List<SieloTrack> = currentQueue
+
+                    if (filteredArtistTracks.isNotEmpty()) {
+                        val finalNewTracks = if (_playbackState.value.isShuffle) filteredArtistTracks.shuffled() else filteredArtistTracks
+                        val updatedQueue = if (currentQueue.isEmpty()) listOf(seedTrack) + finalNewTracks else currentQueue + finalNewTracks
+                        newQueueSnapshot = updatedQueue
+                        if (autoPlayFirst) {
+                            trackToAutoPlay = finalNewTracks.first()
+                        }
+                        _playbackState.update { state ->
+                            savePlaybackState(
+                                state.currentTrack,
+                                updatedQueue,
+                                state.queueIndex,
+                                state.currentPositionMs,
+                                state.durationMs
+                            )
+                            state.copy(queue = updatedQueue)
+                        }
+                    } else if (autoPlayFirst && currentQueue.isNotEmpty()) {
+                        trackToAutoPlay = currentQueue.first()
+                    }
+
+                    if (trackToAutoPlay != null) {
+                        playTrack(trackToAutoPlay!!, newQueueSnapshot, resetScope = false)
+                    } else {
+                        val state = _playbackState.value
+                        preloadNextTrack(state.queueIndex, state.queue)
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("SieloAudio", "Error in triggerArtistAutoplayGeneration: ${e.message}", e)
+                }
+            }
+        }
+    }
+
+    private fun extractPrimaryArtist(rawArtist: String): String {
+        if (rawArtist.isBlank()) return "Unknown Artist"
+        val cleaned = rawArtist.split(Regex("(?i)\\s*(?:,|&|\\bfeat\\.?\\b|\\bft\\.?\\b|/|;|\\bx\\b|\\bwith\\b)\\s*")).firstOrNull()?.trim()
+        return if (!cleaned.isNullOrBlank()) cleaned else rawArtist.trim()
+    }
+
+    private fun recordPlayThresholdReached(track: SieloTrack) {
+        val today = java.time.LocalDate.now(java.time.ZoneId.systemDefault()).toString()
+        songsPlayedToday.add(track.id)
+        if (isPrivateListeningEnabled) {
+            currentEventId = null
+            return
+        }
+        listeningEventDispatcher.recordProgressCheckpoint(
+            track = track,
+            positionMs = currentTrackAccumulatedPlayedMs,
+            source = currentQueueScope.name.lowercase()
+        )
+        scope.launch(Dispatchers.IO) {
+            try {
+                recommendationHistoryDao.markRecommended(listOf(track.id), today)
+                val primaryArtist = extractPrimaryArtist(track.artist)
+                onTrackPlayedTasteListener?.invoke(primaryArtist, track.album)
+                val expectedDurationMs = if (track.durationSeconds > 0) track.durationSeconds * 1000L else 0L
+                val eventId = listeningHistoryDao.insertEvent(
+                    ListeningEventEntity(
+                        songId = track.id,
+                        songTitle = track.title,
+                        artistName = primaryArtist,
+                        albumName = track.album,
+                        thumbnailUrl = track.thumbnailUrl,
+                        durationPlayedMs = currentTrackAccumulatedPlayedMs,
+                        songDurationMs = expectedDurationMs
+                    )
+                )
+                currentEventId = eventId
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    private fun recordTrackCompleted(track: SieloTrack) {
+        if (isPrivateListeningEnabled) return
+        favoredSongIds.add(track.id)
+        val primaryArtist = extractPrimaryArtist(track.artist)
+        if (primaryArtist.isNotBlank()) {
+            val currentFav = favoredArtists.getOrDefault(primaryArtist.lowercase(), 0)
+            favoredArtists[primaryArtist.lowercase()] = currentFav + 1
+        }
+        val count = repeatPlayCount.getOrDefault(track.id, 0)
+        repeatPlayCount[track.id] = count + 1
+        listeningEventDispatcher.recordPlayCompleted(
+            track = track,
+            durationMs = currentTrackAccumulatedPlayedMs,
+            source = currentQueueScope.name.lowercase()
+        )
+    }
+
+    private fun getPlayThresholdMs(track: SieloTrack? = currentTrackingTrack ?: _playbackState.value.currentTrack): Long {
+        val mediaDur = mediaController?.duration?.takeIf { it > 0L } ?: _playbackState.value.durationMs.takeIf { it > 0L }
+        val trackDur = track?.durationSeconds?.takeIf { it > 0 }?.toLong()?.times(1000L)
+        val expectedDur = mediaDur ?: trackDur ?: 0L
+        return if (expectedDur > 0L) {
+            (expectedDur * 0.15f).toLong().coerceAtLeast(5_000L)
+        } else {
+            20_000L
+        }
+    }
+
+    private fun flushListeningDurationForEvent(eventId: Long?, durationMs: Long) {
+        if (isPrivateListeningEnabled || eventId == null || eventId <= 0L) return
+        if (durationMs >= 35_000L) {
+            val cur = _playbackState.value.currentTrack
+            if (cur != null) {
+                favoredSongIds.add(cur.id)
+                val primaryArtist = extractPrimaryArtist(cur.artist)
+                if (primaryArtist.isNotBlank()) {
+                    val currentFav = favoredArtists.getOrDefault(primaryArtist.lowercase(), 0)
+                    favoredArtists[primaryArtist.lowercase()] = currentFav + 1
+                }
+            }
+        }
+        val thresholdMs = getPlayThresholdMs()
+        if (durationMs >= thresholdMs) {
+            scope.launch(Dispatchers.IO) {
+                try {
+                    listeningHistoryDao.updateDurationPlayed(eventId, durationMs)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
+    private fun handleLoopIterationCompleted(reportedDurationMs: Long = 0L) {
+        val now = System.currentTimeMillis()
+        if (now - lastLoopCompletionTimestamp < 2000L) return
+        lastLoopCompletionTimestamp = now
+
+        val cur = _playbackState.value.currentTrack
+        Log.i("SieloPlayer", "Loop iteration completed for: ${cur?.title} (accumulated=${currentTrackAccumulatedPlayedMs}ms)")
+
+        if (hasRecordedPlayThreshold) {
+            val dur = if (reportedDurationMs > 0L) reportedDurationMs else (cur?.durationSeconds?.takeIf { it > 0 }?.times(1000L) ?: 0L)
+            val effectiveDuration = if (dur > 0L && currentTrackAccumulatedPlayedMs > dur * 0.75f) {
+                dur
+            } else {
+                currentTrackAccumulatedPlayedMs
+            }
+            flushListeningDurationForEvent(currentEventId, effectiveDuration)
+            if (cur != null) {
+                recordTrackCompleted(cur)
+            }
+        }
+
+        currentTrackAccumulatedPlayedMs = 0L
+        hasRecordedPlayThreshold = false
+        currentEventId = null
+        lastTrackingTimestamp = now
+        lastDbFlushTimestamp = now
+        _playbackState.update { it.copy(currentPositionMs = 0L) }
+    }
+
+    private fun flushCurrentListeningDuration() {
+        if (isPrivateListeningEnabled || !hasRecordedPlayThreshold) return
+        val eventId = currentEventId ?: return
+        val durationMs = currentTrackAccumulatedPlayedMs
+        flushListeningDurationForEvent(eventId, durationMs)
+    }
+
+    fun togglePlayPause() {
+        val ctrl = mediaController
+        val currentTrack = _playbackState.value.currentTrack
+        if (ctrl != null && ctrl.currentMediaItem != null && ctrl.currentMediaItem?.mediaId == currentTrack?.id) {
+            if (ctrl.isPlaying) {
+                ctrl.pause()
+                savePositionOnly(ctrl.currentPosition, ctrl.duration.coerceAtLeast(0L))
+            } else {
+                ctrl.play()
+            }
+        } else if (currentTrack != null) {
+            playTrack(currentTrack, _playbackState.value.queue, seekToMs = _playbackState.value.currentPositionMs)
+        }
+    }
+
+    fun play() {
+        val ctrl = mediaController
+        val currentTrack = _playbackState.value.currentTrack
+        if (ctrl != null && ctrl.currentMediaItem != null && ctrl.currentMediaItem?.mediaId == currentTrack?.id) {
+            if (!ctrl.isPlaying) {
+                ctrl.play()
+            }
+        } else if (currentTrack != null) {
+            playTrack(currentTrack, _playbackState.value.queue, seekToMs = _playbackState.value.currentPositionMs, autoPlay = true)
+        }
+    }
+
+    fun pause() {
+        val ctrl = mediaController
+        if (ctrl != null) {
+            if (ctrl.isPlaying) {
+                ctrl.pause()
+                savePositionOnly(ctrl.currentPosition, ctrl.duration.coerceAtLeast(0L))
+            }
+        }
+    }
+
+    fun toggleMute() {
+        val currentlyMuted = _playbackState.value.isMuted
+        val newMuted = !currentlyMuted
+        mediaController?.let {
+            if (newMuted) {
+                it.volume = 0f
+            } else {
+                it.volume = 1f
+            }
+            _playbackState.update { s -> s.copy(isMuted = newMuted) }
+        }
+    }
+
+    fun seekTo(positionMs: Long) {
+        lastUserSeekTimestamp = System.currentTimeMillis()
+        val ctrl = mediaController
+        if (ctrl != null && ctrl.currentMediaItem != null) {
+            ctrl.seekTo(positionMs)
+            _playbackState.update { it.copy(currentPositionMs = positionMs) }
+            savePositionOnly(positionMs, ctrl.duration.coerceAtLeast(0L))
+        } else {
+            _playbackState.update { it.copy(currentPositionMs = positionMs) }
+        }
+    }
+
+    fun setPlaybackSpeed(speed: Float) {
+        try {
+            mediaController?.setPlaybackSpeed(speed)
+        } catch (_: Exception) {}
+    }
+
+    fun skipNext() {
+        if (onSkipNextListener?.invoke() == true) {
+            return
+        }
+        val currentState = _playbackState.value
+        val current = currentState.currentTrack
+        val playedMs = currentTrackAccumulatedPlayedMs
+
+        // Immediately pause active playback
+        try {
+            mediaController?.pause()
+        } catch (_: Exception) {}
+
+        if (current != null) {
+            listeningEventDispatcher.recordSkipped(
+                track = current,
+                positionMs = playedMs,
+                source = currentQueueScope.name.lowercase()
+            )
+        }
+
+        // Behavioral analysis on the song: Did user quickly skip this song?
+        if (current != null && playedMs < 25_000L) {
+            // Track skipped in less than 25 seconds -> penalize this specific song only (never the artist)
+            penalizedSongIds.add(current.id)
+            // Real-time dynamic queue adaptation: prune only this song from upcoming queue, preserving other songs by the artist
+            pruneUpcomingQueue()
+        }
+
+        val updatedState = _playbackState.value
+        val queue = updatedState.queue
+        if (queue.isEmpty()) return
+
+        var nextIndex = updatedState.queueIndex + 1
+        val curTrack = updatedState.currentTrack
+        while (nextIndex in queue.indices && curTrack != null) {
+            val candidate = queue[nextIndex]
+            val isSame = candidate.id == curTrack.id ||
+                (candidate.title.trim().equals(curTrack.title.trim(), ignoreCase = true) &&
+                 candidate.artist.trim().equals(curTrack.artist.trim(), ignoreCase = true)) ||
+                candidate.id in penalizedSongIds
+            if (isSame) {
+                nextIndex++
+            } else {
+                break
+            }
+        }
+        if (nextIndex in queue.indices) {
+            val candidate = queue[nextIndex]
+            val ctrl = mediaController
+            val currentItemIdx = ctrl?.currentMediaItemIndex ?: -1
+            if (ctrl != null && currentItemIdx >= 0 && ctrl.mediaItemCount > currentItemIdx + 1 && ctrl.getMediaItemAt(currentItemIdx + 1).mediaId == candidate.id) {
+                // Next track is already preloaded in ExoPlayer! Seek to next media item for instantaneous transition (<1s gap)
+                ctrl.seekToNextMediaItem()
+                ctrl.play()
+            } else {
+                try {
+                    ctrl?.pause()
+                } catch (_: Exception) {}
+                playTrack(candidate, queue, resetScope = false)
+            }
+        } else {
+            if (currentQueueScope == QueueScope.ALBUM_ONLY) {
+                // Loop album queue to first track
+                if (queue.isNotEmpty()) {
+                    playTrack(queue.first(), queue, resetScope = false)
+                }
+            } else if (currentQueueScope == QueueScope.ARTIST_ONLY && !scopeArtistName.isNullOrBlank()) {
+                if (curTrack != null) {
+                    triggerArtistAutoplayGeneration(curTrack, scopeArtistName!!, autoPlayFirst = true)
+                } else if (queue.isNotEmpty()) {
+                    playTrack(queue.first(), queue, resetScope = false)
+                }
+            } else if (currentQueueScope == QueueScope.LISTEN_TOGETHER) {
+                if (queue.isNotEmpty()) {
+                    playTrack(queue.first(), queue, resetScope = false)
+                }
+            } else {
+                if (curTrack != null) {
+                    triggerAutoplayGeneration(curTrack, isReseed = false, autoPlayFirst = true)
+                } else if (queue.isNotEmpty()) {
+                    playTrack(queue.first(), queue, resetScope = false)
+                }
+            }
+        }
+    }
+
+    private fun pruneUpcomingQueue() {
+        if (currentQueueScope == QueueScope.LISTEN_TOGETHER) return
+        _playbackState.update { state ->
+            val currentIndex = state.queueIndex
+            if (currentIndex !in state.queue.indices) return@update state
+
+            val pastAndCurrent = state.queue.take(currentIndex + 1)
+            val upcoming = state.queue.drop(currentIndex + 1)
+
+            // Prune only the penalized song itself, preserving other songs by the same artist
+            val filteredUpcoming = upcoming.filterNot { candidate ->
+                candidate.id in penalizedSongIds
+            }
+
+            val newQueue = pastAndCurrent + filteredUpcoming
+            state.copy(queue = newQueue)
+        }
+    }
+
+    fun skipPrevious() {
+        if (onSkipPreviousListener?.invoke() == true) {
+            return
+        }
+        val currentState = _playbackState.value
+        val currentPosition = mediaController?.currentPosition ?: currentState.currentPositionMs
+
+        // Stop audio immediately
+        try {
+            mediaController?.pause()
+        } catch (_: Exception) {}
+
+        // If song has played for more than 3 seconds, restart it from 0:00
+        if (currentPosition > 3000L) {
+            seekTo(0L)
+            play()
+            return
+        }
+
+        val cur = currentState.currentTrack
+        if (cur != null) {
+            listeningEventDispatcher.recordSkipped(
+                track = cur,
+                positionMs = currentPosition,
+                source = currentQueueScope.name.lowercase()
+            )
+        }
+
+        val prevIndex = currentState.queueIndex - 1
+        if (prevIndex in currentState.queue.indices) {
+            playTrack(currentState.queue[prevIndex], currentState.queue, resetScope = false)
+        } else if (currentState.queue.isNotEmpty()) {
+            playTrack(currentState.queue.first(), currentState.queue, seekToMs = 0L, resetScope = false)
+        }
+    }
+
+    fun appendToQueue(tracks: List<SieloTrack>) {
+        if (tracks.isEmpty()) return
+        scope.launch {
+            val currentState = _playbackState.value
+            if (currentState.currentTrack == null || currentState.queue.isEmpty()) {
+                playTrack(tracks.first(), tracks)
+            } else {
+                val existingIds = currentState.queue.map { it.id }.toSet()
+                val currentTrack = currentState.currentTrack
+                val currentTitle = currentTrack?.title?.trim()
+                val currentArtist = currentTrack?.artist?.trim()
+                val newTracks = tracks.filter { bTrack ->
+                    bTrack.id !in existingIds &&
+                    (currentTrack == null || bTrack.id != currentTrack.id) &&
+                    !(currentTitle != null && currentArtist != null &&
+                      bTrack.title.trim().equals(currentTitle, ignoreCase = true) &&
+                      bTrack.artist.trim().equals(currentArtist, ignoreCase = true)) &&
+                    (currentTitle == null || !isTitleSimilar(bTrack.title, currentTitle))
+                }.distinctBy { "${it.title.trim().lowercase()}|${it.artist.trim().lowercase()}" }
+                if (newTracks.isEmpty()) return@launch
+                val updatedQueue = currentState.queue + newTracks
+                _playbackState.update { it.copy(queue = updatedQueue) }
+                savePlaybackState(
+                    currentState.currentTrack,
+                    updatedQueue,
+                    currentState.queueIndex,
+                    currentState.currentPositionMs,
+                    currentState.durationMs
+                )
+            }
+        }
+    }
+
+    fun appendToQueue(track: SieloTrack) {
+        appendToQueue(listOf(track))
+    }
+
+    fun playNext(track: SieloTrack) {
+        scope.launch {
+            val currentState = _playbackState.value
+            if (currentState.currentTrack == null || currentState.queue.isEmpty()) {
+                playTrack(track, listOf(track))
+            } else {
+                val queue = currentState.queue
+                val currentTrack = currentState.currentTrack
+                val currentIdx = if (currentTrack != null) {
+                    queue.indexOfFirst { it.id == currentTrack.id }.takeIf { it >= 0 } ?: currentState.queueIndex
+                } else {
+                    currentState.queueIndex
+                }
+                val newQueue = queue.toMutableList()
+                val insertIdx = (currentIdx + 1 + currentState.playNextCount).coerceAtMost(newQueue.size)
+
+                // If this track was already further down in upcoming queue, remove that subsequent duplicate
+                val subsequentIndex = newQueue.indices.firstOrNull { it >= insertIdx && newQueue[it].id == track.id }
+                if (subsequentIndex != null) {
+                    newQueue.removeAt(subsequentIndex)
+                }
+
+                newQueue.add(insertIdx, track)
+
+                // Also keep originalQueue in sync so disabling shuffle does not discard playNext tracks
+                originalQueue?.let { orig ->
+                    val origMutable = orig.toMutableList()
+                    val origIdx = if (currentTrack != null) orig.indexOfFirst { it.id == currentTrack.id }.takeIf { it >= 0 } ?: currentIdx else currentIdx
+                    val origInsertIdx = (origIdx + 1 + currentState.playNextCount).coerceIn(0, origMutable.size)
+                    val origSubsequentIndex = origMutable.indices.firstOrNull { it >= origInsertIdx && origMutable[it].id == track.id }
+                    if (origSubsequentIndex != null) {
+                        origMutable.removeAt(origSubsequentIndex)
+                    }
+                    origMutable.add(origInsertIdx, track)
+                    originalQueue = origMutable
+                }
+
+                val newPlayNextCount = currentState.playNextCount + 1
+                _playbackState.update { it.copy(queue = newQueue, queueIndex = currentIdx, playNextCount = newPlayNextCount) }
+                savePlaybackState(
+                    currentTrack,
+                    newQueue,
+                    currentIdx,
+                    currentState.currentPositionMs,
+                    currentState.durationMs
+                )
+
+                // Evict any previously preloaded upcoming track from ExoPlayer so the newly added Play Next track is prepared
+                withContext(Dispatchers.Main) {
+                    mediaController?.let { ctrl ->
+                        val currentItemIdx = ctrl.currentMediaItemIndex
+                        if (ctrl.mediaItemCount > currentItemIdx + 1) {
+                            try {
+                                ctrl.removeMediaItems(currentItemIdx + 1, ctrl.mediaItemCount)
+                            } catch (_: Exception) {}
+                        }
+                    }
+                }
+                preloadNextTrack(currentIdx, newQueue)
+            }
+        }
+    }
+
+    fun removeTrackFromQueue(track: SieloTrack) {
+        scope.launch {
+            val currentState = _playbackState.value
+            val currentQueue = currentState.queue
+            val currentIdx = currentState.queueIndex
+
+            // Prioritize finding in upcoming tracks first, else anywhere except currentTrack
+            val removeIdx = currentQueue.indices.firstOrNull { it > currentIdx && currentQueue[it].id == track.id }
+                ?: currentQueue.indices.firstOrNull { it != currentIdx && currentQueue[it].id == track.id }
+                ?: return@launch
+
+            val newQueue = currentQueue.toMutableList().apply { removeAt(removeIdx) }
+            val newIndex = if (removeIdx < currentIdx) (currentIdx - 1).coerceAtLeast(0) else currentIdx
+            
+            val newPlayNextCount = if (removeIdx > currentIdx && removeIdx <= currentIdx + currentState.playNextCount) {
+                kotlin.math.max(0, currentState.playNextCount - 1)
+            } else {
+                currentState.playNextCount
+            }
+
+            _playbackState.update { it.copy(queue = newQueue, queueIndex = newIndex, playNextCount = newPlayNextCount) }
+            savePlaybackState(
+                currentState.currentTrack,
+                newQueue,
+                newIndex,
+                currentState.currentPositionMs,
+                currentState.durationMs
+            )
+        }
+    }
+
+    fun moveUpcomingTrack(fromUpcomingIndex: Int, toUpcomingIndex: Int) {
+        scope.launch {
+            val currentState = _playbackState.value
+            val currentQueue = currentState.queue.toMutableList()
+            val currentIdx = currentState.queueIndex
+            val fromQueueIdx = currentIdx + 1 + fromUpcomingIndex
+            val toQueueIdx = currentIdx + 1 + toUpcomingIndex
+
+            if (fromQueueIdx in (currentIdx + 1)..currentQueue.lastIndex &&
+                toQueueIdx in (currentIdx + 1)..currentQueue.lastIndex &&
+                fromQueueIdx != toQueueIdx
+            ) {
+                val movedItem = currentQueue.removeAt(fromQueueIdx)
+                currentQueue.add(toQueueIdx, movedItem)
+                _playbackState.update { it.copy(queue = currentQueue) }
+                savePlaybackState(
+                    currentState.currentTrack,
+                    currentQueue,
+                    currentState.queueIndex,
+                    currentState.currentPositionMs,
+                    currentState.durationMs
+                )
+            }
+        }
+    }
+
+    fun reorderUpcomingTracks(newUpcomingTracks: List<SieloTrack>) {
+        scope.launch {
+            val currentState = _playbackState.value
+            val currentQueue = currentState.queue
+            val currentIdx = currentState.queueIndex
+            val pastAndCurrent = currentQueue.take(currentIdx + 1)
+            val updatedQueue = pastAndCurrent + newUpcomingTracks
+            _playbackState.update { it.copy(queue = updatedQueue) }
+            savePlaybackState(
+                currentState.currentTrack,
+                updatedQueue,
+                currentState.queueIndex,
+                currentState.currentPositionMs,
+                currentState.durationMs
+            )
+        }
+    }
+
+    private fun isTitleSimilar(cand: String, base: String): Boolean {
+        val cClean = cand.lowercase()
+            .replace(Regex("""[\(\[\{].*?[\)\]\}]"""), "")
+            .replace(Regex("""[^\w\s]"""), " ")
+            .trim()
+        val bClean = base.lowercase()
+            .replace(Regex("""[\(\[\{].*?[\)\]\}]"""), "")
+            .replace(Regex("""[^\w\s]"""), " ")
+            .trim()
+        if (cClean.isBlank() || bClean.isBlank()) return false
+        if (cClean == bClean) return true
+        if (bClean.length >= 3 && cClean.contains(bClean)) return true
+        if (cClean.length >= 3 && bClean.contains(cClean)) return true
+        return false
+    }
+
+    fun triggerAutoplayIfLow(seedTrack: SieloTrack? = _playbackState.value.currentTrack) {
+        val targetTrack = seedTrack ?: return
+        val state = _playbackState.value
+        val remainingUpcoming = state.queue.size - 1 - state.queueIndex
+        if (remainingUpcoming < 20) {
+            triggerAutoplayGeneration(targetTrack, isReseed = false)
+        }
+    }
+
+    fun toggleShuffle() {
+        val currentState = _playbackState.value
+        val newShuffle = !currentState.isShuffle
+        if (newShuffle) {
+            originalQueue = currentState.queue
+            val queue = currentState.queue
+            if (queue.isEmpty()) return
+            val currentTrack = currentState.currentTrack
+            val currentIdx = if (currentTrack != null) {
+                queue.indexOfFirst { it.id == currentTrack.id }.takeIf { it >= 0 } ?: currentState.queueIndex
+            } else {
+                currentState.queueIndex
+            }
+            if (currentIdx in queue.indices) {
+                val trackAtIdx = queue[currentIdx]
+                val pastTracks = queue.take(currentIdx)
+                val playNextCount = currentState.playNextCount.coerceAtLeast(0)
+                val playNextStart = (currentIdx + 1).coerceAtMost(queue.size)
+                val playNextEnd = (currentIdx + 1 + playNextCount).coerceAtMost(queue.size)
+                val playNextTracks = queue.subList(playNextStart, playNextEnd)
+                val dynamicTracks = queue.drop(playNextEnd).shuffled()
+                val shuffledQueue = pastTracks + listOf(trackAtIdx) + playNextTracks + dynamicTracks
+                val newIdx = pastTracks.size
+                _playbackState.update { it.copy(isShuffle = true, queue = shuffledQueue, queueIndex = newIdx) }
+                savePlaybackState(trackAtIdx, shuffledQueue, newIdx, currentState.currentPositionMs, currentState.durationMs)
+            }
+        } else {
+            val currentTrack = currentState.currentTrack
+            val restoredQueue = originalQueue ?: currentState.queue
+            val newIdx = if (currentTrack != null) {
+                restoredQueue.indexOfFirst { it.id == currentTrack.id }.takeIf { it >= 0 } ?: currentState.queueIndex
+            } else currentState.queueIndex
+            _playbackState.update { it.copy(isShuffle = false, queue = restoredQueue, queueIndex = newIdx) }
+            savePlaybackState(currentTrack, restoredQueue, newIdx, currentState.currentPositionMs, currentState.durationMs)
+        }
+    }
+
+    fun shuffleQueue() {
+        val currentState = _playbackState.value
+        val queue = currentState.queue
+        if (queue.isEmpty()) return
+        val currentTrack = currentState.currentTrack
+        val currentIdx = if (currentTrack != null) {
+            queue.indexOfFirst { it.id == currentTrack.id }.takeIf { it >= 0 } ?: currentState.queueIndex
+        } else {
+            currentState.queueIndex
+        }
+        if (currentIdx in queue.indices) {
+            val trackAtIdx = queue[currentIdx]
+            val pastTracks = queue.take(currentIdx)
+            val playNextCount = currentState.playNextCount.coerceAtLeast(0)
+            val playNextStart = (currentIdx + 1).coerceAtMost(queue.size)
+            val playNextEnd = (currentIdx + 1 + playNextCount).coerceAtMost(queue.size)
+            val playNextTracks = queue.subList(playNextStart, playNextEnd)
+            val playNextIds = playNextTracks.map { it.id }.toSet()
+            val currentTitleClean = trackAtIdx.title.trim()
+            val currentArtistClean = trackAtIdx.artist.trim()
+            val dynamicTracks = queue.drop(playNextEnd).filter { qTrack ->
+                qTrack.id != trackAtIdx.id &&
+                qTrack.id !in playNextIds &&
+                !(qTrack.title.trim().equals(currentTitleClean, ignoreCase = true) &&
+                  qTrack.artist.trim().equals(currentArtistClean, ignoreCase = true))
+            }.shuffled()
+            val shuffledQueue = pastTracks + listOf(trackAtIdx) + playNextTracks + dynamicTracks
+            val newIdx = pastTracks.size
+            originalQueue = shuffledQueue
+            _playbackState.update { it.copy(queue = shuffledQueue, queueIndex = newIdx, playNextCount = playNextCount) }
+            savePlaybackState(trackAtIdx, shuffledQueue, newIdx, currentState.currentPositionMs, currentState.durationMs)
+        }
+    }
+
+    fun toggleLoop() {
+        val newLooping = !_playbackState.value.isLooping
+        _playbackState.update { it.copy(isLooping = newLooping) }
+        mediaController?.let { ctrl ->
+            ctrl.repeatMode = if (newLooping) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+            if (newLooping) {
+                preloadJob?.cancel()
+                val currentIdx = ctrl.currentMediaItemIndex
+                if (ctrl.mediaItemCount > currentIdx + 1) {
+                    try {
+                        ctrl.removeMediaItems(currentIdx + 1, ctrl.mediaItemCount)
+                    } catch (_: Exception) {}
+                }
+            } else {
+                preloadNextTrack(_playbackState.value.queueIndex, _playbackState.value.queue)
+            }
+        }
+        MusicPlaybackService.updateNotificationLayoutListener?.invoke()
+    }
+
+    private fun startProgressTracking() {
+        progressTrackerJob?.cancel()
+        lastTrackingTimestamp = System.currentTimeMillis()
+        progressTrackerJob = scope.launch {
+            while (isActive) {
+                val isPlaying = mediaController?.isPlaying == true
+                val current = mediaController?.currentPosition ?: 0L
+                val dur = mediaController?.duration?.coerceAtLeast(0L) ?: 0L
+                _playbackState.update { it.copy(currentPositionMs = current, durationMs = dur) }
+
+                if (isPlaying) {
+                    val now = System.currentTimeMillis()
+
+                    val effectiveDur = if (dur > 0L) dur else (_playbackState.value.currentTrack?.durationSeconds?.takeIf { it > 0 }?.times(1000L) ?: 0L)
+                    if (_playbackState.value.isLooping && effectiveDur > 5_000L) {
+                        val isUserSeek = (now - lastUserSeekTimestamp) < 2000L
+                        if (!isUserSeek && lastPollPositionMs > (effectiveDur * 0.70f) && current < (effectiveDur * 0.25f)) {
+                            handleLoopIterationCompleted(effectiveDur)
+                        }
+                    }
+                    lastPollPositionMs = current
+
+                    val delta = (now - lastTrackingTimestamp).coerceIn(0L, 1000L)
+                    currentTrackAccumulatedPlayedMs += delta
+                    lastTrackingTimestamp = now
+
+                    // Count as 1 play only when 15% of the song has been played
+                    val thresholdMs = getPlayThresholdMs()
+                    if (!hasRecordedPlayThreshold && currentTrackAccumulatedPlayedMs >= thresholdMs) {
+                        hasRecordedPlayThreshold = true
+                        val trackToRecord = currentTrackingTrack ?: _playbackState.value.currentTrack
+                        if (trackToRecord != null) {
+                            recordPlayThresholdReached(trackToRecord)
+                        }
+                    }
+
+                    // Periodic DB & Prefs sync every 2 seconds
+                    if (now - lastDbFlushTimestamp >= 2000L) {
+                        lastDbFlushTimestamp = now
+                        if (hasRecordedPlayThreshold) {
+                            flushCurrentListeningDuration()
+                        }
+                        savePositionOnly(current, dur)
+                    }
+                } else {
+                    lastTrackingTimestamp = System.currentTimeMillis()
+                }
+
+                delay(50)
+            }
+        }
+    }
+
+    private fun stopProgressTracking() {
+        progressTrackerJob?.cancel()
+    }
+
+    fun resetPlayer() {
+        stopProgressTracking()
+        try {
+            mediaController?.stop()
+            mediaController?.clearMediaItems()
+        } catch (_: Exception) {}
+        _playbackState.value = PlaybackState()
+        updateCurrentTrackFavoriteState(null)
+        penalizedSongIds.clear()
+        favoredSongIds.clear()
+        favoredArtists.clear()
+        repeatPlayCount.clear()
+        originalQueue = null
+        currentEventId = null
+        currentTrackAccumulatedPlayedMs = 0L
+        hasRecordedPlayThreshold = false
+        currentTrackingTrack = null
+        lastPollPositionMs = 0L
+        lastLoopCompletionTimestamp = 0L
+        lastUserSeekTimestamp = 0L
+        try {
+            val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            prefs.edit().clear().apply()
+        } catch (_: Exception) {}
+    }
+}

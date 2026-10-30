@@ -100,6 +100,35 @@ class ListenTogetherManager @Inject constructor(
 
     init {
         checkPendingRejoinSession()
+        playerManager.onTrackEndedListener = {
+            val state = _roomState.value
+            if (state != null) {
+                if (state.isHost) {
+                    performSkipNext()
+                }
+                true
+            } else {
+                false
+            }
+        }
+        playerManager.onSkipNextListener = {
+            val state = _roomState.value
+            if (state != null) {
+                skipTrack()
+                true
+            } else {
+                false
+            }
+        }
+        playerManager.onSkipPreviousListener = {
+            val state = _roomState.value
+            if (state != null) {
+                skipPrevious()
+                true
+            } else {
+                false
+            }
+        }
         // Observe local player to sync to room if local user is host
         scope.launch {
             playerManager.playbackState.collect { playback ->
@@ -556,6 +585,10 @@ class ListenTogetherManager @Inject constructor(
         )
 
         _roomState.value = newState
+        playerManager.setQueueScope(
+            com.sielo.music.core.audio.QueueScope.LISTEN_TOGETHER,
+            initialQueue.map { it.track }
+        )
         saveActiveSession(roomId, roomKey, host.name, isHost = true)
         connectToBroker(roomId, roomKey, host)
         return newState
@@ -607,6 +640,10 @@ class ListenTogetherManager @Inject constructor(
         )
 
         _roomState.value = newState
+        playerManager.setQueueScope(
+            com.sielo.music.core.audio.QueueScope.LISTEN_TOGETHER,
+            initialQueue.map { it.track }
+        )
         saveActiveSession(cleanedRoomId, resolvedKey, host.name, isHost = true)
         connectToBroker(cleanedRoomId, resolvedKey, host)
         return newState
@@ -646,6 +683,7 @@ class ListenTogetherManager @Inject constructor(
         )
 
         _roomState.value = newState
+        playerManager.setQueueScope(com.sielo.music.core.audio.QueueScope.LISTEN_TOGETHER)
         saveActiveSession(cleanedRoomId, resolvedKey, participant.name, isHost = false)
         startHostPresenceWatchdog()
         connectToBroker(newState.roomId, newState.roomKey, participant)
@@ -1052,6 +1090,7 @@ class ListenTogetherManager @Inject constructor(
                             connectionStatus = "Connected (Host online)"
                         )
                     }
+                    playerManager.updateListenTogetherQueue(event.queue.map { it.track })
 
                     // Align local player
                     applySyncedPlayback(event.currentTrack, syncedPos, event.isPlaying, event.timestampEpochMs.takeIf { event.isPlaying && it > System.currentTimeMillis() })
@@ -1068,6 +1107,9 @@ class ListenTogetherManager @Inject constructor(
                         val removeId = event.track?.id ?: return
                         _roomState.update { current ->
                             current?.copy(queue = current.queue.filter { it.track.id != removeId })
+                        }
+                        _roomState.value?.queue?.map { it.track }?.let {
+                            playerManager.updateListenTogetherQueue(it)
                         }
                     }
                     return
@@ -1140,29 +1182,98 @@ class ListenTogetherManager @Inject constructor(
             }
 
             is RoomEvent.AddToQueue -> {
-                val alreadyExists = state.queue.any { it.track.id == event.item.track.id }
-                if (!alreadyExists) {
-                    val newQueue = state.queue + event.item
-                    val systemMsg = RoomChatMessage(
-                        id = UUID.randomUUID().toString(),
-                        senderId = "system",
-                        senderName = "System",
-                        text = "${event.item.addedBy} added \"${event.item.track.title}\" to the queue",
-                        timestamp = System.currentTimeMillis(),
-                        isSystemEvent = true
-                    )
-                    val user = event.item.addedBy
-                    val curCount = state.addedSongsCount[user] ?: 0
-                    val updatedCountMap = state.addedSongsCount + (user to (curCount + 1))
-                    _roomState.update { it?.copy(
-                        queue = newQueue,
-                        chatMessages = it.chatMessages + systemMsg,
-                        addedSongsCount = updatedCountMap
-                    ) }
-                    // If no track currently playing, start playing this track
-                    if (state.currentTrack == null) {
-                        playRoomTrack(event.item.track)
+                _roomState.update { current ->
+                    if (current == null) null
+                    else {
+                        val curQueue = current.queue
+                        if (curQueue.none { it.track.id == event.item.track.id }) {
+                            val newQueue = curQueue + event.item
+                            val systemMsg = RoomChatMessage(
+                                id = UUID.randomUUID().toString(),
+                                senderId = "system",
+                                senderName = "System",
+                                text = "${event.item.addedBy} added \"${event.item.track.title}\" to the queue",
+                                timestamp = System.currentTimeMillis(),
+                                isSystemEvent = true
+                            )
+                            val user = event.item.addedBy
+                            val curCount = current.addedSongsCount[user] ?: 0
+                            val updatedCountMap = current.addedSongsCount + (user to (curCount + 1))
+                            current.copy(
+                                queue = newQueue,
+                                chatMessages = current.chatMessages + systemMsg,
+                                addedSongsCount = updatedCountMap
+                            )
+                        } else current
                     }
+                }
+                val freshState = _roomState.value
+                freshState?.queue?.map { it.track }?.let {
+                    playerManager.updateListenTogetherQueue(it)
+                }
+                if (freshState?.isHost == true) {
+                    if (freshState.currentTrack == null) {
+                        playRoomTrack(event.item.track)
+                    } else {
+                        broadcastSyncState()
+                    }
+                }
+            }
+
+            is RoomEvent.AddBatchToQueue -> {
+                _roomState.update { current ->
+                    if (current == null) null
+                    else {
+                        val curQueue = current.queue
+                        val curIds = curQueue.map { it.track.id }.toSet()
+                        val newUniqueItems = event.items.filter { it.track.id !in curIds }
+                        if (newUniqueItems.isNotEmpty()) {
+                            val newQueue = curQueue + newUniqueItems
+                            val systemMsg = RoomChatMessage(
+                                id = UUID.randomUUID().toString(),
+                                senderId = "system",
+                                senderName = "System",
+                                text = "${event.addedBy} added ${newUniqueItems.size} songs from \"${event.playlistTitle}\"",
+                                timestamp = System.currentTimeMillis(),
+                                isSystemEvent = true
+                            )
+                            val user = event.addedBy
+                            val curCount = current.addedSongsCount[user] ?: 0
+                            val updatedCountMap = current.addedSongsCount + (user to (curCount + newUniqueItems.size))
+                            current.copy(
+                                queue = newQueue,
+                                chatMessages = current.chatMessages + systemMsg,
+                                addedSongsCount = updatedCountMap
+                            )
+                        } else current
+                    }
+                }
+                val freshState = _roomState.value
+                freshState?.queue?.map { it.track }?.let {
+                    playerManager.updateListenTogetherQueue(it)
+                }
+                if (freshState?.isHost == true) {
+                    if (freshState.currentTrack == null && event.items.isNotEmpty()) {
+                        playRoomTrack(event.items.first().track)
+                    } else {
+                        broadcastSyncState()
+                    }
+                }
+            }
+
+            is RoomEvent.ReorderQueue -> {
+                _roomState.update { current ->
+                    if (current == null) null
+                    else {
+                        current.copy(queue = event.reorderedQueue)
+                    }
+                }
+                val freshState = _roomState.value
+                freshState?.queue?.map { it.track }?.let {
+                    playerManager.updateListenTogetherQueue(it)
+                }
+                if (freshState?.isHost == true) {
+                    broadcastSyncState()
                 }
             }
 
@@ -1304,7 +1415,7 @@ class ListenTogetherManager @Inject constructor(
                         playerManager.pause()
                     }
 
-                    playerManager.playTrack(
+                    playerManager.playListenTogether(
                         track = track,
                         queue = _roomState.value?.queue?.map { it.track } ?: listOf(track),
                         seekToMs = positionMs,
@@ -1338,8 +1449,14 @@ class ListenTogetherManager @Inject constructor(
                         }
                     }
                 } else {
+                    val currentPos = currentLocal.currentPositionMs
+                    val duration = currentLocal.durationMs
+                    val isLocalAtEnd = duration > 0L && currentPos >= (duration - 1200L)
+                    if (isLocalAtEnd && !isPlaying) {
+                        return@launch
+                    }
+
                     if (!currentLocal.isBuffering && playerManager.currentlyLoadingTrackId == null) {
-                        val currentPos = currentLocal.currentPositionMs
                         val absDiff = abs(positionMs - currentPos)
 
                         if (absDiff >= HARD_SYNC_DRIFT_MS && scheduledStart == null) {
@@ -1355,7 +1472,7 @@ class ListenTogetherManager @Inject constructor(
                         if (playerManager.playbackState.value.currentTrack?.id == track.id) {
                             playerManager.play()
                         }
-                    } else if (isPlaying && !currentLocal.isPlaying) {
+                    } else if (isPlaying && !currentLocal.isPlaying && !isLocalAtEnd) {
                         playerManager.play()
                     } else if (!isPlaying && currentLocal.isPlaying) {
                         playerManager.pause()
@@ -1408,6 +1525,102 @@ class ListenTogetherManager @Inject constructor(
     /**
      * Adds track to room queue and broadcasts to all listeners.
      */
+    fun reorderRoomQueue(fromIndex: Int, toIndex: Int) {
+        val state = _roomState.value ?: return
+        val currentQueue = state.queue.toMutableList()
+        if (fromIndex !in currentQueue.indices || toIndex !in currentQueue.indices || fromIndex == toIndex) return
+
+        val item = currentQueue.removeAt(fromIndex)
+        currentQueue.add(toIndex, item)
+        val newQueue = currentQueue.toList()
+
+        _roomState.update { it?.copy(queue = newQueue) }
+        playerManager.updateListenTogetherQueue(newQueue.map { it.track })
+
+        val sequence = if (state.isHost) ++hostSequenceNumber else 0L
+        val reorderEvent = RoomEvent.ReorderQueue(
+            fromIndex = fromIndex,
+            toIndex = toIndex,
+            reorderedQueue = newQueue,
+            triggeredBy = state.localUserName,
+            sequenceNumber = sequence
+        )
+        broadcastEvent(reorderEvent)
+
+        if (state.isHost) {
+            broadcastSyncState()
+        }
+    }
+
+    fun addPlaylistToRoom(playlistTitle: String, tracks: List<SieloTrack>): Int {
+        val state = _roomState.value ?: return 0
+        if (tracks.isEmpty()) return 0
+
+        val existingIds = state.queue.map { it.track.id }.toSet()
+        val eligibleTracks = tracks.filter { it.title.isNotBlank() && it.id !in existingIds }
+        if (eligibleTracks.isEmpty()) return 0
+
+        val now = System.currentTimeMillis()
+        val newItems = eligibleTracks.mapIndexed { idx, track ->
+            RoomQueueItem(
+                track = track,
+                addedBy = state.localUserName,
+                addedAt = now + idx,
+                id = "${track.id}_${now}_$idx"
+            )
+        }
+
+        _roomState.update { current ->
+            if (current == null) null
+            else {
+                val updatedQueue = current.queue + newItems
+                val systemMsg = RoomChatMessage(
+                    id = UUID.randomUUID().toString(),
+                    senderId = "system",
+                    senderName = "System",
+                    text = "${current.localUserName} added ${newItems.size} songs from \"$playlistTitle\"",
+                    timestamp = now,
+                    isSystemEvent = true
+                )
+                val user = current.localUserName
+                val curCount = current.addedSongsCount[user] ?: 0
+                val updatedCountMap = current.addedSongsCount + (user to (curCount + newItems.size))
+                current.copy(
+                    queue = updatedQueue,
+                    chatMessages = current.chatMessages + systemMsg,
+                    addedSongsCount = updatedCountMap
+                )
+            }
+        }
+
+        val updatedQueueTracks = _roomState.value?.queue?.map { it.track } ?: emptyList()
+        playerManager.updateListenTogetherQueue(updatedQueueTracks)
+
+        val batchEvent = RoomEvent.AddBatchToQueue(
+            items = newItems,
+            playlistTitle = playlistTitle,
+            addedBy = state.localUserName
+        )
+        broadcastEvent(batchEvent)
+
+        val freshState = _roomState.value
+        if (freshState?.currentTrack == null) {
+            if (freshState?.isHost == true) {
+                playRoomTrack(newItems.first().track)
+            } else {
+                sendMemberPlaybackRequest(
+                    action = "PLAY",
+                    track = newItems.first().track,
+                    positionMs = 0L
+                )
+            }
+        } else if (freshState.isHost) {
+            broadcastSyncState()
+        }
+
+        return newItems.size
+    }
+
     fun addTrackToRoom(track: SieloTrack) {
         val state = _roomState.value ?: return
         val item = RoomQueueItem(
@@ -1415,28 +1628,49 @@ class ListenTogetherManager @Inject constructor(
             addedBy = state.localUserName,
             addedAt = System.currentTimeMillis()
         )
-        val newQueue = state.queue + item
-        val systemMsg = RoomChatMessage(
-            id = UUID.randomUUID().toString(),
-            senderId = "system",
-            senderName = "System",
-            text = "${state.localUserName} added \"${track.title}\" to the queue",
-            timestamp = System.currentTimeMillis(),
-            isSystemEvent = true
-        )
-        val user = state.localUserName
-        val curCount = state.addedSongsCount[user] ?: 0
-        val updatedCountMap = state.addedSongsCount + (user to (curCount + 1))
-        _roomState.update { it?.copy(
-            queue = newQueue,
-            chatMessages = it.chatMessages + systemMsg,
-            addedSongsCount = updatedCountMap
-        ) }
+        _roomState.update { current ->
+            if (current == null) null
+            else {
+                val curQueue = current.queue
+                if (curQueue.none { it.track.id == track.id }) {
+                    val newQueue = curQueue + item
+                    val systemMsg = RoomChatMessage(
+                        id = UUID.randomUUID().toString(),
+                        senderId = "system",
+                        senderName = "System",
+                        text = "${current.localUserName} added \"${track.title}\" to the queue",
+                        timestamp = System.currentTimeMillis(),
+                        isSystemEvent = true
+                    )
+                    val user = current.localUserName
+                    val curCount = current.addedSongsCount[user] ?: 0
+                    val updatedCountMap = current.addedSongsCount + (user to (curCount + 1))
+                    current.copy(
+                        queue = newQueue,
+                        chatMessages = current.chatMessages + systemMsg,
+                        addedSongsCount = updatedCountMap
+                    )
+                } else current
+            }
+        }
         broadcastEvent(RoomEvent.AddToQueue(item))
+        _roomState.value?.queue?.map { it.track }?.let {
+            playerManager.updateListenTogetherQueue(it)
+        }
 
-        // If nothing is playing, play immediately
-        if (state.currentTrack == null) {
-            playRoomTrack(track)
+        val freshState = _roomState.value
+        if (freshState?.currentTrack == null) {
+            if (freshState?.isHost == true) {
+                playRoomTrack(track)
+            } else {
+                sendMemberPlaybackRequest(
+                    action = "PLAY",
+                    track = track,
+                    positionMs = 0L
+                )
+            }
+        } else if (freshState.isHost) {
+            broadcastSyncState()
         }
     }
 
@@ -1575,9 +1809,11 @@ class ListenTogetherManager @Inject constructor(
         val exists = state.queue.any { it.track.id == track.id }
         if (!exists) return
 
+        val newQueue = state.queue.filter { it.track.id != track.id }
         _roomState.update { current ->
-            current?.copy(queue = current.queue.filter { it.track.id != track.id })
+            current?.copy(queue = newQueue)
         }
+        playerManager.updateListenTogetherQueue(newQueue.map { it.track })
 
         broadcastPlayback(
             action = "REMOVE_QUEUE",
@@ -1647,17 +1883,7 @@ class ListenTogetherManager @Inject constructor(
             return
         }
 
-        val currentQueue = state.queue
-        if (currentQueue.isEmpty()) return
-
-        val currentIndex = currentQueue.indexOfFirst { it.track.id == state.currentTrack?.id }
-        val nextTrack = if (currentIndex >= 0 && currentIndex + 1 in currentQueue.indices) {
-            currentQueue[currentIndex + 1].track
-        } else {
-            currentQueue.firstOrNull()?.track
-        } ?: return
-
-        playRoomTrack(nextTrack)
+        performSkipNext()
     }
 
     private fun performSkipNext() {
@@ -1667,9 +1893,12 @@ class ListenTogetherManager @Inject constructor(
         val currentQueue = state.queue
         if (currentQueue.isEmpty()) return
 
-        val currentIndex = currentQueue.indexOfFirst { it.track.id == state.currentTrack?.id }
+        val activeId = state.currentTrack?.id ?: playerManager.playbackState.value.currentTrack?.id
+        val currentIndex = currentQueue.indexOfFirst { it.track.id == activeId }
         val nextTrack = if (currentIndex >= 0 && currentIndex + 1 in currentQueue.indices) {
             currentQueue[currentIndex + 1].track
+        } else if (currentIndex < 0) {
+            currentQueue.firstOrNull()?.track
         } else {
             currentQueue.firstOrNull()?.track
         } ?: return
@@ -1701,6 +1930,8 @@ class ListenTogetherManager @Inject constructor(
             )
         }
 
+        val queueSnapshot = _roomState.value?.queue?.map { it.track } ?: listOf(track)
+
         scope.launch(Dispatchers.Main) {
             isSuppressingLocalPlayerSync = true
             suppressHostPlaybackObserverUntilMs = System.currentTimeMillis() + 12000L
@@ -1712,9 +1943,9 @@ class ListenTogetherManager @Inject constructor(
                     playerManager.pause()
                 }
 
-                playerManager.playTrack(
+                playerManager.playListenTogether(
                     track = track,
-                    queue = state.queue.map { it.track },
+                    queue = queueSnapshot,
                     seekToMs = 0L,
                     autoPlay = false
                 )
@@ -1830,14 +2061,15 @@ class ListenTogetherManager @Inject constructor(
             )
         }
 
+        val freshState = _roomState.value ?: state
         val event = RoomEvent.SyncState(
-            hostId = state.localUserId,
+            hostId = freshState.localUserId,
             currentTrack = currentTrack,
             isPlaying = isPlaying,
             positionMs = positionMs,
             timestampEpochMs = timestamp,
-            queue = state.queue,
-            participants = state.participants,
+            queue = freshState.queue,
+            participants = freshState.participants,
             sequenceNumber = sequence
         )
         broadcastEvent(event)
@@ -1853,7 +2085,7 @@ class ListenTogetherManager @Inject constructor(
                 val jsonString = json.encodeToString(event)
                 val encrypted = RoomCrypto.encrypt(jsonString, roomKey)
                 val qos = when (event) {
-                    is RoomEvent.PlaybackAction, is RoomEvent.SyncState, is RoomEvent.RequestSync -> 1
+                    is RoomEvent.PlaybackAction, is RoomEvent.SyncState, is RoomEvent.RequestSync, is RoomEvent.AddToQueue, is RoomEvent.AddBatchToQueue, is RoomEvent.ReorderQueue, is RoomEvent.SkipTrack -> 1
                     else -> 0
                 }
                 val message = MqttMessage(encrypted.toByteArray(Charsets.UTF_8)).apply { this.qos = qos }
@@ -1972,12 +2204,19 @@ class ListenTogetherManager @Inject constructor(
         suppressHostPlaybackObserverUntilMs = 0L
         typingTimeoutJobs.values.forEach { it.cancel() }
         typingTimeoutJobs.clear()
+        playerManager.clearListenTogetherScope()
         _roomState.value = null
     }
 
     private fun generateRoomId(): String {
-        val chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-        return (1..6).map { chars.random() }.joinToString("")
+        val letters = "ABCDEFGHJKLMNPQRSTUVWXYZ" // exclude ambiguous 'I', 'O'
+        val digits = "23456789"                  // exclude ambiguous '0', '1'
+        val sb = StringBuilder(6)
+        for (i in 0 until 3) {
+            sb.append(letters.random())
+            sb.append(digits.random())
+        }
+        return sb.toString()
     }
 
     fun getInviteLink(state: ActiveRoomState): String {

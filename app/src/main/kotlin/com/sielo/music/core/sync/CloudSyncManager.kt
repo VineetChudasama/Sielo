@@ -68,9 +68,9 @@ class CloudSyncManager @Inject constructor(
     fun getAppVersionName(): String {
         return try {
             val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
-            pInfo.versionName ?: "11.5.6"
+            pInfo.versionName ?: "11.6.0"
         } catch (_: Exception) {
-            "11.5.6"
+            "11.6.0"
         }
     }
 

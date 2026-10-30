@@ -156,7 +156,8 @@ open class CandidatePoolBuilder @Inject constructor(
                     .filterNot { isTitleTooSimilar(it.songTitle, seedSong.title) }
                     .filter {
                         val trackObj = SieloTrack(it.songId, it.songTitle, it.artistName)
-                        SongClassifier.detectLanguage(trackObj) == seedLanguage
+                        SongClassifier.detectLanguage(trackObj) == seedLanguage &&
+                            SongClassifier.isVibeCompatible(seedVibe, SongClassifier.detectVibe(trackObj))
                     }
 
                 val ineligibleIds = recommendationHistoryDao.getIneligibleSongIds(rawSongs.map { it.songId }, today).toSet()
@@ -306,7 +307,10 @@ open class CandidatePoolBuilder @Inject constructor(
                             .filter { isCleanStudioTrack(it.title, it.artist) }
                             .filterNot { isTitleTooSimilar(it.title, seedSong.title) }
                             .filterNot { isArtistTitleInversion(it.title, it.artist, artistName) }
-                            .filter { SongClassifier.detectLanguage(it) == seedLanguage }
+                            .filter {
+                                SongClassifier.detectLanguage(it) == seedLanguage &&
+                                    SongClassifier.isVibeCompatible(seedVibe, SongClassifier.detectVibe(it))
+                            }
                             .take(3)
                     } catch (_: Exception) {
                         emptyList()

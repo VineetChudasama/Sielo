@@ -225,7 +225,10 @@ fun SearchScreen(
                         },
                         trailingIcon = {
                             if (searchQuery.isNotEmpty()) {
-                                IconButton(onClick = { viewModel.clearSearch() }) {
+                                IconButton(onClick = {
+                                    viewModel.clearSearch()
+                                    try { focusRequester.requestFocus() } catch (_: Exception) {}
+                                }) {
                                     Icon(imageVector = Icons.Default.Clear, contentDescription = "Clear", tint = TextMuted)
                                 }
                             }

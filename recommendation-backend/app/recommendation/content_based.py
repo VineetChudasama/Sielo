@@ -80,6 +80,26 @@ class ContentBasedRecommender:
             if jaccard < 0.9:
                 score += min(0.15, jaccard * 0.25)
 
+
+        # 6. Vibe & Mood Affinity
+        # Detect if one song is soft/romantic and the other is aggressive/party/rap
+        RAP_GENRES = {"rap", "hip-hop", "hiphop", "trap", "drill", "diss"}
+        SOFT_GENRES = {"romantic", "love", "acoustic", "calm", "soothing", "soft", "lofi", "unplugged"}
+        
+        all_a = " ".join([str(track_a.get(k, "")) for k in ["title", "artist", "album", "genre", "vibe"]]).lower()
+        all_b = " ".join([str(track_b.get(k, "")) for k in ["title", "artist", "album", "genre", "vibe"]]).lower()
+        
+        is_a_soft = any(g in all_a for g in SOFT_GENRES)
+        is_b_soft = any(g in all_b for g in SOFT_GENRES)
+        is_a_rap = any(g in all_a for g in RAP_GENRES)
+        is_b_rap = any(g in all_b for g in RAP_GENRES)
+        
+        if (is_a_soft and is_b_rap) or (is_a_rap and is_b_soft):
+            # Clashing tone: penalize heavily so soft love songs do not recommend hard rap
+            score = max(0.0, score - 0.40)
+        elif (is_a_soft and is_b_soft) or (is_a_rap and is_b_rap):
+            score += 0.15
+
         return min(1.0, score)
 
     def find_similar_to_track(

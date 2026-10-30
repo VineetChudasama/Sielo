@@ -20,20 +20,30 @@ object ManualPasteParser {
     }
 
     private val jsonParser by lazy {
-        Json { ignoreUnknownKeys = true }
+        Json { ignoreUnknownKeys = true; isLenient = true }
     }
 
     suspend fun parseAsync(pastedText: String): List<ImportedTrackCandidate> = withContext(Dispatchers.IO) {
         val trimmed = pastedText.trim()
 
-        // 1. Check if input contains a Spotify URL (playlist, album, track)
-        val isSpotifyUrl = trimmed.contains("spotify.com") || trimmed.contains("spotify:") || trimmed.contains("spoti.fi")
-        if (isSpotifyUrl) {
+        // 1. Check for Spotify Blend invite links that cannot be resolved without private user OAuth
+        if ((trimmed.contains("spotify.app.link") || trimmed.contains("/blend/invite")) && !trimmed.contains("/playlist/")) {
+            throw IllegalArgumentException(
+                "This Spotify Blend link is a private invite link. To import this Blend into Sielo, open the playlist in your Spotify app, tap the 3 dots (...) -> Share -> Copy link to playlist (or copy the track list text), and paste it here."
+            )
+        }
+
+        // 2. Check if input contains a single Spotify URL (playlist, album, track)
+        val isSingleSpotifyUrl = (trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.startsWith("spotify:")) &&
+                !trimmed.contains("\n") &&
+                (trimmed.contains("spotify.com") || trimmed.contains("spotify:") || trimmed.contains("spoti.fi"))
+
+        if (isSingleSpotifyUrl) {
             val tracks = fetchSpotifyTracksFromUrl(trimmed)
             if (tracks.isNotEmpty()) return@withContext tracks
         }
 
-        // 2. Multiline / Plain Text fallback parsing
+        // 3. Multiline / Plain Text fallback parsing (handles text lines and multiple track URLs)
         parsePlainText(pastedText)
     }
 
@@ -42,37 +52,76 @@ object ManualPasteParser {
     }
 
     private fun parsePlainText(pastedText: String): List<ImportedTrackCandidate> {
-        return pastedText.lines()
-            .map { it.trim() }
-            .filter { it.isNotEmpty() && !it.startsWith("http://") && !it.startsWith("https://") }
-            .map { line ->
-                val cleanedLine = line.replaceFirst(Regex("^\\d+\\s*[.\\-\\)]\\s*"), "").trim()
-                val parts = cleanedLine.split(Regex("\\s+-\\s+"), limit = 2)
-                if (parts.size == 2) {
-                    ImportedTrackCandidate(
-                        title = parts[0].trim(),
-                        artistGuess = parts[1].trim(),
-                        sourcePlatform = "Spotify_Manual"
-                    )
-                } else {
-                    ImportedTrackCandidate(
-                        title = cleanedLine,
-                        artistGuess = "",
-                        sourcePlatform = "Spotify_Manual"
-                    )
+        val candidates = mutableListOf<ImportedTrackCandidate>()
+        val lines = pastedText.lines().map { it.trim() }.filter { it.isNotEmpty() }
+
+        for (line in lines) {
+            // Check if line is a Spotify track URL
+            if (line.contains("spotify.com/track/") || line.contains("spotify:track:")) {
+                val track = fetchSpotifyOembed(line)
+                if (track != null) {
+                    candidates.add(track)
+                    continue
                 }
             }
-            .filter { it.title.isNotBlank() }
+
+            // Clean leading track numbering: e.g. "1. ", "01 - ", "1) "
+            val cleanedLine = line.replaceFirst(Regex("^\\d+\\s*[.\\-\\)]\\s*"), "").trim()
+            if (cleanedLine.isBlank() || cleanedLine.startsWith("http://") || cleanedLine.startsWith("https://")) {
+                continue
+            }
+
+            // Split by " - " or " by "
+            val hyphenParts = cleanedLine.split(Regex("\\s+-\\s+"), limit = 2)
+            if (hyphenParts.size == 2) {
+                candidates.add(
+                    ImportedTrackCandidate(
+                        title = hyphenParts[0].trim(),
+                        artistGuess = hyphenParts[1].trim(),
+                        sourcePlatform = "Spotify_Manual"
+                    )
+                )
+                continue
+            }
+
+            val byParts = cleanedLine.split(Regex("\\s+by\\s+", RegexOption.IGNORE_CASE), limit = 2)
+            if (byParts.size == 2) {
+                candidates.add(
+                    ImportedTrackCandidate(
+                        title = byParts[0].trim(),
+                        artistGuess = byParts[1].trim(),
+                        sourcePlatform = "Spotify_Manual"
+                    )
+                )
+                continue
+            }
+
+            candidates.add(
+                ImportedTrackCandidate(
+                    title = cleanedLine,
+                    artistGuess = "",
+                    sourcePlatform = "Spotify_Manual"
+                )
+            )
+        }
+
+        return candidates.filter { it.title.isNotBlank() }
     }
 
     private suspend fun fetchSpotifyTracksFromUrl(inputUrl: String): List<ImportedTrackCandidate> = withContext(Dispatchers.IO) {
-        val candidates = mutableListOf<ImportedTrackCandidate>()
-
         val playlistId = extractSpotifyId(inputUrl, "playlist")
         val albumId = extractSpotifyId(inputUrl, "album")
         val trackId = extractSpotifyId(inputUrl, "track")
 
-        // Strategy A: Try Spotify Embed API v1
+        // Strategy A: Complete Spotify Web API pagination (supports 50, 100, 320+ tracks)
+        if (playlistId != null) {
+            val apiTracks = SpotifyPlaylistFetcher.fetchPlaylistTracksPaginated(playlistId)
+            if (!apiTracks.isNullOrEmpty()) {
+                return@withContext apiTracks
+            }
+        }
+
+        // Strategy B: Spotify Embed API v1
         if (playlistId != null) {
             val apiTracks = fetchSpotifyEmbedApi("playlist", playlistId)
             if (apiTracks.isNotEmpty()) return@withContext apiTracks
@@ -84,7 +133,7 @@ object ManualPasteParser {
             if (apiTracks.isNotEmpty()) return@withContext apiTracks
         }
 
-        // Strategy B: Try Spotify Embed Page HTML Parsing
+        // Strategy C: Spotify Embed Page HTML Parsing
         val targetId = playlistId ?: albumId ?: trackId
         val targetType = when {
             playlistId != null -> "playlist"
@@ -97,13 +146,13 @@ object ManualPasteParser {
             if (htmlTracks.isNotEmpty()) return@withContext htmlTracks
         }
 
-        // Strategy C: Spotify oEmbed fallback
+        // Strategy D: Spotify oEmbed fallback
         val oembedTrack = fetchSpotifyOembed(inputUrl)
         if (oembedTrack != null) {
-            candidates.add(oembedTrack)
+            return@withContext listOf(oembedTrack)
         }
 
-        candidates
+        emptyList()
     }
 
     private fun extractSpotifyId(input: String, type: String): String? {
@@ -130,8 +179,8 @@ object ManualPasteParser {
             val candidates = mutableListOf<ImportedTrackCandidate>()
             val element = jsonParser.parseToJsonElement(bodyString)
             extractTracksFromJsonElement(element, candidates)
-            return candidates.distinctBy { "${it.title.lowercase()}_${it.artistGuess.lowercase()}" }
-        } catch (e: Exception) {
+            return candidates
+        } catch (_: Exception) {
             return emptyList()
         }
     }
@@ -148,7 +197,7 @@ object ManualPasteParser {
             val html = response.body?.string() ?: return emptyList()
 
             return parseSpotifyEmbedHtml(html)
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             return emptyList()
         }
     }
@@ -173,7 +222,7 @@ object ManualPasteParser {
                 artistGuess = unescapeUnicode(author),
                 sourcePlatform = "Spotify"
             )
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             return null
         }
     }
@@ -188,10 +237,8 @@ object ManualPasteParser {
             try {
                 val element = jsonParser.parseToJsonElement(jsonText)
                 extractTracksFromJsonElement(element, candidates)
-                if (candidates.isNotEmpty()) return candidates.distinctBy { "${it.title.lowercase()}_${it.artistGuess.lowercase()}" }
-            } catch (e: Exception) {
-                // Continue to next match
-            }
+                if (candidates.isNotEmpty()) return candidates
+            } catch (_: Exception) {}
         }
 
         val trackRegex = Regex("""["']name["']\s*:\s*["']([^"']+)["']\s*,\s*["']artists["']\s*:\s*\[\s*\{[^}]*["']name["']\s*:\s*["']([^"']+)["']""")
@@ -210,7 +257,7 @@ object ManualPasteParser {
             }
         }
 
-        if (candidates.isNotEmpty()) return candidates.distinctBy { "${it.title.lowercase()}_${it.artistGuess.lowercase()}" }
+        if (candidates.isNotEmpty()) return candidates
 
         val titleArtistRegex = Regex("""["']title["']\s*:\s*["']([^"']+)["']\s*,\s*["']subtitle["']\s*:\s*["']([^"']+)["']""")
         val matches2 = titleArtistRegex.findAll(html)
@@ -228,7 +275,7 @@ object ManualPasteParser {
             }
         }
 
-        if (candidates.isNotEmpty()) return candidates.distinctBy { "${it.title.lowercase()}_${it.artistGuess.lowercase()}" }
+        if (candidates.isNotEmpty()) return candidates
 
         val ogTitleRegex = Regex("""<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']""")
         val ogTitleMatch = ogTitleRegex.find(html)?.groupValues?.get(1)
@@ -239,18 +286,41 @@ object ManualPasteParser {
             candidates.add(ImportedTrackCandidate(title = title, artistGuess = artist, sourcePlatform = "Spotify"))
         }
 
-        return candidates.distinctBy { "${it.title.lowercase()}_${it.artistGuess.lowercase()}" }
+        return candidates
     }
 
     private fun extractTracksFromJsonElement(element: JsonElement, outList: MutableList<ImportedTrackCandidate>) {
         when (element) {
             is JsonObject -> {
+                // If entity contains trackList array, parse trackList directly to preserve exact playlist order
+                val trackList = element["trackList"]?.jsonArray
+                if (trackList != null && trackList.isNotEmpty()) {
+                    for (trackItem in trackList) {
+                        if (trackItem is JsonObject) {
+                            val title = trackItem["title"]?.jsonPrimitive?.contentOrNull
+                                ?: trackItem["name"]?.jsonPrimitive?.contentOrNull
+                            val subtitle = trackItem["subtitle"]?.jsonPrimitive?.contentOrNull
+                                ?: trackItem["artist"]?.jsonPrimitive?.contentOrNull
+                                ?: ""
+                            if (!title.isNullOrBlank() && title != "Spotify") {
+                                outList.add(
+                                    ImportedTrackCandidate(
+                                        title = unescapeUnicode(title),
+                                        artistGuess = unescapeUnicode(subtitle),
+                                        sourcePlatform = "Spotify"
+                                    )
+                                )
+                            }
+                        }
+                    }
+                    return
+                }
+
                 val name = element["name"]?.jsonPrimitive?.contentOrNull ?: element["title"]?.jsonPrimitive?.contentOrNull
                 val type = element["type"]?.jsonPrimitive?.contentOrNull
 
                 val isAlbumOrPlaylist = type == "album" || type == "playlist" || element.containsKey("tracks") || element.containsKey("items")
 
-                // An element is a track candidate ONLY if it is specifically a track (NOT an album/playlist container)
                 val isTrack = !name.isNullOrBlank() && !isAlbumOrPlaylist && (type == "track" || element.containsKey("duration_ms") || element.containsKey("track_number"))
 
                 if (isTrack) {

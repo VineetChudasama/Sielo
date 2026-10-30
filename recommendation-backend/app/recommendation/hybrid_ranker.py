@@ -95,6 +95,18 @@ class HybridRanker:
                 score_discovery * w_disc
             )
 
+            # Check Tone Compatibility when seed_track is active
+            if seed_track:
+                RAP_KW = {"rap", "hip-hop", "hiphop", "drill", "trap"}
+                SOFT_KW = {"romantic", "love", "calm", "acoustic", "soothing", "lofi", "soft"}
+                seed_meta = f"{seed_track.get('title', '')} {seed_track.get('artist', '')} {seed_track.get('genre', '')}".lower()
+                cand_meta = f"{track.get('title', '')} {track.get('artist', '')} {track.get('genre', '')}".lower()
+                seed_is_soft = any(k in seed_meta for k in SOFT_KW)
+                cand_is_rap = any(k in cand_meta for k in RAP_KW)
+                if seed_is_soft and cand_is_rap:
+                    # Discard discordant hard rap tracks from soft/love queue
+                    continue
+
             # Determine dominant recommendation reason
             reason = "Recommended for your music taste"
             source = "hybrid"

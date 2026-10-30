@@ -224,7 +224,7 @@ class UserManager @Inject constructor(
                 put("avatar", user.photoUrl)
                 put("provider", user.provider.name)
                 put("status", "Active Now")
-                put("appVersion", "11.5.6")
+                put("appVersion", "11.6.0")
                 put("device", "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim())
                 put("createdAt", user.createdAt)
             }
@@ -464,10 +464,10 @@ class UserManager @Inject constructor(
             persistUser(localProfile, backupToCloud = false)
             _isOnboardingOpen.value = !localProfile.hasCompletedOnboarding
         } else {
-            // Tentative initial profile while restoring; keep onboarding closed until cloud lookup completes
+            // New Google user: open onboarding immediately; if cloud restore finds an existing user with onboarding done, it will close it
             val tentative = createNewUserProfile(name, cleanEmail, photoUrl, AuthProvider.GOOGLE).copy(username = cleanUsername)
             persistUser(tentative, backupToCloud = false)
-            _isOnboardingOpen.value = false
+            _isOnboardingOpen.value = true
         }
 
         // Trigger Firebase Auth credential bridge & cloud restore in background
@@ -550,7 +550,7 @@ class UserManager @Inject constructor(
         val existingJson = prefs.getString("$KEY_ALL_USERS_PREFIX$cleanEmail", null)
         val localProfile = if (!existingJson.isNullOrBlank()) {
             try {
-                json.decodeFromString<UserProfile>(existingJson).copy(hasCompletedOnboarding = true)
+                json.decodeFromString<UserProfile>(existingJson)
             } catch (_: Exception) {
                 null
             }
@@ -636,19 +636,11 @@ class UserManager @Inject constructor(
         val isAccountSwitch = !currentEmail.isNullOrBlank() && currentEmail != cleanEmail
         val oldUserToBackup = if (isAccountSwitch) _currentUser.value else null
 
-        val existingJson = prefs.getString("$KEY_ALL_USERS_PREFIX$cleanEmail", null)
-        val profile = if (!existingJson.isNullOrBlank()) {
-            try {
-                json.decodeFromString<UserProfile>(existingJson).copy(name = cleanName)
-            } catch (_: Exception) {
-                createNewUserProfile(cleanName, cleanEmail, null, AuthProvider.EMAIL_PASSWORD)
-            }
-        } else {
-            createNewUserProfile(cleanName, cleanEmail, null, AuthProvider.EMAIL_PASSWORD)
-        }
-
+        // When explicitly registering a new account, create a fresh profile and open onboarding immediately
+        val profile = createNewUserProfile(cleanName, cleanEmail, null, AuthProvider.EMAIL_PASSWORD)
         persistUser(profile, backupToCloud = false)
         _isAuthDialogOpen.value = false
+        _isOnboardingOpen.value = true
 
         scope.launch {
             if (isAccountSwitch) {
@@ -677,17 +669,18 @@ class UserManager @Inject constructor(
                         favoriteGenres = if (restored.favoriteGenres.isNotEmpty()) restored.favoriteGenres else current.favoriteGenres,
                         artistTasteWeights = if (restored.artistTasteWeights.isNotEmpty()) restored.artistTasteWeights else current.artistTasteWeights,
                         genreTasteWeights = if (restored.genreTasteWeights.isNotEmpty()) restored.genreTasteWeights else current.genreTasteWeights,
-                        hasCompletedOnboarding = true,
+                        hasCompletedOnboarding = restored.hasCompletedOnboarding,
                         createdAt = if (restored.createdAt > 0L) restored.createdAt else current.createdAt
                     )
                     persistUser(merged, backupToCloud = true)
-                    _isOnboardingOpen.value = false
+                    if (restored.hasCompletedOnboarding) {
+                        _isOnboardingOpen.value = false
+                    }
                 } else {
-                    _isOnboardingOpen.value = !profile.hasCompletedOnboarding
                     persistUser(_currentUser.value ?: profile, backupToCloud = true)
                 }
             } catch (e: Exception) {
-                _isOnboardingOpen.value = !profile.hasCompletedOnboarding
+                // Keep onboarding open as set initially
             }
         }
 

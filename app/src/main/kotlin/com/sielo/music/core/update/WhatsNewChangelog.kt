@@ -14,6 +14,18 @@ object WhatsNewChangelog {
      * Keep this map sorted newest-to-oldest so iteration order is correct.
      */
     val entries: Map<String, List<String>> = linkedMapOf(
+        "11.6.0" to listOf(
+            "🪐 Echo: Brand new identity for collaborative listening rooms featuring custom active & inactive celestial emblems and enlarged navigation bar icon",
+            "📋 Strict Echo Room Code Detection: Clipboard join prompt now strictly verifies the authentic room code pattern (letter, number, letter, number, letter, number)",
+            "🔍 Echo Room Search Sheet Upgrades: Search stays open after adding a song, auto-selects query text for instant overwrite, and includes a quick clear button",
+            "📥 Uncapped Spotify Imports: Complete multi-page pagination for massive playlists (100, 320+ songs) all merged into one single playlist with zero duplicates",
+            "🎧 Universal YouTube & YouTube Music Import: Resilient playlist importer supporting modern InnerTube & continuation formats for public playlists",
+            "🔀 Butter-Smooth Drag & Drop Reordering: Eliminated all stutter and lag when reordering songs across Queue, custom playlists, and Echo shared queue",
+            "🔒 Protected Play Next Queue: Manually added 'Play Next' tracks strictly play next and stay locked in sequence even when shuffling the queue",
+            "🎵 Vibe & Tone-Aware Dynamic Autoplay: Autoplay queue matches the acoustic tone, mood, and energy of your currently playing track (e.g. soft acoustic vs energetic hip-hop)",
+            "🔑 Google Account Chooser: Fixed Google Sign-In automatically picking previous cached credentials; now opens the native device account picker prompt",
+            "✨ Harmonic Animated Progress Bars: Tri-tone gradient progress bar with live light-beam shimmer and leading-edge glow for playlist imports and in-app APK downloads"
+        ),
         "11.5.5" to listOf(
             "🔀 Playlist Drag-and-Drop Reorder: Tactile drag handles and smooth animated reordering with instant cloud & Room synchronization in your custom and imported playlists",
             "📥 Transparent Playlist Importer: Added a glowing animated progress bar and a dedicated scrollable report listing any songs that couldn't be resolved during import",

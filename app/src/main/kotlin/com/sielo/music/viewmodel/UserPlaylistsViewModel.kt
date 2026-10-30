@@ -24,6 +24,20 @@ class UserPlaylistsViewModel @Inject constructor(
     private val _selectedPlaylist = MutableStateFlow<UserPlaylist?>(null)
     val selectedPlaylist: StateFlow<UserPlaylist?> = _selectedPlaylist.asStateFlow()
 
+    init {
+        viewModelScope.launch {
+            playlistsRepository.playlists.collect { list ->
+                val current = _selectedPlaylist.value
+                if (current != null) {
+                    val updated = list.find { it.id == current.id }
+                    if (updated != null && updated != current) {
+                        _selectedPlaylist.value = updated
+                    }
+                }
+            }
+        }
+    }
+
     fun createPlaylist(title: String, description: String = "") {
         val created = playlistsRepository.createPlaylist(title, description)
     }
@@ -71,6 +85,14 @@ class UserPlaylistsViewModel @Inject constructor(
                 tracks = current.tracks.filter { it.id != trackId }
             )
         }
+    }
+
+    fun reorderTracks(playlistId: String, newTracks: List<SieloTrack>) {
+        if (playlistId == UserPlaylistsRepository.PLAYLIST_DOWNLOADED_CACHE_ID) return
+        val current = _selectedPlaylist.value ?: return
+        if (current.id != playlistId) return
+        _selectedPlaylist.value = current.copy(tracks = newTracks)
+        playlistsRepository.reorderPlaylistTracks(playlistId, newTracks)
     }
 
     fun moveTrack(playlistId: String, fromIndex: Int, toIndex: Int) {
